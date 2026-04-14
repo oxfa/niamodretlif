@@ -1,0 +1,192 @@
+version: 2
+
+# Defaults inherited by every source unless a source overrides them.
+# One workflow owns one config file. A config file may still contain multiple
+# sources, but emitted artifacts are grouped by the config filename instead of
+# by each source id.
+defaults:
+  fetch:
+    # Network timeout, in seconds, for retrieving source content before the
+    # pipeline gives up on the fetch step.
+    request_timeout: 30.0
+
+  dns:
+    # Enable or disable exact-host DNS lookups.
+    # Valid stage combinations are:
+    # - dns.enabled: false, geo.enabled: false -> RDAP only
+    # - dns.enabled: true,  geo.enabled: false -> RDAP + DNS
+    # - dns.enabled: true,  geo.enabled: true  -> RDAP + DNS + geo
+    # Geo requires DNS, so dns.enabled: false with geo.enabled: true is invalid.
+    enabled: true
+    # Optional custom nameservers for DNS lookups.
+    # Entries must be literal IPv4 or IPv6 resolver addresses.
+    # Leave this empty to use the platform resolver.
+    nameservers: []
+    # Per-query DNS timeout, in seconds.
+    timeout: 5.0
+    # Optional EDNS Client Subnet (ECS) settings.
+    # Set enabled=true and provide a CIDR subnet when querying a resolver
+    # that accepts client-supplied ECS data.
+    # If ECS is enabled and nameservers is empty, or if the configured
+    # nameservers are not in the runtime's verified ECS-capable public-resolver
+    # list, the runtime falls back to Google Public DNS.
+    ecs:
+      enabled: false
+      # Example: 203.0.113.0/24 or 2001:db8::/48
+      subnet: ""
+      # Scope to advertise in the ECS option. Leave at 0 unless you have a
+      # specific resolver-side requirement.
+      scope_prefix_length: 0
+
+  rdap:
+    # Per-request RDAP timeout, in seconds.
+    timeout: 10.0
+    # Lookup mode used for registrable-domain checks.
+    # "authoritative" prefers the canonical registry when available.
+    # "rdap_org" uses rdap.org as a generic fallback.
+    mode: authoritative
+    # RDAP scheduling policy for parsed entries.
+    # "auto" interleaves authoritative RDAP servers when mode=authoritative.
+    # "input_order" preserves the parsed entry order exactly.
+    scheduling: auto
+
+  geo:
+    # Enable geo lookups and evaluate the resolved IPs against the policy
+    # block below. When false, geo data is not requested.
+    enabled: false
+    # Compatibility/readability field. Runtime provider selection is inferred
+    # from the policy below:
+    # - no region rules -> ipinfo_lite
+    # - any region rules -> geojs
+    # Keep this value aligned with the inferred provider for clarity.
+    provider: ipinfo_lite
+    # Per-request timeout, in seconds, for geo lookups.
+    timeout: 5.0
+    # Number of days to keep geo results cached.
+    cache_ttl_days: 7
+    # In GitHub Actions, pass GEO_IPINFO_TOKEN through step-level env for the
+    # country-only path instead of committing a token here.
+    policy:
+      # Enable or disable geo policy filtering after geo lookups succeed.
+      # When false, geo data may still be looked up, but hosts are not
+      # accepted/rejected by include/exclude rules.
+      enabled: false
+      # How many resolved IPs must match for the policy to accept the host.
+      # "all_ips" requires every resolved IP to satisfy the policy.
+      # "any_ip" accepts the host if at least one IP satisfies the policy.
+      match_scope: all_ips
+      # DNS no-IP cases are routed to review before geo runs.
+      # Hosts whose selected geo provider fails, or whose region-aware lookup
+      # lacks a usable region_name, are routed to review.
+      include:
+        # Optional positive-match rules. When this block is non-empty, a host
+        # must match at least one include country/region before it can pass.
+        # When both include and exclude are empty, the policy has no effective
+        # rules and the runtime treats it as skipped.
+        # Country values use uppercase country codes (for example, US, CA).
+        # Region values are matched as exact normalized region names.
+        # Adding any region rule switches runtime lookup to geojs, which uses
+        # conservative internal bulk multi-IP requests for resolved IP sets.
+        # GeoJS-backed region rules must use names such as California, not
+        # ISO-style codes such as US-CA.
+        countries: []
+        # Region examples: California, Ontario.
+        regions: []
+      exclude:
+        # Negative-match rules. Hosts matching exclude are rejected even if
+        # they also matched include.
+        countries: []
+        # Region examples: California, Ontario.
+        regions: []
+
+  output:
+    # Output directory for files written by the pipeline.
+    # Equivalent paths such as output and ./output are treated as the same target.
+    # For a config named config/domain-pipeline.yaml, the runtime writes:
+    # - output/filtered/domain-pipeline.txt
+    # - output/dead/domain-pipeline.txt
+    # - output/review/domain-pipeline.csv
+    # - output/raw/domain-pipeline.jsonl
+    # Keep one directory across enabled sources in the same config.
+    directory: output
+
+cache:
+  # SQLite file used to persist root RDAP, DNS, and geo cache data between runs.
+  cache_file: .tmp/runtime/check-cache.sqlite3
+  classification_ttl_days:
+    # Cache retention, in days, for unregistered registrable-domain RDAP verdicts.
+    rdap_registrable_domain_unregistered: 30
+    # Cache retention, in days, for registered registrable-domain RDAP verdicts.
+    rdap_registrable_domain_registered: 7
+    # Cache retention, in days, for reusable RDAP-unavailable registrable-domain states.
+    rdap_lookup_unavailable: 7
+  # Cache retention, in days, for DNS lookup results.
+  dns_ttl_days: 1
+
+sources:
+  - id: local-default
+    # Unique source identifier used for source-level logging and output rows.
+    # Source ids must be unique within one config file.
+    # Set to false to keep the source in the file but skip it at runtime.
+    enabled: true
+    input:
+      # Input type.
+      # Valid values: file, url
+      type: file
+      # Path or URL to process.
+      # For file inputs, glob patterns such as input/*.txt are expanded.
+      location: input/test.txt
+    # Optional per-source overrides. Omit a section to inherit the matching
+    # value from defaults above.
+    fetch:
+      # Override the default fetch timeout for this source only.
+      # This affects URL inputs only.
+      request_timeout: 30.0
+    dns:
+      # Override DNS enablement, resolver list, or timeout for this source only.
+      # Entries must be literal IPv4 or IPv6 resolver addresses.
+      enabled: true
+      nameservers: []
+      timeout: 5.0
+      ecs:
+        enabled: false
+        subnet: ""
+        scope_prefix_length: 0
+    rdap:
+      # Override RDAP behavior for this source only.
+      timeout: 10.0
+      mode: authoritative
+      scheduling: auto
+    geo:
+      # Source-specific geo settings. Explicit fields override defaults; omit
+      # nested keys to keep inheriting the matching default values.
+      # Geo lookups require dns.enabled=true for the source.
+      enabled: false
+      provider: ipinfo_lite
+      timeout: 5.0
+      cache_ttl_days: 7
+      policy:
+        # Source-specific policy overrides.
+        enabled: false
+        match_scope: all_ips
+        include:
+          countries: []
+          regions: []
+        exclude:
+          countries: []
+          regions: []
+    output:
+      # Optional per-source override. All enabled sources in one config must
+      # still resolve to the same output.directory because outputs are grouped
+      # by the config filename stem, not by source id.
+      #
+      # With directory: output and this file named domain-pipeline.yaml.sample,
+      # the runtime writes:
+      # - output/filtered/domain-pipeline.txt
+      # - output/dead/domain-pipeline.txt
+      # - output/review/domain-pipeline.csv
+      # - output/raw/domain-pipeline.jsonl
+      #
+      # The filtered/dead txt files and review file follow output.directory.
+      # The raw audit JSONL file is always written under output/raw.
+      directory: output

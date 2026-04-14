@@ -1,0 +1,24 @@
+name: Automation Direct
+run-name: automation direct / ${{ github.run_id }}
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: automation-direct
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  batch:
+    uses: ./.github/workflows/_automation-batch.yml
+    with:
+      config_name: direct
+      config_path: config/direct.yaml
+      worker_count: 18
+    secrets: inherit

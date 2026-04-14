@@ -1,0 +1,30 @@
+defaults:
+  fetch:
+    request_timeout: 30.0
+
+  rdap:
+    timeout: 10.0
+    mode: authoritative
+    scheduling: auto
+
+  output:
+    directory: output
+
+cache:
+  cache_file: .tmp/runtime/check-cache.sqlite3
+  classification_ttl_days:
+    rdap_registrable_domain_unregistered: 30
+    rdap_registrable_domain_registered: 7
+    rdap_lookup_unavailable: 7
+  dns_ttl_days: 7
+
+sources:
+  - id: block
+    enabled: true
+    input:
+      type: url
+      location: https://is.gd/vQFXgT
+    dns:
+      enabled: false
+    geo:
+      enabled: false

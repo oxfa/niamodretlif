@@ -1,0 +1,24 @@
+name: Automation Block
+run-name: automation block / ${{ github.run_id }}
+
+on:
+  schedule:
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: automation-block
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  batch:
+    uses: ./.github/workflows/_automation-batch.yml
+    with:
+      config_name: block
+      config_path: config/block.yaml
+      worker_count: 18
+    secrets: inherit
