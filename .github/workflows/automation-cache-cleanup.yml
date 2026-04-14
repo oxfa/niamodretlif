@@ -1,0 +1,110 @@
+name: Automation Cache Cleanup
+run-name: automation cache cleanup / ${{ github.run_id }}
+
+on:
+  schedule:
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: automation-cache-cleanup
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KEEP_COUNT: "5"
+      CACHE_PREFIXES: |
+        signal-light-sqlite-block-
+        signal-light-sqlite-direct-
+    steps:
+      - name: Delete stale automation sqlite caches
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+
+          api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "${temp_dir}"' EXIT
+
+          all_caches_path="${temp_dir}/all-caches.json"
+          printf '[]\n' > "${all_caches_path}"
+
+          page=1
+          while :; do
+            response_path="${temp_dir}/page-${page}.json"
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_root}?per_page=100&page=${page}" \
+              > "${response_path}"
+
+            page_count="$(jq '.actions_caches | length' "${response_path}")"
+            merged_path="${temp_dir}/merged-${page}.json"
+            jq -s 'add' "${all_caches_path}" <(jq '.actions_caches' "${response_path}") \
+              > "${merged_path}"
+            mv "${merged_path}" "${all_caches_path}"
+
+            if [ "${page_count}" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+
+          echo "Loaded $(jq 'length' "${all_caches_path}") cache entries across ${page} page(s)."
+
+          total_deleted=0
+          while IFS= read -r prefix; do
+            [ -n "${prefix}" ] || continue
+
+            prefix_count="$(
+              jq --arg prefix "${prefix}" \
+                'map(select(.key | startswith($prefix))) | length' \
+                "${all_caches_path}"
+            )"
+            echo "Found ${prefix_count} cache entries for prefix=${prefix}"
+
+            prefix_deleted=0
+            while IFS= read -r encoded_row; do
+              [ -n "${encoded_row}" ] || continue
+
+              row_json="$(printf '%s' "${encoded_row}" | base64 --decode)"
+              cache_id="$(jq -r '.id' <<< "${row_json}")"
+              cache_key="$(jq -r '.key' <<< "${row_json}")"
+              created_at="$(jq -r '.created_at' <<< "${row_json}")"
+              last_accessed_at="$(jq -r '.last_accessed_at' <<< "${row_json}")"
+              size_in_bytes="$(jq -r '.size_in_bytes' <<< "${row_json}")"
+
+              echo \
+                "Deleting cache id=${cache_id} key=${cache_key} created_at=${created_at} last_accessed_at=${last_accessed_at} size_in_bytes=${size_in_bytes}"
+              curl -fsSL \
+                -X DELETE \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "${api_root}/${cache_id}"
+
+              prefix_deleted=$((prefix_deleted + 1))
+              total_deleted=$((total_deleted + 1))
+            done < <(
+              jq -r --arg prefix "${prefix}" --argjson keep "${KEEP_COUNT}" '
+                map(select(.key | startswith($prefix)))
+                | sort_by(.created_at)
+                | reverse
+                | .[$keep:]
+                | .[]
+                | @base64
+              ' "${all_caches_path}"
+            )
+
+            echo "Deleted ${prefix_deleted} stale caches for prefix=${prefix}"
+          done <<< "${CACHE_PREFIXES}"
+
+          echo "Deleted ${total_deleted} stale automation sqlite caches in total."
