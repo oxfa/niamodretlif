@@ -541,7 +541,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             if cached.is_cached_rdap_unavailable():
                 log.debug(
                     "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s with cached unavailable bootstrap state; "
+                    "classification=%s with cached unavailable RDAP state; "
                     "skipping live RDAP and %s",
                     parsed.job.source_id,
                     parsed.sequence,
