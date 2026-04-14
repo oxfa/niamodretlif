@@ -1,3 +1,5 @@
+version: 2
+
 defaults:
   fetch:
     request_timeout: 30.0
