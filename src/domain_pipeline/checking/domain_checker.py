@@ -482,7 +482,9 @@ class DomainChecker:
         try:
             resp = self._get_with_rdap_retry_policy(url, f"RDAP query for {domain}")
         except RetryableRDAPError as exc:
-            raise RDAPUnavailableError(str(exc)) from exc
+            # Cache retry-exhausted lookup failures only after we know the final
+            # per-root RDAP query URL. Bootstrap/setup failures stay non-cacheable.
+            raise CacheableRDAPUnavailableError(str(exc)) from exc
         return self._parse_rdap_response(resp, domain)
 
     def _parse_rdap_response(
