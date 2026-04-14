@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      KEEP_COUNT: "5"
+      KEEP_COUNT: "2"
       CACHE_PREFIXES: |
         signal-light-sqlite-block-
         signal-light-sqlite-direct-
