@@ -11,10 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from ..io.output_manager import (
+    csv_row_signature,
     output_paths_for_job,
     review_output_path_for_job,
     write_review_rows,
 )
+from ..output_invariants import DuplicateOutputInvariantError
+from .pure_helpers import build_review_output_row
 from .contracts import CompletedHostResult
 from ..shared import SourceJob
 
@@ -44,7 +47,7 @@ GroupKey = tuple[Path, Path, Path, Path]
 
 
 @dataclass
-class _BufferedOutputGroup:
+class _BufferedOutputGroup:  # pylint: disable=too-many-instance-attributes
     """In-memory rows accepted for one output-path group."""
 
     job: SourceJob
@@ -54,6 +57,7 @@ class _BufferedOutputGroup:
     review_rows: list[dict[str, Any]]
     seen_host_outputs: dict[str, set[str]]
     seen_audit_rows: set[str]
+    seen_review_rows: set[str]
 
 
 class ResultCollectorWriter:
@@ -65,34 +69,35 @@ class ResultCollectorWriter:
         self._seen_paths: set[Path] = set()
         self._output_paths: list[Path] = []
 
-    def _group_for(self, result: CompletedHostResult) -> _BufferedOutputGroup:
-        """Return the buffered output group for one terminal result."""
-        output_paths = output_paths_for_job(result.job)
+    def _group_for_job(self, job: SourceJob) -> _BufferedOutputGroup:
+        """Return the buffered output group for one source job."""
+        output_paths = output_paths_for_job(job)
         group_key = (
             output_paths["filtered"],
             output_paths["dead"],
             output_paths["audit"],
-            review_output_path_for_job(result.job),
+            review_output_path_for_job(job),
         )
         group = self.groups.get(group_key)
         if group is None:
             logger.debug(
                 "Creating writer output group for source=%s filtered=%s dead=%s audit=%s "
                 "review=%s",
-                result.job.source_id,
+                job.source_id,
                 group_key[0],
                 group_key[1],
                 group_key[2],
                 group_key[3],
             )
             group = _BufferedOutputGroup(
-                job=result.job,
+                job=job,
                 filtered_rows=[],
                 dead_rows=[],
                 audit_rows=[],
                 review_rows=[],
                 seen_host_outputs={"filtered": set(), "dead": set()},
                 seen_audit_rows=set(),
+                seen_review_rows=set(),
             )
             self.groups[group_key] = group
         for path in group_key:
@@ -102,9 +107,29 @@ class ResultCollectorWriter:
             self._output_paths.append(path)
         return group
 
+    def _queue_review_row(
+        self,
+        *,
+        group: _BufferedOutputGroup,
+        row: dict[str, Any],
+    ) -> None:
+        review_signature = csv_row_signature(build_review_output_row(row))
+        if review_signature in group.seen_review_rows:
+            raise DuplicateOutputInvariantError(
+                "review_row",
+                str(row["host"]),
+                context={
+                    "source": group.job.source_id,
+                    "signature": review_signature,
+                },
+            )
+        group.seen_review_rows.add(review_signature)
+        group.review_rows.append(row)
+        logger.debug("Queued host=%s for review output", row["host"])
+
     def add(self, result: CompletedHostResult) -> None:
         """Record one completed terminal result."""
-        group = self._group_for(result)
+        group = self._group_for_job(result.job)
         logger.debug(
             "Collecting terminal result for source=%s host=%s classification=%s route=%s",
             result.job.source_id,
@@ -117,12 +142,15 @@ class ResultCollectorWriter:
         if result.route == "drop":
             self.counts["filtered_dead_root"] += 1
             host = result.row["host"]
-            if host not in group.seen_host_outputs["dead"]:
-                group.seen_host_outputs["dead"].add(host)
-                group.dead_rows.append(result.row)
-                logger.debug("Queued host=%s for dead output", host)
-            else:
-                logger.debug("Skipped duplicate dead host=%s", host)
+            if host in group.seen_host_outputs["dead"]:
+                raise DuplicateOutputInvariantError(
+                    "dead_host",
+                    str(host),
+                    context={"source": group.job.source_id},
+                )
+            group.seen_host_outputs["dead"].add(host)
+            group.dead_rows.append(result.row)
+            logger.debug("Queued host=%s for dead output", host)
             logger.debug(
                 "Dropped host=%s after terminal routing decision",
                 result.row["host"],
@@ -131,23 +159,79 @@ class ResultCollectorWriter:
 
         if result.route == "normal_output":
             host = result.row["host"]
-            if host not in group.seen_host_outputs["filtered"]:
-                group.seen_host_outputs["filtered"].add(host)
-                group.filtered_rows.append(result.row)
-                logger.debug("Queued host=%s for filtered output", host)
-            else:
-                logger.debug("Skipped duplicate filtered host=%s", host)
+            if host in group.seen_host_outputs["filtered"]:
+                raise DuplicateOutputInvariantError(
+                    "filtered_host",
+                    str(host),
+                    context={"source": group.job.source_id},
+                )
+            group.seen_host_outputs["filtered"].add(host)
+            group.filtered_rows.append(result.row)
+            logger.debug("Queued host=%s for filtered output", host)
         if result.route == "review":
-            group.review_rows.append(result.row)
-            logger.debug("Queued host=%s for review output", result.row["host"])
+            self._queue_review_row(group=group, row=result.row)
 
         audit_signature = _json_row_signature(result.row)
         if audit_signature in group.seen_audit_rows:
-            logger.debug("Skipped duplicate audit row for host=%s", result.row["host"])
-            return
+            raise DuplicateOutputInvariantError(
+                "audit_row",
+                str(result.row["host"]),
+                context={
+                    "source": group.job.source_id,
+                    "signature": audit_signature,
+                },
+            )
         group.seen_audit_rows.add(audit_signature)
         group.audit_rows.append(result.row)
         logger.debug("Queued host=%s for audit output", result.row["host"])
+
+    def add_terminal_row(
+        self,
+        *,
+        job: SourceJob,
+        row: dict[str, Any],
+        route: str = "review",
+    ) -> None:
+        """Record one preparation-owned terminal row without synthetic runtime objects."""
+        group = self._group_for_job(job)
+        classification = str(row.get("classification", ""))
+        self.counts[classification] += 1
+        self.counts[f"route_{route}"] += 1
+        if route == "review":
+            self._queue_review_row(group=group, row=row)
+        elif route == "normal_output":
+            host = str(row["host"])
+            if host in group.seen_host_outputs["filtered"]:
+                raise DuplicateOutputInvariantError(
+                    "filtered_host",
+                    host,
+                    context={"source": group.job.source_id},
+                )
+            group.seen_host_outputs["filtered"].add(host)
+            group.filtered_rows.append(row)
+        elif route == "drop":
+            host = str(row["host"])
+            self.counts["filtered_dead_root"] += 1
+            if host in group.seen_host_outputs["dead"]:
+                raise DuplicateOutputInvariantError(
+                    "dead_host",
+                    host,
+                    context={"source": group.job.source_id},
+                )
+            group.seen_host_outputs["dead"].add(host)
+            group.dead_rows.append(row)
+        audit_signature = _json_row_signature(row)
+        if audit_signature in group.seen_audit_rows:
+            raise DuplicateOutputInvariantError(
+                "audit_row",
+                str(row["host"]),
+                context={
+                    "source": group.job.source_id,
+                    "signature": audit_signature,
+                },
+            )
+        group.seen_audit_rows.add(audit_signature)
+        group.audit_rows.append(row)
 
     def _write_group_files(
         self,

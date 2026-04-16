@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict, cast
 
 from domain_pipeline.classifications import (
@@ -16,6 +17,7 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_LOOKUP_FAILED,
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
+    CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
     CLASSIFICATION_RDAP_STATUS_CLIENT_HOLD,
     CLASSIFICATION_RDAP_STATUS_DELETION_OTHER,
@@ -54,6 +56,8 @@ REVIEW_OUTPUT_COLUMNS = (
     "geo_provider",
     "source_id",
     "source_input_label",
+    "source_ids",
+    "source_input_labels",
 )
 
 
@@ -73,6 +77,8 @@ class ReviewOutputRow(TypedDict):
     geo_policy_status: str
     geo_policy_reason: str
     geo_provider: str
+    source_ids: str
+    source_input_labels: str
 
 
 ROUTE_NORMAL_OUTPUT = "normal_output"
@@ -98,6 +104,9 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
     reason_by_classification = {
         CLASSIFICATION_DNS_LOOKUP_TIMEOUT: "DNS lookup returned timeout",
         CLASSIFICATION_DNS_LOOKUP_SERVFAIL: "DNS lookup returned servfail",
+        CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
+            "manual filter-pass host was not present in any configured source"
+        ),
         CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN: (
             f"{registered_subject} returned NXDOMAIN"
         ),
@@ -252,6 +261,8 @@ def build_output_row(
     provider: IPGeoProvider | None,
     *,
     dns_status_override: str | None = None,
+    source_ids_override: list[str] | None = None,
+    source_input_labels_override: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the full audit row for one processed host."""
     effective_geo_provider = str(
@@ -266,9 +277,13 @@ def build_output_row(
         or geo_reason == "lookup_succeeded"
     ):
         geo_provider_name = effective_geo_provider
+    source_ids = source_ids_override or [job.source_id]
+    source_input_labels = source_input_labels_override or [job.input_label]
     return {
         "source_id": job.source_id,
         "source_input_label": job.input_label,
+        "source_ids": list(source_ids),
+        "source_input_labels": list(source_input_labels),
         "input_name": entry.input_name or entry.host,
         "host": entry.host,
         "registrable_domain": entry.registrable_domain,
@@ -308,6 +323,11 @@ def build_review_output_row(row: dict[str, Any]) -> ReviewOutputRow:
     review_row = dict(row)
     review_row["classification"] = review_classification_for_row(row)
     review_row["classification_reason"] = review_reason_for_row(row)
+    for column in ("source_ids", "source_input_labels"):
+        value = review_row.get(column, [])
+        if isinstance(value, str):
+            continue
+        review_row[column] = json.dumps(list(value), separators=(",", ":"))
     return cast(
         ReviewOutputRow,
         {column: str(review_row.get(column, "")) for column in REVIEW_OUTPUT_COLUMNS},

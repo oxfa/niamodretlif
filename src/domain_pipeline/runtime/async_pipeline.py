@@ -43,9 +43,9 @@ from ..checking import (
     build_geo_provider,
     evaluate_geo_policy,
 )
-from ..io.parser import DomainListParser, InputFileFormat, ParsedDomainEntry
+from ..io.parser import ParsedDomainEntry
+from ..preparation import prepare_inputs
 from ..io.output_manager import output_paths_for_job, review_output_path_for_job
-from ..shared import SourceJob
 from ..settings.config import DEFAULT_CACHE_FILE, load_config
 from .async_constants import DNS_STAGE_WORKERS, GEO_STAGE_WORKERS, RDAP_STAGE_WORKERS
 from .bootstrap_async import AsyncBootstrapCache
@@ -85,7 +85,6 @@ from .writer import ResultCollectorWriter, WriterResult
 
 log = logging.getLogger(__name__)
 INCOMPLETE_RUN_STATE_DIR = Path(".tmp") / "runtime" / "incomplete_runs"
-MANUAL_FILTER_PASS_DIR = Path("input") / "manual_filter_pass"
 
 
 @dataclass(frozen=True)
@@ -136,12 +135,16 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
         *,
         runtime_budget: RuntimeBudget | None = None,
         prepared_metadata_path: Path | None = None,
+        prepared_metadata: dict[str, Any] | None = None,
         time_source: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config_path = config_path
         self.config = load_config(config_path)
         self.prepared_metadata_path = prepared_metadata_path
-        self.prepared_metadata = self._load_prepared_metadata(prepared_metadata_path)
+        self.prepared_metadata = self._load_prepared_metadata(
+            prepared_metadata_path,
+            prepared_metadata=prepared_metadata,
+        )
         self.cache_path = Path(
             self.config["cache"].get("cache_file", DEFAULT_CACHE_FILE)
         )
@@ -170,112 +173,45 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
         self.budget_stop_context: BudgetStopContext | None = None
-        (
-            self.manual_filter_job,
-            self.manual_filter_entries,
-            self.manual_filter_hosts,
-        ) = self._load_manual_filter_pass_entries()
-
-    def _manual_filter_pass_path(self) -> Path:
-        """Return the per-config manual-pass file path."""
-        return MANUAL_FILTER_PASS_DIR / f"{self.config['config_name']}.txt"
-
-    def _manual_filter_source_config(self, manual_filter_path: Path) -> dict[str, Any]:
-        """Return the DNS-enabled source config used for grouped manual-pass output."""
-        enabled_sources = [
-            source for source in self.config["sources"] if source["enabled"]
-        ]
-        if not enabled_sources:
-            raise ValueError("config must include at least one enabled source")
-        dns_enabled_values = {
-            bool(source["dns"].get("enabled", True)) for source in enabled_sources
-        }
-        if len(dns_enabled_values) > 1:
-            raise ValueError(
-                "manual filter-pass file "
-                f"{manual_filter_path} requires all enabled sources in one config "
-                "to share dns.enabled because manual filter-pass behavior is "
-                "config-scoped"
-            )
-        if not next(iter(dns_enabled_values)):
-            raise ValueError(
-                "manual filter-pass file "
-                f"{manual_filter_path} is not supported for RDAP-only mode "
-                "(all enabled sources have dns.enabled=false)"
-            )
-        return enabled_sources[0]
-
-    def _load_manual_filter_pass_entries(
-        self,
-    ) -> tuple[SourceJob | None, list[ParsedDomainEntry], set[str]]:
-        """Load manually approved hosts that should bypass DNS and geo after RDAP."""
-        manual_filter_path = self._manual_filter_pass_path()
-        log.debug(
-            "Checking manual filter-pass file for config=%s at %s (cwd=%s)",
-            self.config["config_name"],
-            manual_filter_path,
-            Path.cwd(),
-        )
-        if not manual_filter_path.is_file():
-            log.debug(
-                "Manual filter-pass file not found for config=%s at %s; "
-                "continuing without manual-pass entries",
-                self.config["config_name"],
-                manual_filter_path,
-            )
-            return None, [], set()
-
-        lines = manual_filter_path.read_text(encoding="utf-8").splitlines(keepends=True)
-        parser = DomainListParser()
-        parse_stats: Counter = Counter()
-        entries = list(
-            parser.process_entries(
-                lines,
-                source_name=str(manual_filter_path),
-                stats=parse_stats,
-                forced_format=InputFileFormat.PLAIN,
-            )
-        )
-        if not entries:
-            log.warning(
-                "Manual filter-pass file %s produced no valid hosts after parsing",
-                manual_filter_path,
-            )
-            return None, [], set()
-
-        log.info(
-            "Loaded %d manually approved hosts from %s",
-            len(entries),
-            manual_filter_path,
-        )
-        job = SourceJob(
-            source_id=f"{self.config['config_name']}--manual-filter-pass",
-            input_label=str(manual_filter_path),
-            output_stem=str(self.config["config_name"]),
-            lines=lines,
-            config=self._manual_filter_source_config(manual_filter_path),
-        )
-        return job, entries, {entry.host for entry in entries}
 
     @staticmethod
-    def _load_prepared_metadata(path: Path | None) -> dict[str, Any]:
+    def _load_prepared_metadata(
+        path: Path | None,
+        *,
+        prepared_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return worker-local prepared metadata when automation supplied it."""
-        if path is None or not path.is_file():
-            return {"sources": {}, "rdap_roots": {}}
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        if prepared_metadata is not None:
+            payload = prepared_metadata
+        elif path is None or not path.is_file():
+            return {"sources": {}, "rdap_roots": {}, "terminal_rows": []}
+        else:
+            payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError(f"prepared metadata {path} must be a JSON object")
+            raise ValueError("prepared metadata must be a JSON object")
         sources = payload.get("sources", {})
         rdap_roots = payload.get("rdap_roots", {})
-        if not isinstance(sources, dict) or not isinstance(rdap_roots, dict):
+        terminal_rows = payload.get("terminal_rows", [])
+        prepared_source_ids = payload.get("prepared_source_ids", None)
+        if (
+            not isinstance(sources, dict)
+            or not isinstance(rdap_roots, dict)
+            or not isinstance(terminal_rows, list)
+            or (
+                prepared_source_ids is not None
+                and not isinstance(prepared_source_ids, list)
+            )
+        ):
             raise ValueError(
-                f"prepared metadata {path} must contain JSON object sources and rdap_roots"
+                "prepared metadata must contain JSON object sources, JSON object "
+                "rdap_roots, JSON array terminal_rows, and optional JSON array "
+                "prepared_source_ids"
             )
         log.debug(
-            "Loaded prepared metadata from %s with %d sources and %d RDAP roots",
-            path,
+            "Loaded prepared metadata with %d sources, %d RDAP roots, and %d terminal rows",
             len(sources),
             len(rdap_roots),
+            len(terminal_rows),
         )
         return payload
 
@@ -308,6 +244,24 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             )
         return payload
 
+    def _prepared_terminal_rows(self) -> list[dict[str, Any]]:
+        """Return preparation-owned terminal rows when shared preparation supplied them."""
+        payload = self.prepared_metadata.get("terminal_rows", [])
+        if not isinstance(payload, list):
+            raise ValueError("prepared metadata terminal_rows must be a JSON array")
+        return payload
+
+    def _prepared_source_ids(self) -> set[str]:
+        """Return all source ids whose raw inputs should be skipped by runtime parse."""
+        payload = self.prepared_metadata.get("prepared_source_ids")
+        if payload is None:
+            return set(self.prepared_metadata.get("sources", {}))
+        if not isinstance(payload, list):
+            raise ValueError(
+                "prepared metadata prepared_source_ids must be a JSON array"
+            )
+        return {str(item) for item in payload}
+
     def _parsed_host_from_prepared_entry(
         self,
         *,
@@ -333,6 +287,17 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             entry=entry,
             sequence=sequence,
             total=total,
+            manual_filter_pass=bool(payload.get("manual_filter_pass", False)),
+            source_ids=tuple(
+                str(item) for item in payload.get("source_ids", [job.source_id])
+            ),
+            source_input_labels=tuple(
+                str(item)
+                for item in payload.get(
+                    "source_input_labels",
+                    [job.input_label],
+                )
+            ),
             prepared_rdap_status=(
                 None if root_payload is None else str(root_payload.get("status", ""))
             )
@@ -379,6 +344,8 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             "public_suffix_guard",
             None,
             dns_status_override="skipped",
+            source_ids_override=list(parsed.source_ids) or None,
+            source_input_labels_override=list(parsed.source_input_labels) or None,
         )
         await self.queue_bundle.result_queue.put(
             CompletedHostResult(
@@ -432,6 +399,8 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             "manual_filter_pass",
             None,
             dns_status_override="skipped",
+            source_ids_override=list(parsed.source_ids) or None,
+            source_input_labels_override=list(parsed.source_input_labels) or None,
         )
         await self.queue_bundle.result_queue.put(
             CompletedHostResult(
@@ -555,11 +524,11 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
 
     async def run(self) -> tuple[WriterResult, list[Path], bool]:
         """Run the staged pipeline for the loaded config."""
-        jobs = build_source_jobs(self.config)
-        all_jobs = list(jobs)
-        if self.manual_filter_job is not None:
-            all_jobs.append(self.manual_filter_job)
-        target_output_paths = _collect_output_paths(all_jobs)
+        jobs = build_source_jobs(
+            self.config,
+            prepared_source_ids=self._prepared_source_ids(),
+        )
+        target_output_paths = _collect_output_paths(jobs)
         writer_tasks = await start_writer_tasks(self.cache_bundle.writers)
         log_transport = RuntimeLogTransport()
         log_transport.install()
@@ -577,6 +546,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                 task_group.create_task(
                     self._result_collector(), name="result_collector"
                 )
+            self._ingest_prepared_terminal_rows(jobs)
             if self.stopped_early:
                 return (
                     WriterResult(
@@ -592,62 +562,32 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             log_transport.uninstall()
             await stop_writer_tasks(self.cache_bundle.writers, writer_tasks)
 
+    def _ingest_prepared_terminal_rows(self, jobs: list) -> None:
+        """Queue shared-preparation terminal rows after stage processing completes."""
+        terminal_rows = self._prepared_terminal_rows()
+        if not terminal_rows:
+            return
+        if not jobs:
+            raise ValueError(
+                "prepared terminal rows require at least one configured runtime job"
+            )
+        anchor_job = jobs[0]
+        for row in terminal_rows:
+            if not isinstance(row, dict):
+                raise ValueError(
+                    "prepared metadata terminal_rows entries must be objects"
+                )
+            self.writer.add_terminal_row(job=anchor_job, row=row, route="review")
+
     async def _parse_stage(self, jobs: list) -> None:
         try:
-            if self.manual_filter_job is not None:
-                total = len(self.manual_filter_entries)
-                for sequence, entry in enumerate(self.manual_filter_entries, start=1):
-                    if self._should_stop_queueing_new_work():
-                        self._record_budget_stop(
-                            self.manual_filter_job,
-                            sequence=sequence,
-                            total=total,
-                            host=entry.host,
-                        )
-                        break
-                    await self.queue_bundle.parse_to_rdap.put(
-                        ParsedHostItem(
-                            job=self.manual_filter_job,
-                            entry=entry,
-                            sequence=sequence,
-                            total=total,
-                            manual_filter_pass=True,
-                        )
-                    )
-                if self.stopped_early:
-                    return
             for job in jobs:
                 prepared_entries = self._prepared_source_entries(job.source_id)
                 if prepared_entries is None:
                     entries, _stats = parse_source_entries(job)
-                    if self.manual_filter_hosts:
-                        skipped_manual_hosts = [
-                            entry.host
-                            for entry in entries
-                            if entry.host in self.manual_filter_hosts
-                        ]
-                        if skipped_manual_hosts:
-                            log.info(
-                                "Source %s skipped %d hosts already approved via %s: %s",
-                                job.source_id,
-                                len(skipped_manual_hosts),
-                                (
-                                    self.manual_filter_job.input_label
-                                    if self.manual_filter_job is not None
-                                    else self._manual_filter_pass_path()
-                                ),
-                                skipped_manual_hosts,
-                            )
-                        entries = [
-                            entry
-                            for entry in entries
-                            if entry.host not in self.manual_filter_hosts
-                        ]
                     if not entries:
                         log.debug(
-                            "Parse stage queued 0 entries for source=%s "
-                            "after manual filter-pass exclusions",
-                            job.source_id,
+                            "Parse stage queued 0 entries for source=%s", job.source_id
                         )
                         continue
                     entries = schedule_rdap_entries(
@@ -687,29 +627,6 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                             start=1,
                         )
                     ]
-                    if self.manual_filter_hosts:
-                        skipped_manual_hosts = [
-                            parsed.entry.host
-                            for parsed in iterable
-                            if parsed.entry.host in self.manual_filter_hosts
-                        ]
-                        if skipped_manual_hosts:
-                            log.info(
-                                "Prepared source %s skipped %d hosts already approved via %s: %s",
-                                job.source_id,
-                                len(skipped_manual_hosts),
-                                (
-                                    self.manual_filter_job.input_label
-                                    if self.manual_filter_job is not None
-                                    else self._manual_filter_pass_path()
-                                ),
-                                skipped_manual_hosts,
-                            )
-                        iterable = [
-                            parsed
-                            for parsed in iterable
-                            if parsed.entry.host not in self.manual_filter_hosts
-                        ]
                 for parsed in iterable:
                     if self._should_stop_queueing_new_work():
                         self._record_budget_stop(
@@ -1029,6 +946,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                         "dead_root",
                         None,
                         dns_status_override="skipped",
+                        source_ids_override=list(parsed.source_ids) or None,
+                        source_input_labels_override=list(parsed.source_input_labels)
+                        or None,
                     )
                     await self.queue_bundle.result_queue.put(
                         CompletedHostResult(
@@ -1080,6 +1000,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                         "dns_disabled",
                         None,
                         dns_status_override="skipped",
+                        source_ids_override=list(parsed.source_ids) or None,
+                        source_input_labels_override=list(parsed.source_input_labels)
+                        or None,
                     )
                     await self.queue_bundle.result_queue.put(
                         CompletedHostResult(
@@ -1234,6 +1157,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                         "skipped",
                         "no_resolved_ips",
                         None,
+                        source_ids_override=list(parsed.source_ids) or None,
+                        source_input_labels_override=list(parsed.source_input_labels)
+                        or None,
                     )
                     await self.queue_bundle.result_queue.put(
                         CompletedHostResult(
@@ -1561,6 +1487,11 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                     geo_policy_status,
                     geo_policy_reason,
                     provider_used,
+                    source_ids_override=list(work_item.parsed.source_ids) or None,
+                    source_input_labels_override=list(
+                        work_item.parsed.source_input_labels
+                    )
+                    or None,
                 )
                 if (
                     classification
@@ -1743,6 +1674,13 @@ async def run_pipeline_async(
 ) -> int:
     """Run the async pipeline from one config path."""
     start_time = time.monotonic()
+    prepared_metadata: dict[str, Any] | None = None
+    if prepared_metadata_path is None:
+        prepared_inputs = prepare_inputs(
+            source_root=Path.cwd(),
+            config_path=config_path,
+        )
+        prepared_metadata = prepared_inputs.runtime_payload()
     runtime_budget = (
         RuntimeBudget(max_runtime_seconds=max_runtime_seconds)
         if max_runtime_seconds is not None
@@ -1752,6 +1690,7 @@ async def run_pipeline_async(
         config_path,
         runtime_budget=runtime_budget,
         prepared_metadata_path=prepared_metadata_path,
+        prepared_metadata=prepared_metadata,
     )
     resolved_config_path = config_path.resolve()
     log.info("========================================")

@@ -10,19 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from .workflows import (
-    WORKER_METADATA_ARTIFACT_NAME,
     aggregate_batch,
     batch_id_from_run,
-    bootstrap_worker_metadata,
     default_worker_ids,
-    download_worker_metadata,
     finalize_worker_statuses,
     initialize_worker_statuses,
-    load_manifest,
     materialize_incomplete_statuses,
     prepare_batch,
     validate_aggregate_readiness,
-    validate_manifest_payload,
     validate_run_settings,
     write_done_marker,
     write_prepared_batch,
@@ -83,21 +78,17 @@ def _handle_orchestrate(
     prepared = prepare_batch(
         source_root=source_root,
         config_path=Path(args.config),
-        target_ref=args.target_ref,
-        source_sha=args.source_sha,
         worker_ids=worker_ids,
         batch_id=batch_id,
-        orchestrator_run_id=args.run_id,
-        orchestrator_run_attempt=args.run_attempt,
-        worker_runtime_budget_seconds=args.worker_runtime_budget_seconds,
     )
     committed_paths = write_prepared_batch(prepared, state_root=state_root)
     _print_json(
         {
             "batch_id": batch_id,
             "committed_paths": committed_paths,
-            "expected_workers": prepared.manifest["expected_worker_identities"],
-            "manifest_path": prepared.manifest["manifest_path"],
+            "expected_workers": [
+                bundle.worker_id for bundle in prepared.worker_bundles
+            ],
         }
     )
     return 0
@@ -113,13 +104,6 @@ def _handle_validate_run_settings(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_validate_manifest(args: argparse.Namespace, state_root: Path) -> int:
-    manifest = load_manifest(args.batch_id, state_root=state_root)
-    validate_manifest_payload(manifest)
-    _print_json({"batch_id": args.batch_id, "state": "valid"})
-    return 0
-
-
 def _handle_initialize_worker_statuses(
     args: argparse.Namespace, state_root: Path
 ) -> int:
@@ -127,21 +111,6 @@ def _handle_initialize_worker_statuses(
         batch_id=args.batch_id,
         worker_id=args.worker_id,
         state_root=state_root,
-        metadata_output_path=Path(args.metadata_path).resolve(),
-    )
-    _print_json(payload)
-    return 0
-
-
-def _handle_bootstrap_worker_metadata(args: argparse.Namespace) -> int:
-    payload = bootstrap_worker_metadata(
-        batch_id=args.batch_id,
-        worker_id=args.worker_id,
-        target_ref=args.target_ref,
-        source_sha=args.source_sha,
-        run_id=args.run_id,
-        run_attempt=args.run_attempt,
-        metadata_output_path=Path(args.metadata_path).resolve(),
     )
     _print_json(payload)
     return 0
@@ -156,9 +125,9 @@ def _handle_worker(
     payload = run_worker(
         batch_id=args.batch_id,
         worker_id=args.worker_id,
+        config_path=Path(args.config),
         source_root=source_root,
         state_root=state_root,
-        metadata_output_path=Path(args.metadata_output).resolve(),
         max_runtime_seconds=args.max_runtime_seconds,
     )
     _print_json(payload)
@@ -170,26 +139,15 @@ def _handle_finalize_worker_statuses(
     state_root: Path,
 ) -> int:
     written_paths = finalize_worker_statuses(
+        batch_id=args.batch_id,
+        worker_id=args.worker_id,
         state_root=state_root,
-        metadata_path=Path(args.metadata_path).resolve(),
         output_commit_sha=args.output_commit_sha,
         push_retry_count=args.push_retry_count,
         fallback_conclusion=args.fallback_conclusion,
         fallback_failure_reason=args.fallback_failure_reason,
     )
     _print_json({"written_paths": written_paths})
-    return 0
-
-
-def _handle_download_worker_metadata(args: argparse.Namespace) -> int:
-    payload = download_worker_metadata(
-        repo=args.repo,
-        run_id=args.run_id,
-        token=args.token,
-        output_path=Path(args.output_path),
-        artifact_name=args.artifact_name,
-    )
-    _print_json(payload)
     return 0
 
 
@@ -202,19 +160,23 @@ def _handle_validate_aggregate(args: argparse.Namespace, state_root: Path) -> in
 
 def _handle_aggregate(args: argparse.Namespace, state_root: Path) -> int:
     _configure_command_logging(args.log_level)
-    payload = aggregate_batch(batch_id=args.batch_id, state_root=state_root)
+    payload = aggregate_batch(
+        batch_id=args.batch_id,
+        config_path=Path(args.config),
+        target_ref=args.target_ref,
+        state_root=state_root,
+    )
     _print_json(payload)
     return 0
 
 
 def _handle_write_done_marker(args: argparse.Namespace, state_root: Path) -> int:
-    manifest = load_manifest(args.batch_id, state_root=state_root)
     done_payload = json.loads(
         Path(args.done_payload_path).resolve().read_text(encoding="utf-8")
     )
     written_path = write_done_marker(
         state_root=state_root,
-        manifest=manifest,
+        batch_id=args.batch_id,
         done_marker_payload=done_payload,
         aggregate_commit_sha=args.aggregate_commit_sha,
     )
@@ -312,8 +274,6 @@ def _build_workflow_command_handlers(
 ) -> dict[str, Any]:
     return {
         "aggregate": lambda: _handle_aggregate(args, state_root),
-        "bootstrap-worker-metadata": lambda: _handle_bootstrap_worker_metadata(args),
-        "download-worker-metadata": lambda: _handle_download_worker_metadata(args),
         "initialize-worker-statuses": lambda: _handle_initialize_worker_statuses(
             args,
             state_root,
@@ -324,7 +284,6 @@ def _build_workflow_command_handlers(
         "orchestrate": lambda: _handle_orchestrate(args, source_root, state_root),
         "validate-run-settings": lambda: _handle_validate_run_settings(args),
         "validate-aggregate": lambda: _handle_validate_aggregate(args, state_root),
-        "validate-manifest": lambda: _handle_validate_manifest(args, state_root),
         "worker": lambda: _handle_worker(args, source_root, state_root),
         "write-done-marker": lambda: _handle_write_done_marker(args, state_root),
     }
@@ -370,21 +329,11 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         orchestrate_parser,
         [
             ("--config", {"required": True}),
-            ("--target-ref", {"required": True}),
-            ("--source-sha", {"required": True}),
             ("--run-id", {"required": True}),
             ("--run-attempt", {"required": True}),
             ("--worker-count", {"type": int, "default": 18}),
-            (
-                "--worker-runtime-budget-seconds",
-                {"type": int, "default": 19800},
-            ),
         ],
     )
-
-    validate_manifest_parser = subparsers.add_parser("validate-manifest")
-    _add_root_args(validate_manifest_parser)
-    _add_arguments(validate_manifest_parser, [("--batch-id", {"required": True})])
 
     initialize_status_parser = subparsers.add_parser("initialize-worker-statuses")
     _add_root_args(initialize_status_parser)
@@ -393,21 +342,6 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         [
             ("--batch-id", {"required": True}),
             ("--worker-id", {"required": True}),
-            ("--metadata-path", {"required": True}),
-        ],
-    )
-
-    bootstrap_metadata_parser = subparsers.add_parser("bootstrap-worker-metadata")
-    _add_arguments(
-        bootstrap_metadata_parser,
-        [
-            ("--batch-id", {"required": True}),
-            ("--worker-id", {"required": True}),
-            ("--target-ref", {"required": True}),
-            ("--source-sha", {"required": True}),
-            ("--run-id", {"required": True}),
-            ("--run-attempt", {"required": True}),
-            ("--metadata-path", {"required": True}),
         ],
     )
 
@@ -418,7 +352,7 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         [
             ("--batch-id", {"required": True}),
             ("--worker-id", {"required": True}),
-            ("--metadata-output", {"required": True}),
+            ("--config", {"required": True}),
             (
                 "--log-level",
                 {
@@ -435,23 +369,12 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
     _add_arguments(
         finalize_status_parser,
         [
-            ("--metadata-path", {"required": True}),
+            ("--batch-id", {"required": True}),
+            ("--worker-id", {"required": True}),
             ("--output-commit-sha", {"required": True}),
             ("--push-retry-count", {"type": int, "required": True}),
             ("--fallback-conclusion", {"default": None}),
             ("--fallback-failure-reason", {"default": None}),
-        ],
-    )
-
-    download_metadata_parser = subparsers.add_parser("download-worker-metadata")
-    _add_arguments(
-        download_metadata_parser,
-        [
-            ("--repo", {"required": True}),
-            ("--run-id", {"required": True}),
-            ("--token", {"required": True}),
-            ("--output-path", {"required": True}),
-            ("--artifact-name", {"default": WORKER_METADATA_ARTIFACT_NAME}),
         ],
     )
 
@@ -463,7 +386,14 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
     aggregate_parser = subparsers.add_parser("aggregate")
     _add_root_args(aggregate_parser)
     _add_log_level_argument(aggregate_parser)
-    _add_arguments(aggregate_parser, [("--batch-id", {"required": True})])
+    _add_arguments(
+        aggregate_parser,
+        [
+            ("--batch-id", {"required": True}),
+            ("--config", {"required": True}),
+            ("--target-ref", {"required": True}),
+        ],
+    )
 
     materialize_status_parser = subparsers.add_parser("materialize-incomplete-statuses")
     _add_root_args(materialize_status_parser)

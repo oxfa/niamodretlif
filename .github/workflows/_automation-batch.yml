@@ -27,8 +27,8 @@ env:
   PYTHONPATH: src
 
 jobs:
-  validate_settings:
-    name: Validate automation settings
+  prepare_run:
+    name: Validate settings and prepare batch
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -39,10 +39,12 @@ jobs:
       worker_runtime_budget_seconds: ${{ steps.validate.outputs.worker_runtime_budget_seconds }}
       target_branch: ${{ steps.validate.outputs.target_branch }}
       source_sha: ${{ steps.validate.outputs.source_sha }}
+      batch_id: ${{ steps.batch.outputs.batch_id }}
     env:
       AUTOMATION_MAX_PARALLEL_WORKERS: ${{ vars.AUTOMATION_MAX_PARALLEL_WORKERS }}
       AUTOMATION_TARGET_BRANCH: ${{ vars.AUTOMATION_TARGET_BRANCH }}
       PIPELINE_MAX_RUNTIME_SECONDS: ${{ vars.PIPELINE_MAX_RUNTIME_SECONDS }}
+      GEO_IPINFO_TOKEN: ${{ secrets.GEO_IPINFO_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -87,31 +89,6 @@ jobs:
           path: .tmp/validation_artifact
           include-hidden-files: true
           if-no-files-found: error
-
-  prepare_batch:
-    name: Prepare batch
-    needs: validate_settings
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    env:
-      GEO_IPINFO_TOKEN: ${{ secrets.GEO_IPINFO_TOKEN }}
-    outputs:
-      batch_id: ${{ steps.batch.outputs.batch_id }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
       - name: Build committed batch state
         id: batch
         run: |
@@ -122,12 +99,9 @@ jobs:
               --source-root . \
               --state-root .tmp/automation_state \
               --config "${{ inputs.config_path }}" \
-              --target-ref "${{ needs.validate_settings.outputs.target_branch }}" \
-              --source-sha "${{ needs.validate_settings.outputs.source_sha }}" \
               --run-id "${GITHUB_RUN_ID}" \
               --run-attempt "${GITHUB_RUN_ATTEMPT}" \
               --worker-count "${{ inputs.worker_count }}" \
-              --worker-runtime-budget-seconds "${{ needs.validate_settings.outputs.worker_runtime_budget_seconds }}" \
               | tee batch.json
           } 2>&1 | tee prepare-batch.log
           echo "batch_id=$(jq -r '.batch_id' batch.json)" >> "$GITHUB_OUTPUT"
@@ -152,17 +126,16 @@ jobs:
   run_workers:
     name: Run workers
     needs:
-      - validate_settings
-      - prepare_batch
+      - prepare_run
     runs-on: ubuntu-latest
     timeout-minutes: 355
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(needs.validate_settings.outputs.max_parallel_workers) }}
+      max-parallel: ${{ fromJSON(needs.prepare_run.outputs.max_parallel_workers) }}
       matrix:
-        worker_id: ${{ fromJSON(needs.validate_settings.outputs.worker_ids_json) }}
+        worker_id: ${{ fromJSON(needs.prepare_run.outputs.worker_ids_json) }}
     env:
       GEO_IPINFO_TOKEN: ${{ secrets.GEO_IPINFO_TOKEN }}
     steps:
@@ -205,11 +178,10 @@ jobs:
           python -m domain_pipeline.automation.cli initialize-worker-statuses \
             --source-root . \
             --state-root .tmp/automation_state \
-            --batch-id "${{ needs.prepare_batch.outputs.batch_id }}" \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
-            --metadata-path .tmp/worker-metadata.json \
             | tee init.json
-          echo "participates=$(jq -r '.participates' .tmp/worker-metadata.json)" >> "$GITHUB_OUTPUT"
+          echo "participates=$(jq -r '.participates' init.json)" >> "$GITHUB_OUTPUT"
       - name: Process worker assignment
         id: process
         if: ${{ steps.init.outputs.participates == 'true' }}
@@ -219,12 +191,13 @@ jobs:
           python -m domain_pipeline.automation.cli worker \
             --source-root . \
             --state-root .tmp/automation_state \
-            --batch-id "${{ needs.prepare_batch.outputs.batch_id }}" \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
-            --metadata-output .tmp/worker-metadata.json \
+            --config "${{ inputs.config_path }}" \
             --log-level "${{ inputs.worker_log_level }}" \
-            --max-runtime-seconds "${{ needs.validate_settings.outputs.worker_runtime_budget_seconds }}" \
+            --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
             | tee worker.json
+          echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"
       - name: Finalize successful worker statuses
         if: ${{ steps.init.outputs.participates == 'true' && steps.process.outcome == 'success' }}
         run: |
@@ -232,7 +205,8 @@ jobs:
           python -m domain_pipeline.automation.cli finalize-worker-statuses \
             --source-root . \
             --state-root .tmp/automation_state \
-            --metadata-path .tmp/worker-metadata.json \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+            --worker-id "${{ matrix.worker_id }}" \
             --output-commit-sha "" \
             --push-retry-count 0
       - name: Finalize failure worker statuses
@@ -242,32 +216,31 @@ jobs:
           python -m domain_pipeline.automation.cli finalize-worker-statuses \
             --source-root . \
             --state-root .tmp/automation_state \
-            --metadata-path .tmp/worker-metadata.json \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+            --worker-id "${{ matrix.worker_id }}" \
             --output-commit-sha "" \
             --push-retry-count 0 \
             --fallback-conclusion failure \
             --fallback-failure-reason "worker job failed before terminal statuses were written"
       - name: Stage worker artifact
-        if: ${{ always() }}
+        if: ${{ always() && steps.init.outputs.participates == 'true' }}
         run: |
           set -eo pipefail
           rm -rf .tmp/worker_bundle
-          mkdir -p .tmp/worker_bundle/metadata
-          cp .tmp/worker-metadata.json ".tmp/worker_bundle/metadata/${{ matrix.worker_id }}.json"
-          if [ -d ".tmp/automation_state/.automation/results/${{ needs.prepare_batch.outputs.batch_id }}/${{ matrix.worker_id }}" ]; then
-            mkdir -p ".tmp/worker_bundle/.automation/results/${{ needs.prepare_batch.outputs.batch_id }}"
+          if [ -d ".tmp/automation_state/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" ]; then
+            mkdir -p ".tmp/worker_bundle/.automation/results/${{ needs.prepare_run.outputs.batch_id }}"
             cp -R \
-              ".tmp/automation_state/.automation/results/${{ needs.prepare_batch.outputs.batch_id }}/${{ matrix.worker_id }}" \
-              ".tmp/worker_bundle/.automation/results/${{ needs.prepare_batch.outputs.batch_id }}/"
+              ".tmp/automation_state/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" \
+              ".tmp/worker_bundle/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/"
           fi
-          if [ -f ".tmp/automation_state/.automation/status/${{ needs.prepare_batch.outputs.batch_id }}/${{ matrix.worker_id }}.json" ]; then
-            mkdir -p ".tmp/worker_bundle/.automation/status/${{ needs.prepare_batch.outputs.batch_id }}"
+          if [ -f ".tmp/automation_state/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" ]; then
+            mkdir -p ".tmp/worker_bundle/.automation/status/${{ needs.prepare_run.outputs.batch_id }}"
             cp \
-              ".tmp/automation_state/.automation/status/${{ needs.prepare_batch.outputs.batch_id }}/${{ matrix.worker_id }}.json" \
-              ".tmp/worker_bundle/.automation/status/${{ needs.prepare_batch.outputs.batch_id }}/${{ matrix.worker_id }}.json"
+              ".tmp/automation_state/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" \
+              ".tmp/worker_bundle/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json"
           fi
       - name: Upload worker artifact
-        if: ${{ always() }}
+        if: ${{ always() && steps.init.outputs.participates == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: worker-${{ matrix.worker_id }}
@@ -278,17 +251,16 @@ jobs:
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         run: |
           set -eo pipefail
-          if [ "$(jq -r '.overall_conclusion' .tmp/worker-metadata.json)" != "success" ]; then
+          if [ "${{ steps.process.outputs.overall_conclusion }}" != "success" ]; then
             echo "${{ matrix.worker_id }} reported terminal failure"
             exit 1
           fi
 
   aggregate_and_publish:
     name: Aggregate and publish
-    if: ${{ always() && needs.validate_settings.result == 'success' && needs.prepare_batch.result == 'success' }}
+    if: ${{ always() && needs.prepare_run.result == 'success' }}
     needs:
-      - validate_settings
-      - prepare_batch
+      - prepare_run
       - run_workers
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -323,8 +295,8 @@ jobs:
           python -m domain_pipeline.automation.cli prepare-automation-worktree \
             --source-root . \
             --state-root .tmp/automation_worktree \
-            --target-branch "${{ needs.validate_settings.outputs.target_branch }}" \
-            --base-ref "${{ needs.validate_settings.outputs.source_sha }}"
+            --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
+            --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
       - name: Restore aggregate baseline cache
         uses: actions/cache/restore@v5
         with:
@@ -395,8 +367,8 @@ jobs:
           : > "${AGGREGATE_LOG_PATH}"
           {
             echo "aggregate job log initialized for config=${{ inputs.config_name }}"
-            echo "batch_id=${{ needs.prepare_batch.outputs.batch_id }}"
-            echo "target_branch=${{ needs.validate_settings.outputs.target_branch }}"
+            echo "batch_id=${{ needs.prepare_run.outputs.batch_id }}"
+            echo "target_branch=${{ needs.prepare_run.outputs.target_branch }}"
           } | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Materialize incomplete worker statuses
         run: |
@@ -406,7 +378,7 @@ jobs:
             python -m domain_pipeline.automation.cli materialize-incomplete-statuses \
               --source-root . \
               --state-root .tmp/automation_worktree \
-              --batch-id "${{ needs.prepare_batch.outputs.batch_id }}" \
+              --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
               --failure-reason "aggregate detected missing or incomplete worker artifacts" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               | tee materialize.json
@@ -420,7 +392,7 @@ jobs:
             python -m domain_pipeline.automation.cli validate-aggregate \
               --source-root . \
               --state-root .tmp/automation_worktree \
-              --batch-id "${{ needs.prepare_batch.outputs.batch_id }}" \
+              --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               | tee readiness.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
@@ -434,7 +406,9 @@ jobs:
             python -m domain_pipeline.automation.cli aggregate \
               --source-root . \
               --state-root .tmp/automation_worktree \
-              --batch-id "${{ needs.prepare_batch.outputs.batch_id }}" \
+              --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+              --config "${{ inputs.config_path }}" \
+              --target-ref "${{ needs.prepare_run.outputs.target_branch }}" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               | tee aggregate.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
@@ -479,7 +453,7 @@ jobs:
             [ -d "${worker_dir}" ] || continue
             artifact_name="${worker_dir##*/}"
             worker_id="${artifact_name#worker-}"
-            worker_log_path="${worker_dir}/.automation/results/${{ needs.prepare_batch.outputs.batch_id }}/${worker_id}/state/worker.log"
+            worker_log_path="${worker_dir}/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/state/worker.log"
             [ -f "${worker_log_path}" ] || continue
             cp "${worker_log_path}" ".tmp/aggregate_log_artifact/worker-logs/${worker_id}.log"
           done
@@ -487,7 +461,7 @@ jobs:
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         uses: actions/upload-artifact@v7
         with:
-          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_batch.outputs.batch_id }}
+          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
           path: .tmp/aggregate_log_artifact
           if-no-files-found: ignore
       - name: Persist aggregate baseline cache to repo root
@@ -549,7 +523,7 @@ jobs:
             python -m domain_pipeline.automation.cli commit-paths \
               --source-root . \
               --state-root .tmp/automation_worktree \
-              --message "automation(${{ needs.prepare_batch.outputs.batch_id }}): aggregate failed" \
+              --message "automation(${{ needs.prepare_run.outputs.batch_id }}): aggregate failed" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --path "state/check-cache.sqlite3" \
               --path "state/logs/*.log" \
@@ -566,9 +540,9 @@ jobs:
               --source-root . \
               --state-root .tmp/automation_worktree \
               --log-level "${{ inputs.aggregate_log_level }}" \
-              --path "output/filtered/${{ steps.config.outputs.config_name }}.txt" \
-              --path "output/dead/${{ steps.config.outputs.config_name }}.txt" \
-              --path "output/review/${{ steps.config.outputs.config_name }}.csv" \
+              --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee publish-size-check.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Commit aggregate outputs
@@ -581,12 +555,12 @@ jobs:
             python -m domain_pipeline.automation.cli commit-paths \
               --source-root . \
               --state-root .tmp/automation_worktree \
-              --message "automation(${{ needs.prepare_batch.outputs.batch_id }}): aggregate outputs" \
+              --message "automation(${{ needs.prepare_run.outputs.batch_id }}): aggregate outputs" \
               --log-level "${{ inputs.aggregate_log_level }}" \
-              --path "output/filtered/${{ steps.config.outputs.config_name }}.txt" \
-              --path "output/dead/${{ steps.config.outputs.config_name }}.txt" \
-              --path "output/review/${{ steps.config.outputs.config_name }}.csv" \
-              --path "output/raw/${{ steps.config.outputs.config_name }}.jsonl" \
+              --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.audit' aggregate.json)" \
               --path "state/check-cache.sqlite3" \
               --path "state/logs/*.log" \
               --path "log/*.log" \
@@ -604,13 +578,13 @@ jobs:
               --source-root . \
               --state-root .tmp/automation_worktree \
               --log-level "${{ inputs.aggregate_log_level }}" \
-              --branch "${{ needs.validate_settings.outputs.target_branch }}" \
+              --branch "${{ needs.prepare_run.outputs.target_branch }}" \
               --max-retries 2
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Fail failed aggregate runs
         if: ${{ steps.aggregate_state.outputs.state == 'failed' }}
         run: |
-          echo "aggregate marked batch ${{ needs.prepare_batch.outputs.batch_id }} as failed"
+          echo "aggregate marked batch ${{ needs.prepare_run.outputs.batch_id }} as failed"
           exit 1
       - name: Fail unexpected aggregate readiness
         if: ${{ steps.readiness.outputs.state != 'ready_success' && steps.readiness.outputs.state != 'ready_failed' }}

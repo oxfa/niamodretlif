@@ -58,9 +58,6 @@ from .pure_helpers import build_output_row, route_for_row
 from ..settings.constants import (
     GEO_PROVIDER_GEOJS,
     GEO_PROVIDER_IPINFO_LITE,
-    RDAP_MODE_AUTHORITATIVE,
-    RDAP_SCHEDULING_AUTO,
-    RDAP_SCHEDULING_INPUT_ORDER,
 )
 from .history import PipelineCache
 from .transports import resolve_geo_token
@@ -149,14 +146,30 @@ def expand_input_location(input_cfg: dict[str, Any]) -> list[Path]:
     return matched_paths
 
 
-def build_source_jobs(config: dict[str, Any]) -> list[SourceJob]:
+def build_source_jobs(
+    config: dict[str, Any],
+    *,
+    prepared_source_ids: set[str] | None = None,
+) -> list[SourceJob]:
     """Expand configured sources into concrete input jobs."""
     jobs: list[SourceJob] = []
+    prepared_source_ids = prepared_source_ids or set()
     for source in config["sources"]:
         if not source["enabled"]:
             continue
         input_cfg = source["input"]
         stem = config["config_name"]
+        if source["id"] in prepared_source_ids:
+            jobs.append(
+                SourceJob(
+                    source_id=source["id"],
+                    input_label=input_cfg.get("label") or input_cfg["location"],
+                    output_stem=stem,
+                    lines=[],
+                    config=source,
+                )
+            )
+            continue
         if input_cfg["type"] == "url":
             try:
                 response = requests.get(
@@ -261,26 +274,10 @@ def schedule_rdap_entries(
     job: SourceJob,
     entries: list[ParsedDomainEntry],
 ) -> list[ParsedDomainEntry]:
-    """Return entries reordered for RDAP scheduling without changing membership."""
-    rdap_config = job.config["rdap"]
-    scheduling = rdap_config.get("scheduling", RDAP_SCHEDULING_AUTO)
-    rdap_mode = rdap_config["mode"]
-    if scheduling == RDAP_SCHEDULING_INPUT_ORDER:
-        log.info(
-            "Source %s using RDAP scheduling=input_order; preserving parsed entry order",
-            job.source_id,
-        )
-        return entries
-    if rdap_mode != RDAP_MODE_AUTHORITATIVE:
-        log.info(
-            "Source %s using RDAP scheduling=auto with mode=%s; preserving parsed entry order",
-            job.source_id,
-            rdap_mode,
-        )
-        return entries
+    """Return entries reordered for authoritative RDAP scheduling."""
     if not hasattr(checker, "_authoritative_base_url"):
         log.info(
-            "Source %s using RDAP scheduling=auto but checker lacks authoritative "
+            "Source %s uses authoritative RDAP scheduling but checker lacks authoritative "
             "bootstrap resolution; preserving parsed entry order",
             job.source_id,
         )
@@ -311,7 +308,7 @@ def schedule_rdap_entries(
             server_to_roots[base_url].append(root)
     except RuntimeError as exc:
         log.warning(
-            "Source %s RDAP scheduling=auto could not resolve authoritative bootstrap data; "
+            "Source %s authoritative RDAP scheduling could not resolve bootstrap data; "
             "preserving parsed entry order: %s",
             job.source_id,
             exc,
@@ -323,11 +320,10 @@ def schedule_rdap_entries(
     for root in scheduled_roots:
         scheduled_entries.extend(root_to_entries[root])
     log.info(
-        "Source %s using RDAP scheduling=auto with mode=%s; "
+        "Source %s using authoritative RDAP scheduling; "
         "interleaved %d roots across %d authoritative RDAP server buckets "
         "(fallback_roots=%d)",
         job.source_id,
-        rdap_mode,
         len(ordered_roots),
         len(server_to_roots),
         len(fallback_roots),
@@ -1231,5 +1227,4 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
         rdap_timeout=source_config["rdap"]["timeout"],
         dns_timeout=dns_config["timeout"],
         resolver=resolver,
-        rdap_mode=source_config["rdap"]["mode"],
     )

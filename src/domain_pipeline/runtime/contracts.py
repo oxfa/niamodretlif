@@ -20,7 +20,7 @@ ResultRoute = Literal["normal_output", "review", "drop"]
 
 
 @dataclass(frozen=True)
-class ParsedHostItem:
+class ParsedHostItem:  # pylint: disable=too-many-instance-attributes
     """Normalized parsed host with run-time context."""
 
     job: SourceJob
@@ -28,6 +28,8 @@ class ParsedHostItem:
     sequence: int
     total: int
     manual_filter_pass: bool = False
+    source_ids: tuple[str, ...] = ()
+    source_input_labels: tuple[str, ...] = ()
     prepared_rdap_status: str | None = None
     prepared_authoritative_base_url: str | None = None
 
