@@ -210,7 +210,19 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
     ) -> tuple[SourceJob | None, list[ParsedDomainEntry], set[str]]:
         """Load manually approved hosts that should bypass DNS and geo after RDAP."""
         manual_filter_path = self._manual_filter_pass_path()
+        log.debug(
+            "Checking manual filter-pass file for config=%s at %s (cwd=%s)",
+            self.config["config_name"],
+            manual_filter_path,
+            Path.cwd(),
+        )
         if not manual_filter_path.is_file():
+            log.debug(
+                "Manual filter-pass file not found for config=%s at %s; "
+                "continuing without manual-pass entries",
+                self.config["config_name"],
+                manual_filter_path,
+            )
             return None, [], set()
 
         lines = manual_filter_path.read_text(encoding="utf-8").splitlines(keepends=True)
