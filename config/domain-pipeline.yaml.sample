@@ -4,6 +4,14 @@ version: 2
 # One workflow owns one config file. A config file may still contain multiple
 # sources, but emitted artifacts are grouped by the config filename instead of
 # by each source id.
+#
+# Optional manual-pass file:
+# - input/manual_filter_pass/<config-stem>.txt
+# This file is only supported when all enabled sources in the config have
+# dns.enabled=true. It is not supported for RDAP-only mode or mixed DNS modes.
+# Hosts listed there still run through RDAP, but bypass DNS and geo.
+# RDAP-unregistered roots still route to dead output; otherwise they are
+# emitted to the filtered output for that config.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the

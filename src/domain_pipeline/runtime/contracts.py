@@ -27,6 +27,7 @@ class ParsedHostItem:
     entry: ParsedDomainEntry
     sequence: int
     total: int
+    manual_filter_pass: bool = False
     prepared_rdap_status: str | None = None
     prepared_authoritative_base_url: str | None = None
 
@@ -50,7 +51,7 @@ class GeoWorkItem:
 
 
 @dataclass(frozen=True)
-class CompletedHostResult:
+class CompletedHostResult:  # pylint: disable=too-many-instance-attributes
     """Terminal result emitted to the writer boundary."""
 
     job: SourceJob
@@ -96,7 +97,7 @@ class RootCacheWriteRequest:
 
 
 @dataclass(frozen=True)
-class DNSCacheWriteRequest:
+class DNSCacheWriteRequest:  # pylint: disable=too-many-instance-attributes
     """Write request for the DNS cache table."""
 
     host: str
