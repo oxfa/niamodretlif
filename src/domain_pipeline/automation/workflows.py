@@ -1415,6 +1415,41 @@ def _build_worker_config(
     _write_yaml(temp_config_path, payload)
 
 
+def _stage_worker_manual_filter_pass_file(
+    *, source_root: Path, assignment: dict[str, Any], result_root: Path
+) -> Path | None:
+    """Copy the repo-root manual filter-pass file into the worker runtime cwd."""
+    source_path = (
+        source_root
+        / "input"
+        / "manual_filter_pass"
+        / f"{assignment['config_name']}.txt"
+    )
+    if not source_path.is_file():
+        logger.debug(
+            "Worker %s found no repo-root manual filter-pass file at %s; "
+            "skipping worker-local staging",
+            assignment["worker_id"],
+            source_path,
+        )
+        return None
+    target_path = (
+        result_root
+        / "input"
+        / "manual_filter_pass"
+        / f"{assignment['config_name']}.txt"
+    )
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+    logger.debug(
+        "Worker %s staged manual filter-pass file from %s to %s",
+        assignment["worker_id"],
+        source_path,
+        target_path,
+    )
+    return target_path
+
+
 def _status_template_for_worker(
     *,
     manifest: dict[str, Any],
@@ -1585,6 +1620,11 @@ def run_worker(
                 state_root=state_root,
                 assignment=assignment,
                 temp_config_path=temp_config_path,
+            )
+            _stage_worker_manual_filter_pass_file(
+                source_root=source_root,
+                assignment=assignment,
+                result_root=result_root,
             )
             with _capture_root_logs_to_file(log_path), _pushd(result_root):
                 exit_code = run_pipeline(
