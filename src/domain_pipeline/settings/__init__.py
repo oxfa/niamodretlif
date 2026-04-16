@@ -8,7 +8,6 @@ from .constants import (
     GEO_PROVIDER_IP_API,
     GEO_PROVIDER_IPWHOIS,
     RDAP_MODE_AUTHORITATIVE,
-    RDAP_MODE_RDAP_ORG,
 )
 
 __all__ = [
@@ -19,6 +18,5 @@ __all__ = [
     "GEO_PROVIDER_IPINFO_LITE",
     "GEO_PROVIDER_IPWHOIS",
     "RDAP_MODE_AUTHORITATIVE",
-    "RDAP_MODE_RDAP_ORG",
     "load_config",
 ]

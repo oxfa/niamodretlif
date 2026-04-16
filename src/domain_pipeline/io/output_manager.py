@@ -45,13 +45,12 @@ def dead_output_path_for_job(job: SourceJob) -> Path:
 
 
 def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> None:
-    """Write unique review rows to the CSV review output."""
+    """Write review rows to the CSV review output in deterministic order."""
     if not review_rows:
         return
 
     review_path.parent.mkdir(parents=True, exist_ok=True)
     should_write_header = not review_path.exists() or review_path.stat().st_size == 0
-    seen_review_rows: set[str] = set()
     with review_path.open("a", encoding="utf-8", newline="") as review_handle:
         writer = csv.DictWriter(
             review_handle,
@@ -88,10 +87,6 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
                     input_reason,
                     review_row["classification_reason"],
                 )
-            signature = csv_row_signature(review_row)
-            if signature in seen_review_rows:
-                continue
-            seen_review_rows.add(signature)
             writer.writerow(cast(Any, review_row))
 
 

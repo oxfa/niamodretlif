@@ -5,16 +5,12 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import logging
 import os
 import shutil
 import sqlite3
 import tempfile
-import urllib.error
-import urllib.request
-import zipfile
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,21 +18,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from domain_pipeline.io.output_manager import write_review_rows
-from domain_pipeline.io.parser import (
-    DomainListParser,
-    InputFileFormat,
-    ParsedDomainEntry,
+from domain_pipeline.io.output_manager import csv_row_signature, write_review_rows
+from domain_pipeline.output_invariants import DuplicateOutputInvariantError
+from domain_pipeline.preparation import (
+    PreparedHostEntry,
+    PreparedInputSet,
+    PreparedRootPlan,
+    prepare_inputs,
 )
 from domain_pipeline.runtime.app import run_pipeline
 from domain_pipeline.runtime.history import (
     PipelineCache,
     ROOT_CLASSIFICATION_TABLE,
 )
-from domain_pipeline.runtime.pipeline_runner import build_checker, build_source_jobs
-from domain_pipeline.settings.constants import (
-    RDAP_MODE_AUTHORITATIVE,
-    RDAP_SCHEDULING_AUTO,
+from domain_pipeline.runtime.pure_helpers import (
+    REVIEW_OUTPUT_COLUMNS,
+    build_review_output_row,
 )
 from domain_pipeline.settings.config import load_config
 
@@ -48,12 +45,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 AUTOMATION_FORMAT_VERSION = 2
 WORKER_STATUS_VERSION = 2
-DEFAULT_MAX_PARALLEL_WORKERS = 18
 DEFAULT_WORKER_RUNTIME_BUDGET_SECONDS = 19800
-STALE_RECOVERY_GRACE_SECONDS = 900
-RESULT_SUMMARY_BASENAME = "result.json"
-WORKER_METADATA_ARTIFACT_NAME = "worker-metadata"
-PREPARED_METADATA_ARTIFACT_NAME = "prepared-rdap-metadata.json"
+WORKER_BUNDLE_BASENAME = "worker-bundle.json"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_SUCCESS = "success"
 STATUS_FAILURE = "failure"
@@ -61,48 +54,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class PreparedWorkerPart:
-    """One committed worker input part plus its descriptor payload."""
+class PreparedWorkerBundle:
+    """One committed worker bundle written by prepare_batch."""
 
-    lines: list[str]
+    worker_id: str
     payload: dict[str, Any]
-
-
-@dataclass
-class PreparedWorkerAssignment:
-    """One worker assignment plus the committed source parts it consumes."""
-
-    payload: dict[str, Any]
-    parts: list[PreparedWorkerPart]
-    prepared_metadata: dict[str, Any] | None = None
 
 
 @dataclass
 class PreparedBatch:
-    """The committed manifest plus all committed worker assignments."""
+    """All committed batch artifacts written by prepare_batch."""
 
-    manifest: dict[str, Any]
-    worker_assignments: list[PreparedWorkerAssignment]
-
-
-@dataclass(frozen=True)
-class PreparedBalancingEntry:
-    """One parsed entry plus the source metadata needed for batch preparation."""
-
-    source_id: str
-    source_index: int
-    entry: ParsedDomainEntry
-    raw_line: str
-    line_index: int
-
-
-@dataclass(frozen=True)
-class PreparedRootPlan:
-    """Preparation-time RDAP metadata for one registrable domain."""
-
-    registrable_domain: str
-    status: str
-    authoritative_base_url: str | None = None
+    batch_id: str
+    config_name: str
+    worker_bundles: list[PreparedWorkerBundle]
+    unmatched_review_rows: list[dict[str, Any]]
+    unmatched_audit_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -110,10 +77,8 @@ class PreparedBatchPlanningInputs:
     """All batch-planning inputs collected before worker assignment starts."""
 
     source_jobs_by_id: dict[str, Any]
-    source_formats: dict[str, InputFileFormat]
-    eligible_root_entries: dict[str, list[PreparedBalancingEntry]]
-    public_suffix_entries: list[PreparedBalancingEntry]
-    legacy_jobs: list[tuple[int, Any, InputFileFormat]]
+    eligible_root_entries: dict[str, list[PreparedHostEntry]]
+    public_suffix_entries: list[PreparedHostEntry]
     root_plans: dict[str, PreparedRootPlan]
 
 
@@ -192,25 +157,12 @@ def _json_dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def _sorted_dict_rows(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
 
 
 def _relative(path: Path) -> str:
-    return path.as_posix()
-
-
-def _relative_to_root(path: Path, *, root: Path) -> str:
-    if path.is_absolute():
-        try:
-            return path.relative_to(root).as_posix()
-        except ValueError:
-            return path.as_posix()
     return path.as_posix()
 
 
@@ -223,197 +175,74 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(_json_dump(payload), encoding="utf-8")
 
 
-def _build_batch_manifest(
-    *,
-    batch_id: str,
-    orchestrator_run_id: str,
-    orchestrator_run_attempt: str,
-    created_timestamp: str,
-    source_sha: str | None,
-    target_ref: str,
-    resolved_config_path: Path,
-    source_root: Path,
-    config_name: str,
-    worker_assignments: list[dict[str, Any]],
-    expected_output_paths: list[str],
-    expected_status_paths: list[str],
-    output_directory: Path,
-    cleanup_inputs: list[str],
-    next_turn_path: Path,
-    done_marker_path: Path,
-    failed_marker_path: Path,
-    manifest_path: Path,
-    worker_runtime_budget_seconds: int,
-    stale_recovery_after_seconds: int,
-) -> dict[str, Any]:
-    expected_worker_identities = [entry["worker_id"] for entry in worker_assignments]
-    return {
-        "automation_format_version": AUTOMATION_FORMAT_VERSION,
-        "batch_id": batch_id,
-        "orchestrator": {
-            "workflow_run_id": str(orchestrator_run_id),
-            "workflow_run_attempt": str(orchestrator_run_attempt),
-            "created_at": created_timestamp,
-            "source_sha": source_sha,
-        },
-        "target_ref": target_ref,
-        "source_input_path": _relative_to_root(resolved_config_path, root=source_root),
-        "config_name": config_name,
-        "worker_assignments": worker_assignments,
-        "expected_worker_count": len(expected_worker_identities),
-        "expected_worker_identities": expected_worker_identities,
-        "expected_output_paths": expected_output_paths,
-        "expected_status_paths": expected_status_paths,
-        "aggregation_inputs": {
-            "result_summary_paths": expected_output_paths,
-            "final_filtered_path": _relative(
-                output_directory / "filtered" / f"{config_name}.txt"
-            ),
-            "final_dead_path": _relative(
-                output_directory / "dead" / f"{config_name}.txt"
-            ),
-            "final_review_path": _relative(
-                output_directory / "review" / f"{config_name}.csv"
-            ),
-            "final_audit_path": _relative(
-                Path("output") / "raw" / f"{config_name}.jsonl"
-            ),
-            "final_log_path": _relative(
-                Path(".tmp") / "runtime" / "logs" / f"{config_name}.log"
-            ),
-            "final_cache_path": _relative(
-                Path(".tmp") / "runtime" / "check-cache.sqlite3"
-            ),
-        },
-        "cleanup_inputs": sorted(set(cleanup_inputs)),
-        "next_turn_preparation_inputs": {
-            "current_batch_path": _relative(next_turn_path),
-        },
-        "done_marker_path": _relative(done_marker_path),
-        "failed_marker_path": _relative(failed_marker_path),
-        "manifest_path": _relative(manifest_path),
-        "audit": {
-            "manifest_created_at": created_timestamp,
-        },
-        "worker_runtime_budget_seconds": worker_runtime_budget_seconds,
-        "stale_recovery_after_seconds": stale_recovery_after_seconds,
-    }
-
-
-def _balanced_chunked(
-    lines: list[str], *, chunk_count: int
-) -> Iterator[tuple[int, list[str]]]:
-    """Yield non-empty chunks that differ in size by at most one line."""
-    if chunk_count < 1:
-        raise ValueError("chunk_count must be at least 1")
-    if chunk_count > len(lines):
-        raise ValueError("chunk_count must not exceed the available line count")
-
-    base_size, remainder = divmod(len(lines), chunk_count)
-    start = 0
-    for chunk_index in range(chunk_count):
-        chunk_size = base_size + (1 if chunk_index < remainder else 0)
-        end = start + chunk_size
-        yield chunk_index, lines[start:end]
-        start = end
-
-
-def _iter_job_chunks(
-    *,
-    parser: DomainListParser,
-    job: Any,
-    part_count: int,
-) -> Iterator[tuple[InputFileFormat, int, list[str]]]:
-    """Yield validated source parts for one source job."""
-    detected_format = parser.detect_file_format(job.lines)
-    if detected_format in {InputFileFormat.UNKNOWN, InputFileFormat.MIXED}:
-        raise ValueError(
-            f"source {job.source_id} from {job.input_label} cannot be split safely "
-            f"because it detected {detected_format.value}"
-        )
-    for chunk_index, chunk_lines in _balanced_chunked(
-        job.lines,
-        chunk_count=part_count,
-    ):
-        yield detected_format, chunk_index, chunk_lines
-
-
-def _job_forced_format(job: Any) -> InputFileFormat | str | None:
-    """Return the explicit job format override when one is configured."""
-    forced_format_value = str(job.config["input"].get("format", "auto"))
-    if forced_format_value == "auto":
-        return None
-    return InputFileFormat(forced_format_value)
-
-
-def _validated_job_format(parser: DomainListParser, job: Any) -> InputFileFormat:
-    """Return one source format or raise when the source cannot be split safely."""
-    forced_format = _job_forced_format(job)
-    if forced_format is None:
-        detected_format = parser.detect_file_format(job.lines)
-    else:
-        detected_format = (
-            forced_format
-            if isinstance(forced_format, InputFileFormat)
-            else InputFileFormat(str(forced_format))
-        )
-    if detected_format in {InputFileFormat.UNKNOWN, InputFileFormat.MIXED}:
-        raise ValueError(
-            f"source {job.source_id} from {job.input_label} cannot be split safely "
-            f"because it detected {detected_format.value}"
-        )
-    return detected_format
-
-
-def _rdap_prebalancing_enabled(job: Any) -> bool:
-    """Return whether one source should use RDAP-aware preparation."""
-    rdap_config = job.config.get("rdap", {})
-    return (
-        rdap_config.get("mode", RDAP_MODE_AUTHORITATIVE) == RDAP_MODE_AUTHORITATIVE
-        and rdap_config.get("scheduling", RDAP_SCHEDULING_AUTO) == RDAP_SCHEDULING_AUTO
-    )
-
-
-def _prepared_entries_for_job(
-    *,
-    parser: DomainListParser,
-    job: Any,
-    source_index: int,
-    detected_format: InputFileFormat,
-) -> list[PreparedBalancingEntry]:
-    """Return parser-backed prepared entries for one RDAP-aware source job."""
-    records = list(
-        parser.process_entry_records(
-            job.lines,
-            source_name=job.input_label,
-            forced_format=detected_format,
-        )
-    )
-    return [
-        PreparedBalancingEntry(
-            source_id=job.source_id,
-            source_index=source_index,
-            entry=record.entry,
-            raw_line=record.raw_line,
-            line_index=record.line_index,
-        )
-        for record in records
-    ]
-
-
-def _worker_prepared_metadata_path(*, batch_id: str, worker_id: str) -> Path:
-    """Return the committed prepared-metadata path for one worker."""
+def _worker_bundle_path(*, batch_id: str, worker_id: str) -> Path:
+    """Return the committed worker-bundle path for one worker."""
     return (
         Path(".automation")
         / "batches"
         / batch_id
         / "workers"
         / worker_id
-        / PREPARED_METADATA_ARTIFACT_NAME
+        / WORKER_BUNDLE_BASENAME
     )
 
 
-def _build_prepared_entry_payload(entry: PreparedBalancingEntry) -> dict[str, Any]:
+def _aggregate_input_review_path(*, batch_id: str) -> Path:
+    """Return the committed prepare-owned review partial path."""
+    return (
+        Path(".automation") / "batches" / batch_id / "aggregate_inputs" / "review.csv"
+    )
+
+
+def _aggregate_input_audit_path(*, batch_id: str) -> Path:
+    """Return the committed prepare-owned raw audit partial path."""
+    return (
+        Path(".automation") / "batches" / batch_id / "aggregate_inputs" / "audit.jsonl"
+    )
+
+
+def _worker_status_path(*, batch_id: str, worker_id: str) -> Path:
+    """Return the worker status path."""
+    return Path(".automation") / "status" / batch_id / f"{worker_id}.json"
+
+
+def _worker_result_root(*, batch_id: str, worker_id: str) -> Path:
+    """Return the worker result root."""
+    return Path(".automation") / "results" / batch_id / worker_id
+
+
+def _worker_output_paths(
+    *, batch_id: str, worker_id: str, config_name: str
+) -> dict[str, Path]:
+    """Return per-worker output/cache/log paths derived from fixed conventions."""
+    result_root = _worker_result_root(batch_id=batch_id, worker_id=worker_id)
+    return {
+        "result_root": result_root,
+        "filtered": result_root / "output" / "filtered" / f"{config_name}.txt",
+        "dead": result_root / "output" / "dead" / f"{config_name}.txt",
+        "review": result_root / "output" / "review" / f"{config_name}.csv",
+        "audit": result_root / "output" / "raw" / f"{config_name}.jsonl",
+        "log": result_root / "state" / "worker.log",
+        "cache": result_root / "cache" / "check-cache.sqlite3",
+    }
+
+
+def _done_marker_path(*, batch_id: str) -> Path:
+    """Return the batch done-marker path."""
+    return Path(".automation") / "aggregate" / batch_id / "done.json"
+
+
+def _failed_marker_path(*, batch_id: str) -> Path:
+    """Return the batch failed-marker path."""
+    return Path(".automation") / "aggregate" / batch_id / "failed.json"
+
+
+def _current_batch_path(*, config_name: str) -> Path:
+    """Return the current-batch payload path for one config."""
+    return Path(".automation") / "current" / f"{config_name}.json"
+
+
+def _build_prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
     """Serialize one prepared entry for the worker runtime fast path."""
     return {
         "host": entry.entry.host,
@@ -426,23 +255,30 @@ def _build_prepared_entry_payload(entry: PreparedBalancingEntry) -> dict[str, An
         "source_format": entry.entry.source_format,
         "raw_line": entry.raw_line,
         "line_index": entry.line_index,
+        "manual_filter_pass": entry.manual_filter_pass,
+        "source_ids": list(entry.source_ids),
+        "source_input_labels": list(entry.source_input_labels),
     }
 
 
-def _build_worker_prepared_metadata(
+def _build_worker_bundle_payload(
     *,
     batch_id: str,
     worker_id: str,
-    source_entries: dict[str, list[PreparedBalancingEntry]],
+    config_name: str,
+    source_entries: dict[str, list[PreparedHostEntry]],
     root_plans: dict[str, PreparedRootPlan],
 ) -> dict[str, Any]:
-    """Return one worker-local prepared metadata payload."""
+    """Return one worker bundle payload."""
     sources_payload: dict[str, Any] = {}
     for source_id, entries in sorted(
         source_entries.items(),
         key=lambda item: (item[1][0].source_index, item[0]),
     ):
-        ordered_entries = sorted(entries, key=lambda current: current.line_index)
+        ordered_entries = sorted(
+            entries,
+            key=lambda current: (current.line_index, current.entry.host),
+        )
         sources_payload[source_id] = {
             "source_index": ordered_entries[0].source_index,
             "entries": [
@@ -453,6 +289,8 @@ def _build_worker_prepared_metadata(
         "automation_format_version": AUTOMATION_FORMAT_VERSION,
         "batch_id": batch_id,
         "worker_id": worker_id,
+        "config_name": config_name,
+        "source_ids": sorted(sources_payload),
         "sources": sources_payload,
         "rdap_roots": {
             registrable_domain: {
@@ -462,6 +300,73 @@ def _build_worker_prepared_metadata(
             for registrable_domain, plan in sorted(root_plans.items())
         },
     }
+
+
+def _worker_bundle_paths(*, batch_id: str, state_root: Path) -> list[Path]:
+    """Return all committed worker-bundle paths for one batch."""
+    bundles_dir = state_root / ".automation" / "batches" / batch_id / "workers"
+    if not bundles_dir.is_dir():
+        return []
+    return sorted(bundles_dir.glob(f"*/{WORKER_BUNDLE_BASENAME}"))
+
+
+def _load_worker_bundle(
+    *,
+    batch_id: str,
+    worker_id: str,
+    state_root: Path,
+) -> dict[str, Any] | None:
+    """Load one worker bundle by convention when it exists."""
+    bundle_path = state_root / _worker_bundle_path(
+        batch_id=batch_id,
+        worker_id=worker_id,
+    )
+    if not bundle_path.is_file():
+        return None
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"worker bundle {bundle_path} must be a JSON object")
+    return payload
+
+
+def _final_output_paths(*, config: dict[str, Any]) -> dict[str, Path]:
+    """Return final aggregate output paths derived from the real config."""
+    output_directory = Path(config["sources"][0]["output"]["directory"])
+    config_name = str(config["config_name"])
+    return {
+        "filtered": output_directory / "filtered" / f"{config_name}.txt",
+        "dead": output_directory / "dead" / f"{config_name}.txt",
+        "review": output_directory / "review" / f"{config_name}.csv",
+        "audit": Path("output") / "raw" / f"{config_name}.jsonl",
+        "log": Path(".tmp") / "runtime" / "logs" / f"{config_name}.log",
+        "cache": Path(".tmp") / "runtime" / "check-cache.sqlite3",
+        "current": _current_batch_path(config_name=config_name),
+    }
+
+
+def _write_audit_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write audit JSONL rows to one path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            handle.write("\n")
+
+
+def _write_review_partial(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write the prepare-owned review partial, including a header when empty."""
+    if rows:
+        write_review_rows(path, rows)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=REVIEW_OUTPUT_COLUMNS, extrasaction="ignore"
+        )
+        writer.writeheader()
 
 
 def _worker_target_counts(worker_ids: list[str], item_count: int) -> dict[str, int]:
@@ -490,7 +395,7 @@ def _choose_balanced_worker(
 def _log_prepared_assignment_summary(
     *,
     worker_ids: list[str],
-    worker_source_entries: dict[str, dict[str, list[PreparedBalancingEntry]]],
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
     worker_entry_counts: Counter,
     worker_server_counts: dict[str, Counter],
@@ -546,166 +451,18 @@ def _log_prepared_assignment_summary(
         )
 
 
-def _collect_batch_planning_inputs(
-    *, parser: DomainListParser, jobs: list[Any]
+def _planning_inputs_from_prepared(
+    prepared_inputs: PreparedInputSet,
 ) -> PreparedBatchPlanningInputs:
-    """Return validated source inputs plus RDAP planning metadata."""
-    source_jobs_by_id: dict[str, Any] = {}
-    source_formats: dict[str, InputFileFormat] = {}
-    eligible_root_entries: dict[str, list[PreparedBalancingEntry]] = defaultdict(list)
-    public_suffix_entries: list[PreparedBalancingEntry] = []
-    legacy_jobs: list[tuple[int, Any, InputFileFormat]] = []
-    checker_cache: dict[str, Any] = {}
-
-    for source_index, job in enumerate(jobs):
-        detected_format = _validated_job_format(parser, job)
-        source_jobs_by_id[job.source_id] = job
-        source_formats[job.source_id] = detected_format
-        if not _rdap_prebalancing_enabled(job):
-            logger.debug(
-                "Batch preparation source=%s using legacy chunking "
-                "(format=%s line_count=%d)",
-                job.source_id,
-                detected_format.value,
-                len(job.lines),
-            )
-            legacy_jobs.append((source_index, job, detected_format))
-            continue
-        prepared_entries = _prepared_entries_for_job(
-            parser=parser,
-            job=job,
-            source_index=source_index,
-            detected_format=detected_format,
-        )
-        logger.debug(
-            "Batch preparation source=%s using RDAP-aware balancing "
-            "(format=%s parsed_entries=%d)",
-            job.source_id,
-            detected_format.value,
-            len(prepared_entries),
-        )
-        for prepared_entry in prepared_entries:
-            registrable_domain = prepared_entry.entry.registrable_domain
-            if prepared_entry.entry.is_public_suffix_input or not registrable_domain:
-                public_suffix_entries.append(prepared_entry)
-                continue
-            eligible_root_entries[registrable_domain].append(prepared_entry)
-        if prepared_entries:
-            checker_cache[job.source_id] = build_checker(job.config)
-
-    root_plans: dict[str, PreparedRootPlan] = {}
-    for registrable_domain, entries in sorted(eligible_root_entries.items()):
-        source_id = entries[0].source_id
-        checker = checker_cache[source_id]
-        try:
-            authoritative_base_url = (
-                checker._authoritative_base_url(  # pylint: disable=protected-access
-                    registrable_domain
-                )
-            )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "RDAP preparation could not resolve authoritative server for "
-                "root=%s source=%s: %s",
-                registrable_domain,
-                source_id,
-                exc,
-            )
-            root_plans[registrable_domain] = PreparedRootPlan(
-                registrable_domain=registrable_domain,
-                status="unknown",
-            )
-            logger.debug(
-                "Batch preparation root=%s resolved status=unknown source=%s",
-                registrable_domain,
-                source_id,
-            )
-            continue
-        if authoritative_base_url is None:
-            root_plans[registrable_domain] = PreparedRootPlan(
-                registrable_domain=registrable_domain,
-                status="unavailable",
-            )
-            logger.debug(
-                "Batch preparation root=%s resolved status=unavailable source=%s",
-                registrable_domain,
-                source_id,
-            )
-            continue
-        root_plans[registrable_domain] = PreparedRootPlan(
-            registrable_domain=registrable_domain,
-            status="resolved",
-            authoritative_base_url=authoritative_base_url,
-        )
-        logger.debug(
-            "Batch preparation root=%s resolved status=resolved "
-            "authoritative_server=%s source=%s",
-            registrable_domain,
-            authoritative_base_url,
-            source_id,
-        )
+    """Project shared prepared inputs into automation worker-planning inputs."""
+    eligible_root_entries, public_suffix_entries = (
+        prepared_inputs.split_entries_for_planning()
+    )
     return PreparedBatchPlanningInputs(
-        source_jobs_by_id=source_jobs_by_id,
-        source_formats=source_formats,
+        source_jobs_by_id=prepared_inputs.source_jobs_by_id,
         eligible_root_entries=eligible_root_entries,
         public_suffix_entries=public_suffix_entries,
-        legacy_jobs=legacy_jobs,
-        root_plans=root_plans,
-    )
-
-
-def _initialize_assignment_descriptors(
-    *,
-    worker_ids: list[str],
-    batch_id: str,
-    config_name: str,
-    resolved_config_path: Path,
-    source_root: Path,
-    cache_config: dict[str, Any],
-) -> tuple[
-    list[PreparedWorkerAssignment],
-    list[dict[str, Any]],
-    dict[str, PreparedWorkerAssignment],
-    list[str],
-    list[str],
-    list[str],
-]:
-    """Return initialized per-worker assignment descriptors."""
-    prepared_assignments: list[PreparedWorkerAssignment] = []
-    assignment_entries: list[dict[str, Any]] = []
-    assignments_by_worker: dict[str, PreparedWorkerAssignment] = {}
-    expected_output_paths: list[str] = []
-    expected_status_paths: list[str] = []
-    cleanup_inputs: list[str] = []
-    for worker_id in worker_ids:
-        assignment_descriptor = _build_worker_assignment_descriptor(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            config_name=config_name,
-            resolved_config_path=resolved_config_path,
-            source_root=source_root,
-            cache_config=cache_config,
-        )
-        cleanup_inputs.append(
-            _relative(Path(assignment_descriptor["cache_path"]).parent)
-        )
-        prepared_assignment = PreparedWorkerAssignment(
-            payload=assignment_descriptor,
-            parts=[],
-            prepared_metadata=None,
-        )
-        prepared_assignments.append(prepared_assignment)
-        assignment_entries.append(assignment_descriptor)
-        assignments_by_worker[worker_id] = prepared_assignment
-        expected_output_paths.append(str(assignment_descriptor["result_summary_path"]))
-        expected_status_paths.append(str(assignment_descriptor["status_path"]))
-    return (
-        prepared_assignments,
-        assignment_entries,
-        assignments_by_worker,
-        expected_output_paths,
-        expected_status_paths,
-        cleanup_inputs,
+        root_plans=prepared_inputs.root_plans,
     )
 
 
@@ -714,12 +471,12 @@ def _assign_prepared_entries_to_workers(
     planning_inputs: PreparedBatchPlanningInputs,
     worker_ids: list[str],
 ) -> tuple[
-    dict[str, dict[str, list[PreparedBalancingEntry]]],
+    dict[str, dict[str, list[PreparedHostEntry]]],
     dict[str, dict[str, PreparedRootPlan]],
     Counter,
 ]:
     """Assign RDAP-aware prepared entries across workers deterministically."""
-    worker_source_entries: dict[str, dict[str, list[PreparedBalancingEntry]]] = {
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]] = {
         worker_id: defaultdict(list) for worker_id in worker_ids
     }
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]] = {
@@ -868,226 +625,47 @@ def _assign_prepared_entries_to_workers(
     return worker_source_entries, worker_root_plans, worker_entry_counts
 
 
-def _append_legacy_parts(
-    *,
-    parser: DomainListParser,
-    batch_id: str,
-    worker_ids: list[str],
-    legacy_jobs: list[tuple[int, Any, InputFileFormat]],
-    assignments_by_worker: dict[str, PreparedWorkerAssignment],
-    worker_entry_counts: Counter,
-) -> None:
-    """Append legacy contiguous source parts for non-RDAP-aware jobs."""
-    source_start_index = 0
-    for source_index, job, detected_format in legacy_jobs:
-        source_part_count = min(len(worker_ids), len(job.lines))
-        for _detected_format, chunk_index, chunk_lines in _iter_job_chunks(
-            parser=parser,
-            job=job,
-            part_count=source_part_count,
-        ):
-            worker_index = (source_start_index + chunk_index) % len(worker_ids)
-            worker_id = worker_ids[worker_index]
-            part_descriptor = _build_part_descriptor(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                source_index=source_index,
-                job=job,
-                detected_format=detected_format,
-                part_index=chunk_index,
-                chunk_lines=chunk_lines,
-            )
-            prepared_part = PreparedWorkerPart(
-                lines=chunk_lines, payload=part_descriptor
-            )
-            assignments_by_worker[worker_id].parts.append(prepared_part)
-            assignments_by_worker[worker_id].payload["parts"].append(part_descriptor)
-            worker_entry_counts[worker_id] += len(chunk_lines)
-        source_start_index = (source_start_index + source_part_count) % len(worker_ids)
-
-
-def _append_prepared_parts(
+def _build_worker_bundles(
     *,
     batch_id: str,
-    worker_ids: list[str],
-    source_jobs_by_id: dict[str, Any],
-    source_formats: dict[str, InputFileFormat],
-    worker_source_entries: dict[str, dict[str, list[PreparedBalancingEntry]]],
-    worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
-    assignments_by_worker: dict[str, PreparedWorkerAssignment],
-) -> None:
-    """Append RDAP-aware prepared parts and worker metadata to assignments."""
-    eligible_part_indexes: dict[tuple[str, str], int] = {}
-    source_worker_ids: dict[str, list[str]] = defaultdict(list)
-    for worker_id, source_entries in worker_source_entries.items():
-        for source_id, entries in source_entries.items():
-            if entries:
-                source_worker_ids[source_id].append(worker_id)
-    for source_id, source_worker_group in source_worker_ids.items():
-        for part_index, worker_id in enumerate(sorted(source_worker_group)):
-            eligible_part_indexes[(source_id, worker_id)] = part_index
-
-    for worker_id in worker_ids:
-        assignment = assignments_by_worker[worker_id]
-        assignment.prepared_metadata = _build_worker_prepared_metadata(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            source_entries=worker_source_entries[worker_id],
-            root_plans=worker_root_plans[worker_id],
-        )
-        for source_id, entries in sorted(
-            worker_source_entries[worker_id].items(),
-            key=lambda item: (item[1][0].source_index, item[0]),
-        ):
-            if not entries:
-                continue
-            ordered_entries = sorted(entries, key=lambda current: current.line_index)
-            source_job = source_jobs_by_id[source_id]
-            chunk_lines = [entry.raw_line for entry in ordered_entries]
-            part_descriptor = _build_part_descriptor(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                source_index=ordered_entries[0].source_index,
-                job=source_job,
-                detected_format=source_formats[source_id],
-                part_index=eligible_part_indexes[(source_id, worker_id)],
-                chunk_lines=chunk_lines,
-            )
-            prepared_part = PreparedWorkerPart(
-                lines=chunk_lines,
-                payload=part_descriptor,
-            )
-            assignment.parts.append(prepared_part)
-            assignment.payload["parts"].append(part_descriptor)
-        ordered_pairs = sorted(
-            zip(assignment.parts, assignment.payload["parts"]),
-            key=lambda pair: (
-                pair[0].payload["source_index"],
-                pair[0].payload["part_index"],
-                pair[0].payload["source_id"],
-            ),
-        )
-        assignment.parts = [pair[0] for pair in ordered_pairs]
-        assignment.payload["parts"] = [pair[1] for pair in ordered_pairs]
-
-
-def _build_worker_assignment_descriptor(
-    *,
-    batch_id: str,
-    worker_id: str,
     config_name: str,
-    resolved_config_path: Path,
-    source_root: Path,
-    cache_config: dict[str, Any],
-) -> dict[str, Any]:
-    result_root = Path(".automation") / "results" / batch_id / worker_id
-    status_path = Path(".automation") / "status" / batch_id / f"{worker_id}.json"
-    summary_path = result_root / RESULT_SUMMARY_BASENAME
-    filtered_path = result_root / "output" / "filtered" / f"{config_name}.txt"
-    dead_path = result_root / "output" / "dead" / f"{config_name}.txt"
-    review_path = result_root / "output" / "review" / f"{config_name}.csv"
-    audit_path = result_root / "output" / "raw" / f"{config_name}.jsonl"
-    log_path = result_root / "state" / "worker.log"
-    cache_path = result_root / "cache" / "check-cache.sqlite3"
-    worker_state_root = result_root / "state"
-    prepared_metadata_path = _worker_prepared_metadata_path(
-        batch_id=batch_id,
-        worker_id=worker_id,
-    )
-    return {
-        "batch_id": batch_id,
-        "config_name": config_name,
-        "config_path": _relative_to_root(resolved_config_path, root=source_root),
-        "worker_id": worker_id,
-        "parts": [],
-        "prepared_metadata_path": _relative(prepared_metadata_path),
-        "result_root": _relative(result_root),
-        "result_summary_path": _relative(summary_path),
-        "status_path": _relative(status_path),
-        "filtered_path": _relative(filtered_path),
-        "dead_path": _relative(dead_path),
-        "review_path": _relative(review_path),
-        "audit_path": _relative(audit_path),
-        "log_path": _relative(log_path),
-        "cache_path": _relative(cache_path),
-        "state_root": _relative(worker_state_root),
-        "cache_config": json.loads(json.dumps(cache_config)),
-    }
-
-
-def _build_part_descriptor(
-    *,
-    batch_id: str,
-    worker_id: str,
-    source_index: int,
-    job: Any,
-    detected_format: InputFileFormat,
-    part_index: int,
-    chunk_lines: list[str],
-) -> dict[str, Any]:
-    part_path = (
-        Path(".automation")
-        / "batches"
-        / batch_id
-        / "workers"
-        / worker_id
-        / f"{job.source_id}.txt"
-    )
-    return {
-        "source_id": job.source_id,
-        "source_index": source_index,
-        "part_index": part_index,
-        "worker_id": worker_id,
-        "source_input_label": job.input_label,
-        "source_format": detected_format.value,
-        "line_count": len(chunk_lines),
-        "part_path": _relative(part_path),
-        "source_config": json.loads(json.dumps(job.config)),
-    }
+    worker_ids: list[str],
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
+    worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
+) -> list[PreparedWorkerBundle]:
+    """Return the committed worker bundles for participating workers."""
+    bundles: list[PreparedWorkerBundle] = []
+    for worker_id in worker_ids:
+        if not worker_source_entries[worker_id]:
+            continue
+        bundles.append(
+            PreparedWorkerBundle(
+                worker_id=worker_id,
+                payload=_build_worker_bundle_payload(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                    source_entries=worker_source_entries[worker_id],
+                    root_plans=worker_root_plans[worker_id],
+                ),
+            )
+        )
+    return bundles
 
 
 def prepare_batch(
     *,
     source_root: Path,
     config_path: Path,
-    target_ref: str,
-    source_sha: str | None,
     worker_ids: list[str],
     batch_id: str,
-    orchestrator_run_id: str,
-    orchestrator_run_attempt: str,
-    worker_runtime_budget_seconds: int = DEFAULT_WORKER_RUNTIME_BUDGET_SECONDS,
-    created_at: str | None = None,
 ) -> PreparedBatch:
-    """Build one committed batch manifest and deterministic worker input parts."""
-    if worker_runtime_budget_seconds < 1:
-        raise ValueError("worker_runtime_budget_seconds must be at least 1")
-    created_timestamp = created_at or _utc_now()
-    stale_recovery_after_seconds = (
-        worker_runtime_budget_seconds + STALE_RECOVERY_GRACE_SECONDS
-    )
-    resolved_config_path = _resolve_from_root(source_root, config_path)
-    config = load_config(resolved_config_path)
-    jobs = build_source_jobs(config)
-    if not jobs:
-        raise ValueError(f"config {config_path} produced no runnable source jobs")
-
-    config_name = str(config["config_name"])
-    output_directory = Path(jobs[0].config["output"]["directory"])
-    manifest_path = Path(".automation") / "batches" / batch_id / "manifest.json"
-    next_turn_path = Path(".automation") / "current" / f"{config_name}.json"
-    done_marker_path = Path(".automation") / "aggregate" / batch_id / "done.json"
-    failed_marker_path = Path(".automation") / "aggregate" / batch_id / "failed.json"
-
-    parser = DomainListParser()
-    planning_inputs = _collect_batch_planning_inputs(parser=parser, jobs=jobs)
-    total_work_units = (
-        len(planning_inputs.root_plans)
-        + len(planning_inputs.public_suffix_entries)
-        + sum(
-            len(job.lines)
-            for _source_index, job, _detected_format in planning_inputs.legacy_jobs
-        )
+    """Build one committed batch worth of worker bundles and aggregate partials."""
+    prepared_inputs = prepare_inputs(source_root=source_root, config_path=config_path)
+    config_name = str(prepared_inputs.config["config_name"])
+    planning_inputs = _planning_inputs_from_prepared(prepared_inputs)
+    total_work_units = len(planning_inputs.root_plans) + len(
+        planning_inputs.public_suffix_entries
     )
     if total_work_units < 1:
         raise ValueError("config produced no input lines to process")
@@ -1095,208 +673,59 @@ def prepare_batch(
     if not participating_worker_ids:
         raise ValueError("at least one worker_id is required to prepare a batch")
 
-    (
-        prepared_assignments,
-        assignment_entries,
-        assignments_by_worker,
-        expected_output_paths,
-        expected_status_paths,
-        cleanup_inputs,
-    ) = _initialize_assignment_descriptors(
-        worker_ids=participating_worker_ids,
-        batch_id=batch_id,
-        config_name=config_name,
-        resolved_config_path=resolved_config_path,
-        source_root=source_root,
-        cache_config=config["cache"],
-    )
-    worker_source_entries, worker_root_plans, worker_entry_counts = (
+    worker_source_entries, worker_root_plans, _worker_entry_counts = (
         _assign_prepared_entries_to_workers(
             planning_inputs=planning_inputs,
             worker_ids=participating_worker_ids,
         )
     )
-    _append_legacy_parts(
-        parser=parser,
+    worker_bundles = _build_worker_bundles(
         batch_id=batch_id,
+        config_name=config_name,
         worker_ids=participating_worker_ids,
-        legacy_jobs=planning_inputs.legacy_jobs,
-        assignments_by_worker=assignments_by_worker,
-        worker_entry_counts=worker_entry_counts,
-    )
-    _append_prepared_parts(
-        batch_id=batch_id,
-        worker_ids=participating_worker_ids,
-        source_jobs_by_id=planning_inputs.source_jobs_by_id,
-        source_formats=planning_inputs.source_formats,
         worker_source_entries=worker_source_entries,
         worker_root_plans=worker_root_plans,
-        assignments_by_worker=assignments_by_worker,
     )
-
-    manifest = _build_batch_manifest(
-        batch_id=batch_id,
-        orchestrator_run_id=orchestrator_run_id,
-        orchestrator_run_attempt=orchestrator_run_attempt,
-        created_timestamp=created_timestamp,
-        source_sha=source_sha,
-        target_ref=target_ref,
-        resolved_config_path=resolved_config_path,
-        source_root=source_root,
-        config_name=config_name,
-        worker_assignments=assignment_entries,
-        expected_output_paths=expected_output_paths,
-        expected_status_paths=expected_status_paths,
-        output_directory=output_directory,
-        cleanup_inputs=cleanup_inputs,
-        next_turn_path=next_turn_path,
-        done_marker_path=done_marker_path,
-        failed_marker_path=failed_marker_path,
-        manifest_path=manifest_path,
-        worker_runtime_budget_seconds=worker_runtime_budget_seconds,
-        stale_recovery_after_seconds=stale_recovery_after_seconds,
-    )
+    matched_manual_hosts = {
+        entry.entry.host
+        for source_entries in worker_source_entries.values()
+        for entries in source_entries.values()
+        for entry in entries
+        if entry.manual_filter_pass
+    }
     return PreparedBatch(
-        manifest=manifest,
-        worker_assignments=prepared_assignments,
+        batch_id=batch_id,
+        config_name=config_name,
+        worker_bundles=worker_bundles,
+        unmatched_review_rows=[
+            row
+            for row in prepared_inputs.unmatched_review_rows
+            if row["host"] not in matched_manual_hosts
+        ],
+        unmatched_audit_rows=[
+            row
+            for row in prepared_inputs.unmatched_audit_rows
+            if row["host"] not in matched_manual_hosts
+        ],
     )
 
 
 def write_prepared_batch(prepared: PreparedBatch, *, state_root: Path) -> list[str]:
     """Write one prepared batch to disk and return the committed path list."""
-    manifest_path = state_root / prepared.manifest["manifest_path"]
-    _write_json(manifest_path, prepared.manifest)
-    committed_paths = [prepared.manifest["manifest_path"]]
-    for assignment in prepared.worker_assignments:
-        prepared_metadata_path = (
-            state_root / assignment.payload["prepared_metadata_path"]
+    committed_paths: list[str] = []
+    for bundle in prepared.worker_bundles:
+        bundle_path = _worker_bundle_path(
+            batch_id=prepared.batch_id,
+            worker_id=bundle.worker_id,
         )
-        _write_json(
-            prepared_metadata_path,
-            (
-                assignment.prepared_metadata
-                if assignment.prepared_metadata is not None
-                else {
-                    "automation_format_version": AUTOMATION_FORMAT_VERSION,
-                    "batch_id": prepared.manifest["batch_id"],
-                    "worker_id": assignment.payload["worker_id"],
-                    "sources": {},
-                    "rdap_roots": {},
-                }
-            ),
-        )
-        committed_paths.append(assignment.payload["prepared_metadata_path"])
-        for part in assignment.parts:
-            part_path = state_root / part.payload["part_path"]
-            part_path.parent.mkdir(parents=True, exist_ok=True)
-            part_path.write_text("".join(part.lines), encoding="utf-8")
-            committed_paths.append(part.payload["part_path"])
+        _write_json(state_root / bundle_path, bundle.payload)
+        committed_paths.append(_relative(bundle_path))
+    review_path = _aggregate_input_review_path(batch_id=prepared.batch_id)
+    audit_path = _aggregate_input_audit_path(batch_id=prepared.batch_id)
+    _write_review_partial(state_root / review_path, prepared.unmatched_review_rows)
+    _write_audit_rows(state_root / audit_path, prepared.unmatched_audit_rows)
+    committed_paths.extend([_relative(review_path), _relative(audit_path)])
     return sorted(committed_paths)
-
-
-def validate_manifest_payload(manifest: dict[str, Any]) -> None:
-    """Validate one committed batch manifest."""
-    required_keys = {
-        "automation_format_version",
-        "batch_id",
-        "orchestrator",
-        "target_ref",
-        "worker_assignments",
-        "expected_worker_count",
-        "expected_worker_identities",
-        "expected_output_paths",
-        "expected_status_paths",
-        "aggregation_inputs",
-        "cleanup_inputs",
-        "next_turn_preparation_inputs",
-        "done_marker_path",
-        "failed_marker_path",
-        "manifest_path",
-        "worker_runtime_budget_seconds",
-        "stale_recovery_after_seconds",
-    }
-    missing_keys = required_keys.difference(manifest)
-    if missing_keys:
-        raise ValueError(
-            "manifest is missing required keys: " + ", ".join(sorted(missing_keys))
-        )
-    if manifest["automation_format_version"] != AUTOMATION_FORMAT_VERSION:
-        raise ValueError(
-            "manifest automation_format_version must be " f"{AUTOMATION_FORMAT_VERSION}"
-        )
-    if (
-        not isinstance(manifest["worker_assignments"], list)
-        or not manifest["worker_assignments"]
-    ):
-        raise ValueError(
-            "manifest worker_assignments must contain at least one assignment"
-        )
-    if len(manifest["expected_worker_identities"]) != manifest["expected_worker_count"]:
-        raise ValueError(
-            "manifest expected_worker_count does not match worker identities"
-        )
-    if int(manifest["worker_runtime_budget_seconds"]) < 1:
-        raise ValueError("manifest worker_runtime_budget_seconds must be at least 1")
-    if int(manifest["stale_recovery_after_seconds"]) < int(
-        manifest["worker_runtime_budget_seconds"]
-    ):
-        raise ValueError(
-            "manifest stale_recovery_after_seconds must be at least the worker runtime budget"
-        )
-    if not isinstance(manifest["orchestrator"], dict):
-        raise ValueError("manifest orchestrator must be a JSON object")
-
-
-def load_manifest(batch_id: str, *, state_root: Path) -> dict[str, Any]:
-    """Load one manifest by batch identifier."""
-    manifest_path = state_root / ".automation" / "batches" / batch_id / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError(f"manifest {manifest_path} must be a JSON object")
-    validate_manifest_payload(manifest)
-    return manifest
-
-
-def _load_existing_metadata(metadata_output_path: Path) -> dict[str, Any]:
-    if not metadata_output_path.exists():
-        return {}
-    payload = json.loads(metadata_output_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"worker metadata {metadata_output_path} must be a JSON object"
-        )
-    return payload
-
-
-def bootstrap_worker_metadata(
-    *,
-    batch_id: str,
-    worker_id: str,
-    target_ref: str,
-    source_sha: str,
-    run_id: str,
-    run_attempt: str,
-    metadata_output_path: Path,
-) -> dict[str, Any]:
-    """Write minimal worker metadata before manifest or status handling begins."""
-    metadata = {
-        "automation_format_version": AUTOMATION_FORMAT_VERSION,
-        "batch_id": batch_id,
-        "worker_id": worker_id,
-        "target_ref": target_ref,
-        "source_sha": source_sha,
-        "run_id": str(run_id),
-        "run_attempt": str(run_attempt),
-        "participates": False,
-        "status_paths": [],
-        "result_paths": [],
-        "overall_conclusion": STATUS_IN_PROGRESS,
-        "status_templates": [],
-        "errors": [],
-        "phase": "bootstrapped",
-    }
-    _write_json(metadata_output_path, metadata)
-    return metadata
 
 
 @contextmanager
@@ -1313,33 +742,6 @@ def _pushd(path: Path) -> Iterator[None]:
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml_module.safe_dump(payload, sort_keys=False), encoding="utf-8")
-
-
-def _write_result_summary(
-    *,
-    repo_root: Path,
-    assignment: dict[str, Any],
-    conclusion: str,
-    error_reason: str | None,
-) -> dict[str, Any]:
-    summary_payload = {
-        "automation_format_version": AUTOMATION_FORMAT_VERSION,
-        "batch_id": assignment["batch_id"],
-        "worker_id": assignment["worker_id"],
-        "conclusion": conclusion,
-        "result_root": assignment["result_root"],
-        "filtered_path": assignment["filtered_path"],
-        "dead_path": assignment["dead_path"],
-        "review_path": assignment["review_path"],
-        "audit_path": assignment["audit_path"],
-        "cache_path": assignment["cache_path"],
-        "log_path": assignment["log_path"],
-        "state_root": assignment["state_root"],
-        "error_reason": error_reason,
-        "written_at": _utc_now(),
-    }
-    _write_json(repo_root / assignment["result_summary_path"], summary_payload)
-    return summary_payload
 
 
 @contextmanager
@@ -1370,107 +772,62 @@ def _capture_root_logs_to_file(log_path: Path) -> Iterator[None]:
         file_handler.close()
 
 
-def _assignment_for_worker(
-    manifest: dict[str, Any], *, worker_id: str
-) -> dict[str, Any] | None:
-    for assignment in manifest["worker_assignments"]:
-        if assignment["worker_id"] == worker_id:
-            return assignment
-    return None
-
-
 def _build_worker_config(
     *,
     source_root: Path,
     state_root: Path,
-    assignment: dict[str, Any],
+    config_path: Path,
+    bundle: dict[str, Any],
     temp_config_path: Path,
 ) -> None:
-    cache_config = json.loads(json.dumps(assignment["cache_config"]))
+    config = load_config(config_path)
+    selected_source_ids = set(bundle.get("source_ids", []))
+    config_name = str(bundle["config_name"])
+    worker_paths = _worker_output_paths(
+        batch_id=str(bundle["batch_id"]),
+        worker_id=str(bundle["worker_id"]),
+        config_name=config_name,
+    )
     source_configs: list[dict[str, Any]] = []
-    for part in assignment["parts"]:
-        source_config = json.loads(json.dumps(part["source_config"]))
-        source_config.get("geo", {}).pop("requires_region_lookup", None)
-        source_config.get("geo", {}).pop("effective_provider", None)
-        source_config["input"]["type"] = "file"
-        source_config["input"]["location"] = str(state_root / part["part_path"])
-        source_config["input"]["label"] = part["source_input_label"]
-        source_config["input"]["format"] = part["source_format"]
-        source_config["output"]["directory"] = str(
-            state_root / Path(assignment["result_root"]) / "output"
+    for source_config in config["sources"]:
+        if (
+            not source_config["enabled"]
+            or source_config["id"] not in selected_source_ids
+        ):
+            continue
+        selected_source = json.loads(json.dumps(source_config))
+        selected_source.get("geo", {}).pop("requires_region_lookup", None)
+        selected_source.get("geo", {}).pop("effective_provider", None)
+        selected_source["output"]["directory"] = str(
+            state_root / worker_paths["result_root"] / "output"
         )
-        source_configs.append(source_config)
+        source_configs.append(selected_source)
     payload = {
         "version": 2,
         "cache": {
-            "cache_file": str(state_root / assignment["cache_path"]),
+            "cache_file": str(state_root / worker_paths["cache"]),
             "baseline_cache_file": str(
                 (source_root / ".tmp" / "runtime" / "check-cache.sqlite3").resolve()
             ),
-            "classification_ttl_days": cache_config["classification_ttl_days"],
-            "dns_ttl_days": cache_config["dns_ttl_days"],
+            "classification_ttl_days": config["cache"]["classification_ttl_days"],
+            "dns_ttl_days": config["cache"]["dns_ttl_days"],
         },
         "sources": source_configs,
     }
     _write_yaml(temp_config_path, payload)
 
 
-def _stage_worker_manual_filter_pass_file(
-    *, source_root: Path, assignment: dict[str, Any], result_root: Path
-) -> Path | None:
-    """Copy the repo-root manual filter-pass file into the worker runtime cwd."""
-    source_path = (
-        source_root
-        / "input"
-        / "manual_filter_pass"
-        / f"{assignment['config_name']}.txt"
-    )
-    if not source_path.is_file():
-        logger.debug(
-            "Worker %s found no repo-root manual filter-pass file at %s; "
-            "skipping worker-local staging",
-            assignment["worker_id"],
-            source_path,
-        )
-        return None
-    target_path = (
-        result_root
-        / "input"
-        / "manual_filter_pass"
-        / f"{assignment['config_name']}.txt"
-    )
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, target_path)
-    logger.debug(
-        "Worker %s staged manual filter-pass file from %s to %s",
-        assignment["worker_id"],
-        source_path,
-        target_path,
-    )
-    return target_path
-
-
 def _status_template_for_worker(
     *,
-    manifest: dict[str, Any],
-    assignment: dict[str, Any],
+    batch_id: str,
     worker_id: str,
 ) -> dict[str, Any]:
     return {
         "automation_format_version": AUTOMATION_FORMAT_VERSION,
         "status_version": WORKER_STATUS_VERSION,
-        "batch_id": manifest["batch_id"],
+        "batch_id": batch_id,
         "worker_id": worker_id,
-        "worker_category": "static-worker-workflow",
         "conclusion": STATUS_IN_PROGRESS,
-        "output_paths": [
-            assignment["result_root"],
-            assignment["filtered_path"],
-            assignment["dead_path"],
-            assignment["review_path"],
-            assignment["audit_path"],
-        ],
-        "status_path": assignment["status_path"],
         "error_reason": None,
         "started_at": _utc_now(),
     }
@@ -1490,9 +847,7 @@ def _status_payload_from_template(
         "status_version": WORKER_STATUS_VERSION,
         "batch_id": template["batch_id"],
         "worker_id": template["worker_id"],
-        "worker_category": template["worker_category"],
         "conclusion": conclusion,
-        "output_paths": template["output_paths"],
         "commit_sha_produced": output_commit_sha,
         "timestamps": {
             "started_at": template["started_at"],
@@ -1509,129 +864,108 @@ def initialize_worker_statuses(
     batch_id: str,
     worker_id: str,
     state_root: Path,
-    metadata_output_path: Path,
 ) -> dict[str, Any]:
-    """Write initial worker metadata and one in-progress worker status file."""
-    manifest = load_manifest(batch_id, state_root=state_root)
-    metadata = _load_existing_metadata(metadata_output_path)
-    assignment = _assignment_for_worker(manifest, worker_id=worker_id)
-    if assignment is None:
-        metadata.update(
-            {
-                "automation_format_version": AUTOMATION_FORMAT_VERSION,
-                "batch_id": batch_id,
-                "worker_id": worker_id,
-                "participates": False,
-                "target_ref": manifest["target_ref"],
-                "status_paths": [],
-                "result_paths": [],
-                "overall_conclusion": "skipped",
-                "status_templates": [],
-                "phase": "skipped",
-            }
-        )
-        _write_json(metadata_output_path, metadata)
-        return metadata
+    """Write one in-progress worker status when a worker bundle exists."""
+    bundle = _load_worker_bundle(
+        batch_id=batch_id,
+        worker_id=worker_id,
+        state_root=state_root,
+    )
+    if bundle is None:
+        return {
+            "automation_format_version": AUTOMATION_FORMAT_VERSION,
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "participates": False,
+        }
 
-    status_templates = [
-        _status_template_for_worker(
-            manifest=manifest,
-            assignment=assignment,
-            worker_id=worker_id,
-        )
-    ]
-    written_paths: list[str] = []
-    for template in status_templates:
-        status_payload = _status_payload_from_template(
+    template = _status_template_for_worker(batch_id=batch_id, worker_id=worker_id)
+    status_path = state_root / _worker_status_path(
+        batch_id=batch_id, worker_id=worker_id
+    )
+    _write_json(
+        status_path,
+        _status_payload_from_template(
             template=template,
             output_commit_sha="",
             push_retry_count=0,
             finished_at=None,
             conclusion=STATUS_IN_PROGRESS,
             failure_reason=None,
-        )
-        status_path = state_root / template["status_path"]
-        _write_json(status_path, status_payload)
-        written_paths.append(template["status_path"])
-
-    metadata.update(
-        {
-            "automation_format_version": AUTOMATION_FORMAT_VERSION,
-            "batch_id": batch_id,
-            "worker_id": worker_id,
-            "participates": True,
-            "target_ref": manifest["target_ref"],
-            "status_templates": status_templates,
-            "status_paths": [template["status_path"] for template in status_templates],
-            "result_paths": [assignment["result_root"]],
-            "overall_conclusion": STATUS_IN_PROGRESS,
-            "errors": list(metadata.get("errors", [])),
-            "initialized_status_paths": written_paths,
-            "phase": "initialized",
-        }
+        ),
     )
-    _write_json(metadata_output_path, metadata)
-    return metadata
+    return {
+        "automation_format_version": AUTOMATION_FORMAT_VERSION,
+        "batch_id": batch_id,
+        "worker_id": worker_id,
+        "participates": True,
+        "status_path": _relative(
+            _worker_status_path(batch_id=batch_id, worker_id=worker_id)
+        ),
+    }
 
 
 def run_worker(
     *,
     batch_id: str,
     worker_id: str,
+    config_path: Path,
     source_root: Path,
     state_root: Path,
-    metadata_output_path: Path,
     max_runtime_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Process one worker assignment and write one metadata file."""
-    manifest = load_manifest(batch_id, state_root=state_root)
-    assignment = _assignment_for_worker(manifest, worker_id=worker_id)
-    if assignment is None:
-        return initialize_worker_statuses(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            state_root=state_root,
-            metadata_output_path=metadata_output_path,
-        )
+    """Process one worker bundle."""
+    bundle = _load_worker_bundle(
+        batch_id=batch_id,
+        worker_id=worker_id,
+        state_root=state_root,
+    )
+    if bundle is None:
+        return {
+            "automation_format_version": AUTOMATION_FORMAT_VERSION,
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "participates": False,
+            "overall_conclusion": "skipped",
+        }
 
-    if metadata_output_path.exists():
-        metadata = json.loads(metadata_output_path.read_text(encoding="utf-8"))
-    else:
-        metadata = initialize_worker_statuses(
+    status_path = state_root / _worker_status_path(
+        batch_id=batch_id, worker_id=worker_id
+    )
+    if not status_path.exists():
+        initialize_worker_statuses(
             batch_id=batch_id,
             worker_id=worker_id,
             state_root=state_root,
-            metadata_output_path=metadata_output_path,
         )
-    template = metadata["status_templates"][0]
     overall_conclusion = STATUS_SUCCESS
-    error_messages: list[str] = list(metadata.get("errors", []))
-    result_root = state_root / assignment["result_root"]
-    log_path = state_root / assignment["log_path"]
+    worker_paths = _worker_output_paths(
+        batch_id=batch_id,
+        worker_id=worker_id,
+        config_name=str(bundle["config_name"]),
+    )
+    result_root = state_root / worker_paths["result_root"]
+    log_path = state_root / worker_paths["log"]
     if result_root.exists():
         shutil.rmtree(result_root)
     error_reason: str | None = None
     conclusion = STATUS_SUCCESS
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_config_path = Path(temp_dir) / f"{assignment['config_name']}.yaml"
+            temp_config_path = Path(temp_dir) / f"{bundle['config_name']}.yaml"
             _build_worker_config(
                 source_root=source_root,
                 state_root=state_root,
-                assignment=assignment,
+                config_path=config_path,
+                bundle=bundle,
                 temp_config_path=temp_config_path,
-            )
-            _stage_worker_manual_filter_pass_file(
-                source_root=source_root,
-                assignment=assignment,
-                result_root=result_root,
             )
             with _capture_root_logs_to_file(log_path), _pushd(result_root):
                 exit_code = run_pipeline(
                     temp_config_path,
                     max_runtime_seconds=max_runtime_seconds,
                     prepared_metadata_path=state_root
-                    / assignment["prepared_metadata_path"],
+                    / _worker_bundle_path(batch_id=batch_id, worker_id=worker_id),
                 )
             if exit_code != 0:
                 raise RuntimeError(f"pipeline exited with status {exit_code}")
@@ -1639,71 +973,72 @@ def run_worker(
         overall_conclusion = STATUS_FAILURE
         conclusion = STATUS_FAILURE
         error_reason = str(exc)
-        error_messages.append(f"{worker_id}: {exc}")
         logging.getLogger(__name__).exception("Worker %s failed", worker_id)
-    summary_payload = _write_result_summary(
-        repo_root=state_root,
-        assignment=assignment,
-        conclusion=conclusion,
-        error_reason=error_reason,
-    )
-    template["conclusion"] = conclusion
-    template["error_reason"] = error_reason
-    template["output_paths"] = [
-        summary_payload["result_root"],
-        summary_payload["filtered_path"],
-        summary_payload["dead_path"],
-        summary_payload["review_path"],
-        summary_payload["audit_path"],
-    ]
-    metadata["status_templates"] = [template]
-    metadata["status_paths"] = [
-        template["status_path"] for template in metadata["status_templates"]
-    ]
-    metadata["result_paths"] = [assignment["result_root"]]
-    metadata["overall_conclusion"] = overall_conclusion
-    metadata["errors"] = error_messages
-    metadata["phase"] = "processed"
-    _write_json(metadata_output_path, metadata)
-    return metadata
+    return {
+        "automation_format_version": AUTOMATION_FORMAT_VERSION,
+        "batch_id": batch_id,
+        "worker_id": worker_id,
+        "participates": True,
+        "overall_conclusion": overall_conclusion,
+        "conclusion": conclusion,
+        "error_reason": error_reason,
+        "status_path": _relative(
+            _worker_status_path(batch_id=batch_id, worker_id=worker_id)
+        ),
+    }
 
 
 def finalize_worker_statuses(
     *,
+    batch_id: str,
+    worker_id: str,
     state_root: Path,
-    metadata_path: Path,
     output_commit_sha: str,
     push_retry_count: int,
     fallback_conclusion: str | None = None,
     fallback_failure_reason: str | None = None,
     finished_at: str | None = None,
 ) -> list[str]:
-    """Write committed worker status files after the output commit SHA is known."""
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if not metadata.get("participates"):
-        return []
-    finished_timestamp = finished_at or _utc_now()
-    written_paths: list[str] = []
-    for template in metadata["status_templates"]:
-        conclusion = template["conclusion"]
-        failure_reason = template["error_reason"]
-        if conclusion == STATUS_IN_PROGRESS and fallback_conclusion is not None:
-            conclusion = fallback_conclusion
-            failure_reason = fallback_failure_reason
-        status_payload = _status_payload_from_template(
-            template=template,
-            output_commit_sha=output_commit_sha,
-            push_retry_count=push_retry_count,
-            finished_at=finished_timestamp,
-            conclusion=conclusion,
-            failure_reason=failure_reason,
+    """Finalize one worker status file after processing."""
+    if (
+        _load_worker_bundle(
+            batch_id=batch_id, worker_id=worker_id, state_root=state_root
         )
-        status_path = state_root / template["status_path"]
-        _write_json(status_path, status_payload)
-        written_paths.append(template["status_path"])
-    metadata["phase"] = "finalized"
-    _write_json(metadata_path, metadata)
-    return written_paths
+        is None
+    ):
+        return []
+    status_path = state_root / _worker_status_path(
+        batch_id=batch_id, worker_id=worker_id
+    )
+    if not status_path.is_file():
+        return []
+    existing_payload = json.loads(status_path.read_text(encoding="utf-8"))
+    finished_timestamp = finished_at or _utc_now()
+    conclusion = str(existing_payload["conclusion"])
+    failure_reason = existing_payload.get("failure_reason")
+    if conclusion == STATUS_IN_PROGRESS:
+        conclusion = fallback_conclusion or STATUS_SUCCESS
+        failure_reason = (
+            fallback_failure_reason if conclusion == STATUS_FAILURE else None
+        )
+    _write_json(
+        status_path,
+        {
+            "automation_format_version": AUTOMATION_FORMAT_VERSION,
+            "status_version": WORKER_STATUS_VERSION,
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "conclusion": conclusion,
+            "commit_sha_produced": output_commit_sha,
+            "timestamps": {
+                "started_at": existing_payload["timestamps"]["started_at"],
+                "finished_at": finished_timestamp,
+            },
+            "retry_count": push_retry_count,
+            "failure_reason": failure_reason,
+        },
+    )
+    return [_relative(_worker_status_path(batch_id=batch_id, worker_id=worker_id))]
 
 
 def materialize_incomplete_statuses(
@@ -1714,12 +1049,13 @@ def materialize_incomplete_statuses(
     finished_at: str | None = None,
 ) -> dict[str, Any]:
     """Rewrite missing or in-progress worker statuses to terminal failure."""
-    manifest = load_manifest(batch_id, state_root=state_root)
     written_paths: list[str] = []
     finished_timestamp = finished_at or _utc_now()
-    created_at_raw = str(manifest["orchestrator"]["created_at"])
-    for assignment in manifest["worker_assignments"]:
-        status_path = state_root / assignment["status_path"]
+    for bundle_path in _worker_bundle_paths(batch_id=batch_id, state_root=state_root):
+        worker_id = bundle_path.parent.name
+        status_path = state_root / _worker_status_path(
+            batch_id=batch_id, worker_id=worker_id
+        )
         existing_payload: dict[str, Any] | None = None
         if status_path.exists():
             loaded_payload = json.loads(status_path.read_text(encoding="utf-8"))
@@ -1730,17 +1066,13 @@ def materialize_incomplete_statuses(
             existing_payload = loaded_payload
             if existing_payload.get("conclusion") in {STATUS_SUCCESS, STATUS_FAILURE}:
                 continue
-        template = _status_template_for_worker(
-            manifest=manifest,
-            assignment=assignment,
-            worker_id=str(assignment["worker_id"]),
-        )
+        template = _status_template_for_worker(batch_id=batch_id, worker_id=worker_id)
         if existing_payload is not None:
             started_at = existing_payload.get("timestamps", {}).get("started_at")
             if started_at is not None:
                 template["started_at"] = started_at
         else:
-            template["started_at"] = created_at_raw
+            template["started_at"] = finished_timestamp
         _write_json(
             status_path,
             _status_payload_from_template(
@@ -1752,7 +1084,9 @@ def materialize_incomplete_statuses(
                 failure_reason=failure_reason,
             ),
         )
-        written_paths.append(assignment["status_path"])
+        written_paths.append(
+            _relative(_worker_status_path(batch_id=batch_id, worker_id=worker_id))
+        )
     return {
         "batch_id": batch_id,
         "written_paths": written_paths,
@@ -1760,73 +1094,33 @@ def materialize_incomplete_statuses(
     }
 
 
-def download_worker_metadata(
-    *,
-    repo: str,
-    run_id: str,
-    token: str,
-    output_path: Path,
-    artifact_name: str = WORKER_METADATA_ARTIFACT_NAME,
-) -> dict[str, Any]:
-    """Download and extract one worker metadata artifact via the GitHub REST API."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    list_request = urllib.request.Request(
-        (
-            f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
-            f"?name={artifact_name}"
-        ),
-        headers=headers,
-    )
-    try:
-        with urllib.request.urlopen(list_request) as response:  # nosec B310
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:  # pragma: no cover
-        raise RuntimeError(f"unable to list artifacts for run {run_id}: {exc}") from exc
-    artifacts = payload.get("artifacts", [])
-    if not artifacts:
-        raise RuntimeError(
-            f"no artifact named {artifact_name!r} found for run {run_id}"
-        )
-    artifact_id = artifacts[0]["id"]
-    download_request = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip",
-        headers=headers,
-    )
-    with urllib.request.urlopen(download_request) as response:  # nosec B310
-        archive_bytes = response.read()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as temp_dir:
-        archive_path = Path(temp_dir) / "artifact.zip"
-        archive_path.write_bytes(archive_bytes)
-        with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(Path(temp_dir) / "artifact")
-        extracted_path = Path(temp_dir) / "artifact" / output_path.name
-        if not extracted_path.exists():
-            raise RuntimeError(
-                f"artifact {artifact_name!r} did not contain expected file {output_path.name!r}"
-            )
-        shutil.copy2(extracted_path, output_path)
-    return json.loads(output_path.read_text(encoding="utf-8"))
-
-
 def _canonical_row_signature(row: dict[str, Any]) -> str:
     return json.dumps(row, sort_keys=True, separators=(",", ":"))
 
 
 def _merge_host_txt_files(source_paths: Iterable[Path], target_path: Path) -> None:
-    hosts = sorted(
-        {
-            line.strip()
-            for source_path in source_paths
-            if source_path.exists()
-            for line in source_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    )
+    seen_hosts: dict[str, str] = {}
+    ordered_hosts: list[str] = []
+    for source_path in source_paths:
+        if not source_path.exists():
+            continue
+        for line in source_path.read_text(encoding="utf-8").splitlines():
+            host = line.strip()
+            if not host:
+                continue
+            previous_source = seen_hosts.get(host)
+            if previous_source is not None:
+                raise DuplicateOutputInvariantError(
+                    "aggregate_host",
+                    host,
+                    context={
+                        "first_path": previous_source,
+                        "duplicate_path": _relative(source_path),
+                    },
+                )
+            seen_hosts[host] = _relative(source_path)
+            ordered_hosts.append(host)
+    hosts = sorted(ordered_hosts)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(
         "".join(f"{host}\n" for host in hosts),
@@ -1835,14 +1129,26 @@ def _merge_host_txt_files(source_paths: Iterable[Path], target_path: Path) -> No
 
 
 def _merge_audit_files(audit_paths: Iterable[Path], target_path: Path) -> None:
-    seen_rows: dict[str, dict[str, Any]] = {}
+    seen_rows: dict[str, tuple[dict[str, Any], str]] = {}
     for audit_path in audit_paths:
         if not audit_path.exists():
             continue
         for row in _sorted_dict_rows(audit_path):
-            seen_rows[_canonical_row_signature(row)] = row
+            signature = _canonical_row_signature(row)
+            existing = seen_rows.get(signature)
+            if existing is not None:
+                raise DuplicateOutputInvariantError(
+                    "aggregate_audit_row",
+                    str(row.get("host", "")),
+                    context={
+                        "signature": signature,
+                        "first_path": existing[1],
+                        "duplicate_path": _relative(audit_path),
+                    },
+                )
+            seen_rows[signature] = (row, _relative(audit_path))
     ordered_rows = sorted(
-        seen_rows.values(),
+        [item[0] for item in seen_rows.values()],
         key=lambda current: (
             str(current.get("host", "")),
             _canonical_row_signature(current),
@@ -1857,11 +1163,26 @@ def _merge_audit_files(audit_paths: Iterable[Path], target_path: Path) -> None:
 
 def _merge_review_files(review_paths: Iterable[Path], target_path: Path) -> None:
     review_rows: list[dict[str, Any]] = []
+    seen_review_rows: dict[str, str] = {}
     for review_path in review_paths:
         if not review_path.exists():
             continue
         with review_path.open("r", encoding="utf-8", newline="") as handle:
-            review_rows.extend(list(csv.DictReader(handle)))
+            for row in csv.DictReader(handle):
+                signature = csv_row_signature(build_review_output_row(row))
+                existing = seen_review_rows.get(signature)
+                if existing is not None:
+                    raise DuplicateOutputInvariantError(
+                        "aggregate_review_row",
+                        str(row.get("host", "")),
+                        context={
+                            "signature": signature,
+                            "first_path": existing,
+                            "duplicate_path": _relative(review_path),
+                        },
+                    )
+                seen_review_rows[signature] = _relative(review_path)
+                review_rows.append(row)
     if target_path.exists():
         target_path.unlink()
     if review_rows:
@@ -1928,10 +1249,18 @@ def _merge_cache_table(
     return row_count
 
 
-def _worker_cache_paths(manifest: dict[str, Any], *, state_root: Path) -> list[Path]:
+def _worker_cache_paths(
+    worker_ids: Iterable[str], *, batch_id: str, config_name: str, state_root: Path
+) -> list[Path]:
+    """Return worker cache paths for participating workers."""
     return [
-        state_root / str(assignment["cache_path"])
-        for assignment in manifest["worker_assignments"]
+        state_root
+        / _worker_output_paths(
+            batch_id=batch_id,
+            worker_id=worker_id,
+            config_name=config_name,
+        )["cache"]
+        for worker_id in worker_ids
     ]
 
 
@@ -2074,44 +1403,6 @@ def merge_cache_files(
     }
 
 
-def _result_summary_payloads(
-    manifest: dict[str, Any], *, state_root: Path
-) -> list[dict[str, Any]]:
-    payloads: list[dict[str, Any]] = []
-    for summary_path in manifest["aggregation_inputs"]["result_summary_paths"]:
-        payloads.append(
-            json.loads((state_root / summary_path).read_text(encoding="utf-8"))
-        )
-    return payloads
-
-
-def _resolved_summary_output_paths(
-    summaries: list[dict[str, Any]], *, state_root: Path
-) -> dict[str, list[Path]]:
-    """Resolve aggregate input paths from worker summary payloads."""
-    return {
-        "filtered": [state_root / payload["filtered_path"] for payload in summaries],
-        "dead": [state_root / payload["dead_path"] for payload in summaries],
-        "audit": [state_root / payload["audit_path"] for payload in summaries],
-        "review": [state_root / payload["review_path"] for payload in summaries],
-    }
-
-
-def _resolved_final_aggregate_paths(
-    manifest: dict[str, Any], *, state_root: Path
-) -> dict[str, Path]:
-    """Resolve final aggregate output paths from the batch manifest."""
-    aggregation_inputs = manifest["aggregation_inputs"]
-    return {
-        "filtered": state_root / aggregation_inputs["final_filtered_path"],
-        "dead": state_root / aggregation_inputs["final_dead_path"],
-        "review": state_root / aggregation_inputs["final_review_path"],
-        "audit": state_root / aggregation_inputs["final_audit_path"],
-        "log": state_root / aggregation_inputs["final_log_path"],
-        "cache": state_root / aggregation_inputs["final_cache_path"],
-    }
-
-
 def _path_debug_summary(path: Path) -> dict[str, Any]:
     """Return a small serializable summary for one aggregate input or output path."""
     summary: dict[str, Any] = {"path": _relative(path), "exists": path.exists()}
@@ -2130,27 +1421,34 @@ def _path_debug_summary(path: Path) -> dict[str, Any]:
 
 def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str, Any]:
     """Return barrier readiness information for one batch."""
-    manifest = load_manifest(batch_id, state_root=state_root)
-    done_marker_path = state_root / manifest["done_marker_path"]
+    done_marker_path = state_root / _done_marker_path(batch_id=batch_id)
     if done_marker_path.exists():
         logger.info(
             "Aggregate readiness for batch %s resolved to done because %s already exists",
             batch_id,
-            manifest["done_marker_path"],
+            _relative(_done_marker_path(batch_id=batch_id)),
         )
-        return {"state": "done", "manifest": manifest}
+        return {"state": "done", "batch_id": batch_id}
+    worker_ids = [
+        bundle.parent.name
+        for bundle in _worker_bundle_paths(
+            batch_id=batch_id,
+            state_root=state_root,
+        )
+    ]
     missing_status_paths = []
     in_progress_status_paths = []
     status_payloads = []
-    for status_path in manifest["expected_status_paths"]:
+    for worker_id in worker_ids:
+        status_path = _worker_status_path(batch_id=batch_id, worker_id=worker_id)
         resolved_status_path = state_root / status_path
         if not resolved_status_path.exists():
-            missing_status_paths.append(status_path)
+            missing_status_paths.append(_relative(status_path))
             continue
         payload = json.loads(resolved_status_path.read_text(encoding="utf-8"))
         status_payloads.append(payload)
         if payload["conclusion"] == STATUS_IN_PROGRESS:
-            in_progress_status_paths.append(status_path)
+            in_progress_status_paths.append(_relative(status_path))
     if missing_status_paths or in_progress_status_paths:
         logger.debug(
             "Aggregate readiness for batch %s is not ready: missing=%s in_progress=%s",
@@ -2160,7 +1458,7 @@ def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str
         )
         return {
             "state": "not_ready",
-            "manifest": manifest,
+            "batch_id": batch_id,
             "missing_status_paths": missing_status_paths,
             "in_progress_status_paths": in_progress_status_paths,
         }
@@ -2172,7 +1470,8 @@ def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str
         )
         return {
             "state": "ready_failed",
-            "manifest": manifest,
+            "batch_id": batch_id,
+            "worker_ids": worker_ids,
             "status_payloads": status_payloads,
         }
     logger.info(
@@ -2182,7 +1481,8 @@ def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str
     )
     return {
         "state": "ready_success",
-        "manifest": manifest,
+        "batch_id": batch_id,
+        "worker_ids": worker_ids,
         "status_payloads": status_payloads,
     }
 
@@ -2190,28 +1490,96 @@ def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str
 def aggregate_batch(
     *,
     batch_id: str,
+    config_path: Path,
+    target_ref: str,
     state_root: Path,
 ) -> dict[str, Any]:
     """Aggregate one fully completed batch into final deterministic outputs."""
     readiness = validate_aggregate_readiness(batch_id, state_root=state_root)
-    manifest = readiness["manifest"]
+    config = load_config(config_path)
+    config_name = str(config["config_name"])
+    worker_ids = list(readiness.get("worker_ids", []))
+    final_output_paths = {
+        key: state_root / value
+        for key, value in _final_output_paths(config=config).items()
+    }
+    worker_output_paths = {
+        "filtered": [
+            state_root
+            / _worker_output_paths(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                config_name=config_name,
+            )["filtered"]
+            for worker_id in worker_ids
+        ],
+        "dead": [
+            state_root
+            / _worker_output_paths(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                config_name=config_name,
+            )["dead"]
+            for worker_id in worker_ids
+        ],
+        "audit": [
+            state_root
+            / _worker_output_paths(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                config_name=config_name,
+            )["audit"]
+            for worker_id in worker_ids
+        ],
+        "review": [
+            state_root
+            / _worker_output_paths(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                config_name=config_name,
+            )["review"]
+            for worker_id in worker_ids
+        ],
+        "log": [
+            state_root
+            / _worker_output_paths(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                config_name=config_name,
+            )["log"]
+            for worker_id in worker_ids
+        ],
+    }
+    unmatched_review_path = state_root / _aggregate_input_review_path(batch_id=batch_id)
+    unmatched_audit_path = state_root / _aggregate_input_audit_path(batch_id=batch_id)
     logger.debug(
-        "Aggregate batch %s starting with readiness=%s manifest_paths=%s",
+        "Aggregate batch %s starting with readiness=%s derived_paths=%s",
         batch_id,
         readiness["state"],
         json.dumps(
             {
-                "final_filtered_path": manifest["aggregation_inputs"][
-                    "final_filtered_path"
-                ],
-                "final_dead_path": manifest["aggregation_inputs"]["final_dead_path"],
-                "final_review_path": manifest["aggregation_inputs"][
-                    "final_review_path"
-                ],
-                "final_audit_path": manifest["aggregation_inputs"]["final_audit_path"],
-                "final_log_path": manifest["aggregation_inputs"]["final_log_path"],
-                "final_cache_path": manifest["aggregation_inputs"]["final_cache_path"],
-                "cleanup_inputs": manifest["cleanup_inputs"],
+                "final_filtered_path": _relative(
+                    _final_output_paths(config=config)["filtered"]
+                ),
+                "final_dead_path": _relative(
+                    _final_output_paths(config=config)["dead"]
+                ),
+                "final_review_path": _relative(
+                    _final_output_paths(config=config)["review"]
+                ),
+                "final_audit_path": _relative(
+                    _final_output_paths(config=config)["audit"]
+                ),
+                "final_log_path": _relative(_final_output_paths(config=config)["log"]),
+                "final_cache_path": _relative(
+                    _final_output_paths(config=config)["cache"]
+                ),
+                "unmatched_review_path": _relative(
+                    _aggregate_input_review_path(batch_id=batch_id)
+                ),
+                "unmatched_audit_path": _relative(
+                    _aggregate_input_audit_path(batch_id=batch_id)
+                ),
             },
             sort_keys=True,
         ),
@@ -2223,10 +1591,13 @@ def aggregate_batch(
             json.dumps(readiness["status_payloads"], sort_keys=True),
         )
         cache_merge_summary = merge_cache_files(
-            source_paths=_worker_cache_paths(manifest, state_root=state_root),
-            target_path=(
-                state_root / manifest["aggregation_inputs"]["final_cache_path"]
+            source_paths=_worker_cache_paths(
+                worker_ids,
+                batch_id=batch_id,
+                config_name=config_name,
+                state_root=state_root,
             ),
+            target_path=final_output_paths["cache"],
         )
         logger.info(
             "Aggregate cache merge for failed batch %s: candidates=%d merged=%d "
@@ -2247,65 +1618,81 @@ def aggregate_batch(
             "automation_format_version": AUTOMATION_FORMAT_VERSION,
             "batch_id": batch_id,
             "failed_status_count": len(failed_statuses),
-            "failed_status_paths": manifest["expected_status_paths"],
             "written_at": _utc_now(),
         }
-        _write_json(state_root / manifest["failed_marker_path"], failure_payload)
+        _write_json(
+            state_root / _failed_marker_path(batch_id=batch_id), failure_payload
+        )
         logger.info(
             "Aggregate marked batch %s failed and wrote %s",
             batch_id,
-            manifest["failed_marker_path"],
+            _relative(_failed_marker_path(batch_id=batch_id)),
         )
         return {
             "state": "failed",
-            "manifest": manifest,
             "failed_statuses": failed_statuses,
             "cache_merge_summary": cache_merge_summary,
         }
     if readiness["state"] != "ready_success":
         return readiness
     status_payloads = readiness["status_payloads"]
-    summaries = _result_summary_payloads(manifest, state_root=state_root)
-    summary_output_paths = _resolved_summary_output_paths(
-        summaries,
-        state_root=state_root,
-    )
-    logger.debug(
-        "Aggregate batch %s loaded %d worker summaries: %s",
-        batch_id,
-        len(summaries),
-        json.dumps(
-            [
-                {
-                    "worker_id": payload["worker_id"],
-                    "filtered": _path_debug_summary(
-                        state_root / payload["filtered_path"]
-                    ),
-                    "dead": _path_debug_summary(state_root / payload["dead_path"]),
-                    "review": _path_debug_summary(state_root / payload["review_path"]),
-                    "audit": _path_debug_summary(state_root / payload["audit_path"]),
-                    "log": _path_debug_summary(state_root / payload["log_path"]),
-                    "cache": _path_debug_summary(state_root / payload["cache_path"]),
-                }
-                for payload in summaries
-            ],
-            sort_keys=True,
-        ),
-    )
-
-    final_output_paths = _resolved_final_aggregate_paths(
-        manifest,
-        state_root=state_root,
-    )
-
-    _merge_host_txt_files(
-        summary_output_paths["filtered"], final_output_paths["filtered"]
-    )
-    _merge_host_txt_files(summary_output_paths["dead"], final_output_paths["dead"])
-    _merge_audit_files(summary_output_paths["audit"], final_output_paths["audit"])
-    _merge_review_files(summary_output_paths["review"], final_output_paths["review"])
+    try:
+        _merge_host_txt_files(
+            worker_output_paths["filtered"], final_output_paths["filtered"]
+        )
+        _merge_host_txt_files(worker_output_paths["dead"], final_output_paths["dead"])
+        _merge_audit_files(
+            [*worker_output_paths["audit"], unmatched_audit_path],
+            final_output_paths["audit"],
+        )
+        _merge_review_files(
+            [*worker_output_paths["review"], unmatched_review_path],
+            final_output_paths["review"],
+        )
+    except DuplicateOutputInvariantError as exc:
+        cache_merge_summary = merge_cache_files(
+            source_paths=_worker_cache_paths(
+                worker_ids,
+                batch_id=batch_id,
+                config_name=config_name,
+                state_root=state_root,
+            ),
+            target_path=final_output_paths["cache"],
+        )
+        failure_payload = {
+            "automation_format_version": AUTOMATION_FORMAT_VERSION,
+            "batch_id": batch_id,
+            "failed_status_count": 0,
+            "written_at": _utc_now(),
+            "failure_reason": str(exc),
+            "duplicate_output": {
+                "output_kind": exc.output_kind,
+                "duplicate_key": exc.duplicate_key,
+                "context": exc.context,
+            },
+        }
+        _write_json(
+            state_root / _failed_marker_path(batch_id=batch_id), failure_payload
+        )
+        logger.error("Aggregate duplicate invariant for batch %s: %s", batch_id, exc)
+        return {
+            "state": "failed",
+            "failed_statuses": [],
+            "failure_reason": str(exc),
+            "cache_merge_summary": cache_merge_summary,
+            "duplicate_output": {
+                "output_kind": exc.output_kind,
+                "duplicate_key": exc.duplicate_key,
+                "context": exc.context,
+            },
+        }
     cache_merge_summary = merge_cache_files(
-        source_paths=_worker_cache_paths(manifest, state_root=state_root),
+        source_paths=_worker_cache_paths(
+            worker_ids,
+            batch_id=batch_id,
+            config_name=config_name,
+            state_root=state_root,
+        ),
         target_path=final_output_paths["cache"],
     )
     logger.info(
@@ -2334,49 +1721,51 @@ def aggregate_batch(
         ),
     )
 
-    removed_cleanup_paths: list[str] = []
-    missing_cleanup_paths: list[str] = []
-    for cleanup_path in manifest["cleanup_inputs"]:
-        target_path = state_root / cleanup_path
-        if target_path.is_dir():
-            shutil.rmtree(target_path)
-            removed_cleanup_paths.append(cleanup_path)
-            continue
-        if target_path.exists():
-            target_path.unlink()
-            removed_cleanup_paths.append(cleanup_path)
-            continue
-        missing_cleanup_paths.append(cleanup_path)
-    logger.debug(
-        "Aggregate cleanup for batch %s removed=%s missing=%s",
-        batch_id,
-        removed_cleanup_paths,
-        missing_cleanup_paths,
-    )
+    cleanup_paths = [
+        state_root / ".automation" / "batches" / batch_id,
+        state_root / ".automation" / "results" / batch_id,
+        state_root / ".automation" / "status" / batch_id,
+    ]
+    for cleanup_path in cleanup_paths:
+        if cleanup_path.exists():
+            shutil.rmtree(cleanup_path)
 
     next_turn_payload = {
         "automation_format_version": AUTOMATION_FORMAT_VERSION,
         "batch_id": batch_id,
-        "target_ref": manifest["target_ref"],
-        "final_filtered_path": manifest["aggregation_inputs"]["final_filtered_path"],
-        "final_dead_path": manifest["aggregation_inputs"]["final_dead_path"],
-        "final_review_path": manifest["aggregation_inputs"]["final_review_path"],
-        "final_audit_path": manifest["aggregation_inputs"]["final_audit_path"],
+        "target_ref": target_ref,
+        "final_filtered_path": _relative(
+            _final_output_paths(config=config)["filtered"]
+        ),
+        "final_dead_path": _relative(_final_output_paths(config=config)["dead"]),
+        "final_review_path": _relative(_final_output_paths(config=config)["review"]),
+        "final_audit_path": _relative(_final_output_paths(config=config)["audit"]),
         "updated_at": _utc_now(),
     }
     _write_json(
-        state_root / manifest["next_turn_preparation_inputs"]["current_batch_path"],
-        next_turn_payload,
+        state_root / _current_batch_path(config_name=config_name), next_turn_payload
     )
     logger.debug(
         "Aggregate next-turn payload for batch %s wrote %s",
         batch_id,
-        manifest["next_turn_preparation_inputs"]["current_batch_path"],
+        _relative(_current_batch_path(config_name=config_name)),
     )
 
     summary_counts = Counter(payload["conclusion"] for payload in status_payloads)
     _merge_log_files(
-        summaries=summaries,
+        summaries=[
+            {
+                "worker_id": worker_id,
+                "log_path": _relative(
+                    _worker_output_paths(
+                        batch_id=batch_id,
+                        worker_id=worker_id,
+                        config_name=config_name,
+                    )["log"]
+                ),
+            }
+            for worker_id in worker_ids
+        ],
         state_root=state_root,
         target_path=final_output_paths["log"],
     )
@@ -2385,15 +1774,21 @@ def aggregate_batch(
         batch_id,
         dict(summary_counts),
     )
-    manifest_text = (state_root / manifest["manifest_path"]).read_text(encoding="utf-8")
     return {
         "state": "aggregated",
-        "manifest": manifest,
         "cache_merge_summary": cache_merge_summary,
+        "final_output_paths": {
+            "filtered": _relative(_final_output_paths(config=config)["filtered"]),
+            "dead": _relative(_final_output_paths(config=config)["dead"]),
+            "review": _relative(_final_output_paths(config=config)["review"]),
+            "audit": _relative(_final_output_paths(config=config)["audit"]),
+            "log": _relative(_final_output_paths(config=config)["log"]),
+            "cache": _relative(_final_output_paths(config=config)["cache"]),
+            "current": _relative(_final_output_paths(config=config)["current"]),
+        },
         "done_marker_payload": {
             "automation_format_version": AUTOMATION_FORMAT_VERSION,
             "batch_id": batch_id,
-            "manifest_sha256": _sha256_text(manifest_text),
             "summary_counts": dict(summary_counts),
             "written_at": _utc_now(),
         },
@@ -2403,12 +1798,12 @@ def aggregate_batch(
 def write_done_marker(
     *,
     state_root: Path,
-    manifest: dict[str, Any],
+    batch_id: str,
     done_marker_payload: dict[str, Any],
     aggregate_commit_sha: str,
 ) -> str:
     """Persist the durable done marker after the aggregate commit SHA is known."""
     payload = dict(done_marker_payload)
     payload["aggregate_commit_sha"] = aggregate_commit_sha
-    _write_json(state_root / manifest["done_marker_path"], payload)
-    return manifest["done_marker_path"]
+    _write_json(state_root / _done_marker_path(batch_id=batch_id), payload)
+    return _relative(_done_marker_path(batch_id=batch_id))

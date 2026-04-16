@@ -6,8 +6,6 @@ defaults:
 
   rdap:
     timeout: 10.0
-    mode: authoritative
-    scheduling: auto
 
   output:
     directory: output

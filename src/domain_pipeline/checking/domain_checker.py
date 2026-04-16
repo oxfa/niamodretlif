@@ -207,20 +207,16 @@ class DomainChecker:
     """High-level orchestrator for root RDAP and host DNS checks.
 
     An instance of ``DomainChecker`` encapsulates configuration for RDAP
-    queries and DNS lookups. By default it resolves authoritative
-    registry RDAP servers directly using the live IANA domain bootstrap
-    registry, but it can also use ``https://rdap.org/`` as a
-    bootstrap/redirecting RDAP endpoint. DNS lookups leverage the
+    queries and DNS lookups. It resolves authoritative registry RDAP
+    servers directly using the live IANA domain bootstrap registry.
+    DNS lookups leverage the
     system's resolver by default but can be pointed at specific
     nameservers by overriding the ``nameservers`` attribute on the
     created ``dns.resolver.Resolver`` instance.
     """
 
-    RDAP_BASE_URL = "https://rdap.org/domain/"
     IANA_DNS_BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
-    RDAP_MODE_RDAP_ORG = "rdap_org"
     RDAP_MODE_AUTHORITATIVE = "authoritative"
-    RDAP_MODES = {RDAP_MODE_RDAP_ORG, RDAP_MODE_AUTHORITATIVE}
     MAX_RDAP_RETRY_ATTEMPTS = 4
     MAX_DNS_RETRY_ATTEMPTS = 3
 
@@ -248,13 +244,13 @@ class DomainChecker:
         resolver: Optional[dns.resolver.Resolver] = None,
         rdap_mode: str = RDAP_MODE_AUTHORITATIVE,
     ) -> None:
-        if rdap_mode not in self.RDAP_MODES:
+        if rdap_mode != self.RDAP_MODE_AUTHORITATIVE:
             raise ValueError(
-                f"Unsupported rdap_mode {rdap_mode!r}; expected one of {sorted(self.RDAP_MODES)}"
+                f"Unsupported rdap_mode {rdap_mode!r}; expected {self.RDAP_MODE_AUTHORITATIVE!r}"
             )
         self.rdap_timeout = rdap_timeout
         self.dns_timeout = dns_timeout
-        self.rdap_mode = rdap_mode
+        self.rdap_mode = self.RDAP_MODE_AUTHORITATIVE
         self.session = requests.Session()
         self._rdap_requestor = HTTPRequester(
             session=self.session,
@@ -459,12 +455,8 @@ class DomainChecker:
     def _rdap_query_url(
         self, domain: str, *, authoritative_base_url: str | None = None
     ) -> str:
-        """Resolve the final RDAP URL for the configured lookup mode."""
+        """Resolve the final authoritative RDAP URL."""
         normalized_domain = self._normalize_lookup_domain(domain)
-        if self.rdap_mode == self.RDAP_MODE_RDAP_ORG:
-            logger.debug("Using rdap.org redirector for %s", normalized_domain)
-            return f"{self.RDAP_BASE_URL}{normalized_domain}"
-
         base_url = authoritative_base_url or self._authoritative_base_url(
             normalized_domain
         )
@@ -537,10 +529,9 @@ class DomainChecker:
     ) -> RDAPResult:
         """Query RDAP for a registrable domain.
 
-        Depending on ``rdap_mode``, this either resolves the authoritative
-        registry URL from the IANA bootstrap registry first or uses the
-        ``rdap.org`` redirector URL directly.  A successful lookup returns
-        registration data as JSON, including the EPP status codes under the
+        This resolves the authoritative registry URL from the IANA bootstrap
+        registry first. A successful lookup returns registration data as JSON,
+        including the EPP status codes under the
         ``status`` key and possibly within ``domainSearchResults`` or other
         nested objects.  If the domain is not registered, RDAP returns
         HTTP 404.  See ICANN's documentation for details about domain

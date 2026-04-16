@@ -29,11 +29,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     YAML_MODULE = None
 
-from .constants import (
-    GEO_PROVIDER_GEOJS,
-    GEO_PROVIDER_IPINFO_LITE,
-    RDAP_MODE_AUTHORITATIVE,
-)
+from .constants import GEO_PROVIDER_GEOJS, GEO_PROVIDER_IPINFO_LITE
 
 DEFAULT_CACHE_FILE = (
     Path(__file__).resolve().parents[3] / ".tmp" / "runtime" / "check-cache.sqlite3"
@@ -167,8 +163,6 @@ class RDAPConfig(StrictModel):
     """RDAP lookup settings."""
 
     timeout: float = 10.0
-    mode: Literal["authoritative", "rdap_org"] = RDAP_MODE_AUTHORITATIVE
-    scheduling: Literal["auto", "input_order"] = "auto"
 
 
 class OutputConfig(StrictModel):

@@ -8,10 +8,14 @@ version: 2
 # Optional manual-pass file:
 # - input/manual_filter_pass/<config-stem>.txt
 # This file is only supported when all enabled sources in the config have
-# dns.enabled=true. It is not supported for RDAP-only mode or mixed DNS modes.
+# dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes in
+# both automation and direct/manual runs.
 # Hosts listed there still run through RDAP, but bypass DNS and geo.
 # RDAP-unregistered roots still route to dead output; otherwise they are
 # emitted to the filtered output for that config.
+# When the same host appears in multiple enabled sources, shared preparation
+# collapses it only if the effective dns/rdap/geo behavior is identical across
+# those sources; conflicting behavior raises a validation error.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
@@ -49,14 +53,6 @@ defaults:
   rdap:
     # Per-request RDAP timeout, in seconds.
     timeout: 10.0
-    # Lookup mode used for registrable-domain checks.
-    # "authoritative" prefers the canonical registry when available.
-    # "rdap_org" uses rdap.org as a generic fallback.
-    mode: authoritative
-    # RDAP scheduling policy for parsed entries.
-    # "auto" interleaves authoritative RDAP servers when mode=authoritative.
-    # "input_order" preserves the parsed entry order exactly.
-    scheduling: auto
 
   geo:
     # Enable geo lookups and evaluate the resolved IPs against the policy
@@ -163,8 +159,6 @@ sources:
     rdap:
       # Override RDAP behavior for this source only.
       timeout: 10.0
-      mode: authoritative
-      scheduling: auto
     geo:
       # Source-specific geo settings. Explicit fields override defaults; omit
       # nested keys to keep inheriting the matching default values.
