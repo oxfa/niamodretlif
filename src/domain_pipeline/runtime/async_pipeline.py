@@ -24,6 +24,7 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
     CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+    CLASSIFICATION_MANUAL_FILTER_PASSED,
     CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
@@ -42,8 +43,9 @@ from ..checking import (
     build_geo_provider,
     evaluate_geo_policy,
 )
-from ..io.parser import ParsedDomainEntry
+from ..io.parser import DomainListParser, InputFileFormat, ParsedDomainEntry
 from ..io.output_manager import output_paths_for_job, review_output_path_for_job
+from ..shared import SourceJob
 from ..settings.config import DEFAULT_CACHE_FILE, load_config
 from .async_constants import DNS_STAGE_WORKERS, GEO_STAGE_WORKERS, RDAP_STAGE_WORKERS
 from .bootstrap_async import AsyncBootstrapCache
@@ -83,6 +85,7 @@ from .writer import ResultCollectorWriter, WriterResult
 
 log = logging.getLogger(__name__)
 INCOMPLETE_RUN_STATE_DIR = Path(".tmp") / "runtime" / "incomplete_runs"
+MANUAL_FILTER_PASS_DIR = Path("input") / "manual_filter_pass"
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,80 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
         self.budget_stop_context: BudgetStopContext | None = None
+        (
+            self.manual_filter_job,
+            self.manual_filter_entries,
+            self.manual_filter_hosts,
+        ) = self._load_manual_filter_pass_entries()
+
+    def _manual_filter_pass_path(self) -> Path:
+        """Return the per-config manual-pass file path."""
+        return MANUAL_FILTER_PASS_DIR / f"{self.config['config_name']}.txt"
+
+    def _manual_filter_source_config(self, manual_filter_path: Path) -> dict[str, Any]:
+        """Return the DNS-enabled source config used for grouped manual-pass output."""
+        enabled_sources = [
+            source for source in self.config["sources"] if source["enabled"]
+        ]
+        if not enabled_sources:
+            raise ValueError("config must include at least one enabled source")
+        dns_enabled_values = {
+            bool(source["dns"].get("enabled", True)) for source in enabled_sources
+        }
+        if len(dns_enabled_values) > 1:
+            raise ValueError(
+                "manual filter-pass file "
+                f"{manual_filter_path} requires all enabled sources in one config "
+                "to share dns.enabled because manual filter-pass behavior is "
+                "config-scoped"
+            )
+        if not next(iter(dns_enabled_values)):
+            raise ValueError(
+                "manual filter-pass file "
+                f"{manual_filter_path} is not supported for RDAP-only mode "
+                "(all enabled sources have dns.enabled=false)"
+            )
+        return enabled_sources[0]
+
+    def _load_manual_filter_pass_entries(
+        self,
+    ) -> tuple[SourceJob | None, list[ParsedDomainEntry], set[str]]:
+        """Load manually approved hosts that should bypass DNS and geo after RDAP."""
+        manual_filter_path = self._manual_filter_pass_path()
+        if not manual_filter_path.is_file():
+            return None, [], set()
+
+        lines = manual_filter_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        parser = DomainListParser()
+        parse_stats: Counter = Counter()
+        entries = list(
+            parser.process_entries(
+                lines,
+                source_name=str(manual_filter_path),
+                stats=parse_stats,
+                forced_format=InputFileFormat.PLAIN,
+            )
+        )
+        if not entries:
+            log.warning(
+                "Manual filter-pass file %s produced no valid hosts after parsing",
+                manual_filter_path,
+            )
+            return None, [], set()
+
+        log.info(
+            "Loaded %d manually approved hosts from %s",
+            len(entries),
+            manual_filter_path,
+        )
+        job = SourceJob(
+            source_id=f"{self.config['config_name']}--manual-filter-pass",
+            input_label=str(manual_filter_path),
+            output_stem=str(self.config["config_name"]),
+            lines=lines,
+            config=self._manual_filter_source_config(manual_filter_path),
+        )
+        return job, entries, {entry.host for entry in entries}
 
     @staticmethod
     def _load_prepared_metadata(path: Path | None) -> dict[str, Any]:
@@ -303,6 +380,59 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             )
         )
 
+    async def _emit_manual_filter_pass(
+        self, parsed: ParsedHostItem, rdap_result: RDAPResult | None
+    ) -> None:
+        """Emit one manually approved host after RDAP, skipping DNS and geo."""
+        log.info(
+            "[%s %d/%d] %s bypassed DNS/geo via manual filter-pass file %s "
+            "(rdap=%s)",
+            parsed.job.source_id,
+            parsed.sequence,
+            parsed.total,
+            parsed.entry.host,
+            parsed.job.input_label,
+            (
+                "registered"
+                if rdap_result is not None and rdap_result.exists
+                else "unavailable"
+            ),
+        )
+        dns_result = DNSResult(
+            host=parsed.entry.host,
+            a_exists=False,
+            a_nodata=False,
+            a_nxdomain=False,
+            a_timeout=False,
+            a_servfail=False,
+            canonical_name=None,
+        )
+        row = build_output_row(
+            parsed.job,
+            parsed.entry,
+            CLASSIFICATION_MANUAL_FILTER_PASSED,
+            rdap_result,
+            dns_result,
+            [],
+            "skipped",
+            "manual_filter_pass",
+            "skipped",
+            "manual_filter_pass",
+            None,
+            dns_status_override="skipped",
+        )
+        await self.queue_bundle.result_queue.put(
+            CompletedHostResult(
+                job=parsed.job,
+                entry=parsed.entry,
+                classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
+                route=ROUTE_NORMAL_OUTPUT,
+                row=row,
+                rdap_result=rdap_result,
+                dns_result=dns_result,
+            )
+        )
+
     def _record_cache_hit(self, cache_name: str, source: str | None) -> None:
         """Increment total and source-specific cache hit counters."""
         if source is None:
@@ -414,7 +544,10 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
     async def run(self) -> tuple[WriterResult, list[Path], bool]:
         """Run the staged pipeline for the loaded config."""
         jobs = build_source_jobs(self.config)
-        target_output_paths = _collect_output_paths(jobs)
+        all_jobs = list(jobs)
+        if self.manual_filter_job is not None:
+            all_jobs.append(self.manual_filter_job)
+        target_output_paths = _collect_output_paths(all_jobs)
         writer_tasks = await start_writer_tasks(self.cache_bundle.writers)
         log_transport = RuntimeLogTransport()
         log_transport.install()
@@ -449,10 +582,62 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
 
     async def _parse_stage(self, jobs: list) -> None:
         try:
+            if self.manual_filter_job is not None:
+                total = len(self.manual_filter_entries)
+                for sequence, entry in enumerate(self.manual_filter_entries, start=1):
+                    if self._should_stop_queueing_new_work():
+                        self._record_budget_stop(
+                            self.manual_filter_job,
+                            sequence=sequence,
+                            total=total,
+                            host=entry.host,
+                        )
+                        break
+                    await self.queue_bundle.parse_to_rdap.put(
+                        ParsedHostItem(
+                            job=self.manual_filter_job,
+                            entry=entry,
+                            sequence=sequence,
+                            total=total,
+                            manual_filter_pass=True,
+                        )
+                    )
+                if self.stopped_early:
+                    return
             for job in jobs:
                 prepared_entries = self._prepared_source_entries(job.source_id)
                 if prepared_entries is None:
                     entries, _stats = parse_source_entries(job)
+                    if self.manual_filter_hosts:
+                        skipped_manual_hosts = [
+                            entry.host
+                            for entry in entries
+                            if entry.host in self.manual_filter_hosts
+                        ]
+                        if skipped_manual_hosts:
+                            log.info(
+                                "Source %s skipped %d hosts already approved via %s: %s",
+                                job.source_id,
+                                len(skipped_manual_hosts),
+                                (
+                                    self.manual_filter_job.input_label
+                                    if self.manual_filter_job is not None
+                                    else self._manual_filter_pass_path()
+                                ),
+                                skipped_manual_hosts,
+                            )
+                        entries = [
+                            entry
+                            for entry in entries
+                            if entry.host not in self.manual_filter_hosts
+                        ]
+                    if not entries:
+                        log.debug(
+                            "Parse stage queued 0 entries for source=%s "
+                            "after manual filter-pass exclusions",
+                            job.source_id,
+                        )
+                        continue
                     entries = schedule_rdap_entries(
                         self.checker_for(job.source_id, job.config),
                         job,
@@ -490,6 +675,29 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                             start=1,
                         )
                     ]
+                    if self.manual_filter_hosts:
+                        skipped_manual_hosts = [
+                            parsed.entry.host
+                            for parsed in iterable
+                            if parsed.entry.host in self.manual_filter_hosts
+                        ]
+                        if skipped_manual_hosts:
+                            log.info(
+                                "Prepared source %s skipped %d hosts already approved via %s: %s",
+                                job.source_id,
+                                len(skipped_manual_hosts),
+                                (
+                                    self.manual_filter_job.input_label
+                                    if self.manual_filter_job is not None
+                                    else self._manual_filter_pass_path()
+                                ),
+                                skipped_manual_hosts,
+                            )
+                        iterable = [
+                            parsed
+                            for parsed in iterable
+                            if parsed.entry.host not in self.manual_filter_hosts
+                        ]
                 for parsed in iterable:
                     if self._should_stop_queueing_new_work():
                         self._record_budget_stop(
@@ -822,6 +1030,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
                         )
                     )
                     continue
+                if parsed.manual_filter_pass:
+                    await self._emit_manual_filter_pass(parsed, rdap_result)
+                    continue
                 if not parsed.job.config["dns"]["enabled"]:
                     log.debug(
                         "[%s %d/%d] %s bypassed DNS and geo because dns.enabled=false; "
@@ -1086,9 +1297,10 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
             )
 
         provider_name = str(parsed.job.config["geo"]["effective_provider"])
-        provider_used = geo_transport._provider(  # pylint: disable=protected-access
-            provider_name
-        )
+        # Runtime transport owns provider construction; this call retrieves the
+        # already-selected provider instance for logging and result annotation.
+        # pylint: disable-next=protected-access
+        provider_used = geo_transport._provider(provider_name)
         log.debug(
             "[%s %d/%d] %s geo evaluation using provider=%s resolved_ips=%s",
             parsed.job.source_id,
