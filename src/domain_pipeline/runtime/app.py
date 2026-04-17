@@ -1,4 +1,4 @@
-"""Top-level orchestration for the async pipeline runtime."""
+"""Top-level orchestration helpers for the workflow-owned async runtime."""
 
 from __future__ import annotations
 
@@ -8,29 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .async_pipeline import run_pipeline_async, run_prepared_pipeline_async
+from .async_pipeline import run_prepared_pipeline_async
 
 log = logging.getLogger(__name__)
-
-
-def run_pipeline(
-    config_path: Path,
-    *,
-    max_runtime_seconds: float | None = None,
-    prepared_metadata_path: Path | None = None,
-) -> int:
-    """Run the staged async runtime from a synchronous CLI entrypoint."""
-    try:
-        return asyncio.run(
-            run_pipeline_async(
-                config_path,
-                max_runtime_seconds=max_runtime_seconds,
-                prepared_metadata_path=prepared_metadata_path,
-            )
-        )
-    except ValueError as exc:
-        log.error("%s", exc)
-        return 2
 
 
 def run_prepared_pipeline(
@@ -40,7 +20,7 @@ def run_prepared_pipeline(
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
 ) -> int:
-    """Run the staged async runtime from one prepared automation manifest."""
+    """Run one workflow-owned runtime payload from a prepared automation manifest."""
     try:
         return asyncio.run(
             run_prepared_pipeline_async(

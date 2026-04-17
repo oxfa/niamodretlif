@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 import ipaddress
 import os
-import re
 from pathlib import Path
+import re
 from typing import Any, Literal, cast
 
 from pydantic import (
@@ -30,9 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover
     YAML_MODULE = None
 
 from .constants import GEO_PROVIDER_GEOJS, GEO_PROVIDER_IPINFO_LITE
-from ..path_layout import runtime_cache_path
 
-DEFAULT_CACHE_FILE = runtime_cache_path(Path(__file__).resolve().parents[3])
 CONFIG_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ISO_REGION_RULE_PATTERN = re.compile(r"^[A-Z]{2}-[A-Z0-9]{1,3}$")
 
@@ -237,17 +235,10 @@ class ClassificationTTLConfig(StrictModel):
 class CacheConfig(StrictModel):
     """Global cache configuration."""
 
-    cache_file: str = str(DEFAULT_CACHE_FILE)
-    baseline_cache_file: str = ""
     classification_ttl_days: ClassificationTTLConfig = Field(
         default_factory=ClassificationTTLConfig
     )
     dns_ttl_days: int = 1
-
-    @field_validator("cache_file", "baseline_cache_file", mode="after")
-    @classmethod
-    def _normalize_cache_path(cls, value: str) -> str:
-        return value.strip()
 
 
 class DefaultsConfig(StrictModel):

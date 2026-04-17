@@ -11,7 +11,6 @@ defaults:
     directory: output
 
 cache:
-  cache_file: .workflow_state/runtime/cache/check-cache.sqlite3
   classification_ttl_days:
     rdap_registrable_domain_unregistered: 30
     rdap_registrable_domain_registered: 7

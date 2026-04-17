@@ -161,6 +161,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      # Prefer the prior attempt from the same workflow run when a rerun needs
+      # to resume cache progress, then fall back to the broader config-wide
+      # lineage.
       - name: Restore baseline cache
         id: restore_worker_baseline_cache
         uses: actions/cache/restore@v5
@@ -171,9 +174,6 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            # Prefer the prior attempt from the same workflow run when a rerun
-            # needs to resume cache progress, then fall back to the broader
-            # config-wide lineage.
             signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
       - name: Log worker baseline cache restore
@@ -337,6 +337,8 @@ jobs:
             --state-root . \
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
+      # Keep aggregate reruns on the same per-run cache lineage before falling
+      # back to any newer config-wide cache generation.
       - name: Restore aggregate baseline cache
         id: restore_aggregate_baseline_cache
         uses: actions/cache/restore@v5
@@ -347,8 +349,6 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            # Keep aggregate reruns on the same per-run cache lineage before
-            # falling back to any newer config-wide cache generation.
             signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
       - name: Log aggregate baseline cache restore
