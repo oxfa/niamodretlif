@@ -125,7 +125,6 @@ def _handle_worker(
     payload = run_worker(
         batch_id=args.batch_id,
         worker_id=args.worker_id,
-        config_path=Path(args.config),
         source_root=source_root,
         state_root=state_root,
         max_runtime_seconds=args.max_runtime_seconds,
@@ -162,7 +161,6 @@ def _handle_aggregate(args: argparse.Namespace, state_root: Path) -> int:
     _configure_command_logging(args.log_level)
     payload = aggregate_batch(
         batch_id=args.batch_id,
-        config_path=Path(args.config),
         target_ref=args.target_ref,
         state_root=state_root,
     )
@@ -352,7 +350,6 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         [
             ("--batch-id", {"required": True}),
             ("--worker-id", {"required": True}),
-            ("--config", {"required": True}),
             (
                 "--log-level",
                 {
@@ -390,7 +387,6 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         aggregate_parser,
         [
             ("--batch-id", {"required": True}),
-            ("--config", {"required": True}),
             ("--target-ref", {"required": True}),
         ],
     )

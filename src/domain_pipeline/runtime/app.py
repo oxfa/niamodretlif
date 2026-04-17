@@ -6,8 +6,9 @@ import asyncio
 import logging
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
-from .async_pipeline import run_pipeline_async
+from .async_pipeline import run_pipeline_async, run_prepared_pipeline_async
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,28 @@ def run_pipeline(
                 config_path,
                 max_runtime_seconds=max_runtime_seconds,
                 prepared_metadata_path=prepared_metadata_path,
+            )
+        )
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 2
+
+
+def run_prepared_pipeline(
+    runtime_config: dict[str, Any],
+    *,
+    runtime_identity: dict[str, str],
+    max_runtime_seconds: float | None = None,
+    prepared_metadata: dict[str, Any] | None = None,
+) -> int:
+    """Run the staged async runtime from one prepared automation manifest."""
+    try:
+        return asyncio.run(
+            run_prepared_pipeline_async(
+                runtime_config,
+                runtime_identity=runtime_identity,
+                max_runtime_seconds=max_runtime_seconds,
+                prepared_metadata=prepared_metadata,
             )
         )
     except ValueError as exc:

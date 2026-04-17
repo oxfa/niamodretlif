@@ -474,8 +474,8 @@ def _format_validation_error(exc: ValidationError) -> str:
     return f"{location}: {message}" if location else message
 
 
-def load_config(path: Path) -> dict[str, Any]:
-    """Load and validate the version 2 YAML configuration file."""
+def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str, Any]:
+    """Load and validate one version 2 YAML configuration file."""
     config_namespace = config_namespace_from_path(path)
     payload = _load_yaml_payload(path)
     if payload.get("version") != 2:
@@ -540,8 +540,13 @@ def load_config(path: Path) -> dict[str, Any]:
         _validate_geojs_region_rules(
             source["geo"], source_label=f"sources[{source['id']!r}]"
         )
-        if source["enabled"]:
+        if source["enabled"] and validate_runtime_credentials:
             _validate_geo_provider_credentials(
                 source["geo"], source_label=f"sources[{source['id']!r}]"
             )
     return normalized_payload
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Load a runtime-ready version 2 YAML configuration file."""
+    return _load_config(path, validate_runtime_credentials=True)
