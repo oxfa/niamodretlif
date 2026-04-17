@@ -426,7 +426,8 @@ jobs:
         run: |
           set -eo pipefail
           rm -rf .tmp/aggregate_log_artifact
-          # Keep the merged runtime logs and each worker log together for post-run debugging.
+          # Stage volatile logs early before publish cleanup removes them.
+          # Upload happens later so the artifact reflects the full aggregate job path.
           mkdir -p .tmp/aggregate_log_artifact/validation-settings/logs
           mkdir -p .tmp/aggregate_log_artifact/prepared-batch/logs
           mkdir -p .tmp/aggregate_log_artifact/jsonl-log
@@ -457,13 +458,7 @@ jobs:
             [ -f "${worker_log_path}" ] || continue
             cp "${worker_log_path}" ".tmp/aggregate_log_artifact/worker-logs/${worker_id}.log"
           done
-      - name: Upload aggregate log artifact
-        if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
-          path: .tmp/aggregate_log_artifact
-          if-no-files-found: ignore
+          echo "=== Aggregate artifact staging complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Persist aggregate baseline cache to repo root
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
@@ -545,6 +540,7 @@ jobs:
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee publish-size-check.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
+          echo "=== Publish-size validation complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Commit aggregate outputs
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' }}
         id: aggregate_commit
@@ -568,6 +564,7 @@ jobs:
               | tee aggregate-commit.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
           echo "commit_sha=$(jq -r '.commit_sha // empty' aggregate-commit.json)" >> "$GITHUB_OUTPUT"
+          echo "=== Aggregate commit metadata captured ===" | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Push published state
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
@@ -581,6 +578,19 @@ jobs:
               --branch "${{ needs.prepare_run.outputs.target_branch }}" \
               --max-retries 2
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
+          echo "=== Push published state complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
+      - name: Log aggregate artifact upload intent
+        if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
+        run: |
+          set -eo pipefail
+          echo "=== Upload aggregate log artifact ===" | tee -a "${AGGREGATE_LOG_PATH}"
+      - name: Upload aggregate log artifact
+        if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
+          path: .tmp/aggregate_log_artifact
+          if-no-files-found: ignore
       - name: Fail failed aggregate runs
         if: ${{ steps.aggregate_state.outputs.state == 'failed' }}
         run: |

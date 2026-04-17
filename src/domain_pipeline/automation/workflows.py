@@ -1705,6 +1705,39 @@ def aggregate_batch(
         cache_merge_summary["invalid_cache_count"],
         cache_merge_summary["final_cache_path"],
     )
+    summary_counts = Counter(payload["conclusion"] for payload in status_payloads)
+    log_summaries = [
+        {
+            "worker_id": worker_id,
+            "log_path": _relative(
+                _worker_output_paths(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                )["log"]
+            ),
+        }
+        for worker_id in worker_ids
+    ]
+    logger.debug(
+        "Aggregate log merge for batch %s starting: candidates=%d target=%s",
+        batch_id,
+        len(log_summaries),
+        _relative(final_output_paths["log"]),
+    )
+    _merge_log_files(
+        summaries=log_summaries,
+        state_root=state_root,
+        target_path=final_output_paths["log"],
+    )
+    final_log_summary = _path_debug_summary(final_output_paths["log"])
+    logger.debug(
+        "Aggregate log merge for batch %s completed: path=%s exists=%s bytes=%s",
+        batch_id,
+        final_log_summary["path"],
+        final_log_summary["exists"],
+        final_log_summary.get("bytes", 0),
+    )
     logger.debug(
         "Aggregate output summaries for batch %s: %s",
         batch_id,
@@ -1714,7 +1747,7 @@ def aggregate_batch(
                 "final_dead": _path_debug_summary(final_output_paths["dead"]),
                 "final_review": _path_debug_summary(final_output_paths["review"]),
                 "final_audit": _path_debug_summary(final_output_paths["audit"]),
-                "final_log": _path_debug_summary(final_output_paths["log"]),
+                "final_log": final_log_summary,
                 "final_cache": _path_debug_summary(final_output_paths["cache"]),
             },
             sort_keys=True,
@@ -1726,6 +1759,8 @@ def aggregate_batch(
         state_root / ".automation" / "results" / batch_id,
         state_root / ".automation" / "status" / batch_id,
     ]
+    # Worker logs live under .automation/results/<batch>/<worker>/state/worker.log,
+    # so merge them before workflow-local cleanup removes the results tree.
     for cleanup_path in cleanup_paths:
         if cleanup_path.exists():
             shutil.rmtree(cleanup_path)
@@ -1751,24 +1786,6 @@ def aggregate_batch(
         _relative(_current_batch_path(config_name=config_name)),
     )
 
-    summary_counts = Counter(payload["conclusion"] for payload in status_payloads)
-    _merge_log_files(
-        summaries=[
-            {
-                "worker_id": worker_id,
-                "log_path": _relative(
-                    _worker_output_paths(
-                        batch_id=batch_id,
-                        worker_id=worker_id,
-                        config_name=config_name,
-                    )["log"]
-                ),
-            }
-            for worker_id in worker_ids
-        ],
-        state_root=state_root,
-        target_path=final_output_paths["log"],
-    )
     logger.info(
         "Aggregate completed batch %s with summary_counts=%s",
         batch_id,
