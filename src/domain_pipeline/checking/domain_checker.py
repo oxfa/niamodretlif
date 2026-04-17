@@ -516,17 +516,18 @@ class DomainChecker:
             return RDAPResult(True, statuses)
         if response.status_code == 404:
             return RDAPResult(False, [])
-        if response.status_code == 400:
+        if response.status_code in {400, 501}:
             # This is the final authoritative per-root query, so the normalized
-            # registrable domain is already fixed and repeated 400s are reusable
-            # unavailable states across runs.
+            # registrable domain is already fixed and repeated 400/501 responses
+            # are reusable unavailable states across runs.
             logger.debug(
-                "Authoritative RDAP query for %s returned HTTP 400; "
+                "Authoritative RDAP query for %s returned HTTP %d; "
                 "treating it as cacheable unavailable",
                 domain,
+                response.status_code,
             )
             raise CacheableRDAPUnavailableError(
-                f"RDAP query for {domain} returned HTTP 400"
+                f"RDAP query for {domain} returned HTTP {response.status_code}"
             )
         logger.debug(
             "Authoritative RDAP query for %s returned unexpected non-cacheable "

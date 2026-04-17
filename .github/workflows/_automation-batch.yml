@@ -427,7 +427,8 @@ jobs:
           set -eo pipefail
           rm -rf .tmp/aggregate_log_artifact
           # Stage volatile logs early before publish cleanup removes them.
-          # Upload happens later so the artifact reflects the full aggregate job path.
+          # The aggregate job log is refreshed again later by appending the
+          # recreated post-cleanup publish segment before upload.
           mkdir -p .tmp/aggregate_log_artifact/validation-settings/logs
           mkdir -p .tmp/aggregate_log_artifact/prepared-batch/logs
           mkdir -p .tmp/aggregate_log_artifact/jsonl-log
@@ -584,6 +585,13 @@ jobs:
         run: |
           set -eo pipefail
           echo "=== Upload aggregate log artifact ===" | tee -a "${AGGREGATE_LOG_PATH}"
+      - name: Refresh staged aggregate job log
+        if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
+        run: |
+          set -eo pipefail
+          # After publish cleanup, AGGREGATE_LOG_PATH contains the recreated
+          # post-cleanup segment only, so append it into the staged pre-cleanup log.
+          cat "${AGGREGATE_LOG_PATH}" >> ".tmp/aggregate_log_artifact/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
       - name: Upload aggregate log artifact
         if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
         uses: actions/upload-artifact@v7
