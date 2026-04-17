@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, cast
 
 from domain_pipeline.io.output_manager import csv_row_signature, write_review_rows
 from domain_pipeline.output_invariants import DuplicateOutputInvariantError
@@ -53,10 +53,7 @@ from domain_pipeline.runtime.history import (
     PipelineCache,
     ROOT_CLASSIFICATION_TABLE,
 )
-from domain_pipeline.runtime.pure_helpers import (
-    REVIEW_OUTPUT_COLUMNS,
-    build_review_output_row,
-)
+from domain_pipeline.runtime.pure_helpers import REVIEW_OUTPUT_COLUMNS, ReviewOutputRow
 from domain_pipeline.automation.manifests import (
     AggregateOutputSpec,
     BatchManifest,
@@ -1316,14 +1313,24 @@ def _merge_audit_files(audit_paths: Iterable[Path], target_path: Path) -> None:
 
 
 def _merge_review_files(review_paths: Iterable[Path], target_path: Path) -> None:
-    review_rows: list[dict[str, Any]] = []
+    review_path_list = list(review_paths)
+    logger.debug(
+        "Aggregate review merge starting target=%s source_count=%d",
+        target_path,
+        len(review_path_list),
+    )
+    review_rows: list[ReviewOutputRow] = []
     seen_review_rows: dict[str, str] = {}
-    for review_path in review_paths:
+    for review_path in review_path_list:
         if not review_path.exists():
+            logger.debug(
+                "Aggregate review merge skipping missing source=%s", review_path
+            )
             continue
         with review_path.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle):
-                signature = csv_row_signature(build_review_output_row(row))
+                normalized_row = _normalize_projected_review_row(row)
+                signature = csv_row_signature(normalized_row)
                 existing = seen_review_rows.get(signature)
                 if existing is not None:
                     raise DuplicateOutputInvariantError(
@@ -1336,11 +1343,48 @@ def _merge_review_files(review_paths: Iterable[Path], target_path: Path) -> None
                         },
                     )
                 seen_review_rows[signature] = _relative(review_path)
-                review_rows.append(row)
+                review_rows.append(normalized_row)
     if target_path.exists():
         target_path.unlink()
     if review_rows:
-        write_review_rows(target_path, review_rows)
+        _write_projected_review_rows(target_path, review_rows)
+    logger.debug(
+        "Aggregate review merge completed target=%s merged_row_count=%d",
+        target_path,
+        len(review_rows),
+    )
+
+
+def _normalize_projected_review_row(row: dict[str, Any]) -> ReviewOutputRow:
+    """Normalize one aggregate review CSV row without reprojecting its values."""
+    # Aggregate review inputs already contain REVIEW_OUTPUT_COLUMNS and must
+    # preserve the worker/prepared projection exactly as written.
+    return cast(
+        ReviewOutputRow,
+        {column: str(row.get(column, "")) for column in REVIEW_OUTPUT_COLUMNS},
+    )
+
+
+def _write_projected_review_rows(
+    review_path: Path, review_rows: list[ReviewOutputRow]
+) -> None:
+    """Write already-projected aggregate review rows in deterministic order."""
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    with review_path.open("w", encoding="utf-8", newline="") as review_handle:
+        writer = csv.DictWriter(
+            review_handle,
+            fieldnames=REVIEW_OUTPUT_COLUMNS,
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for row in sorted(
+            review_rows,
+            key=lambda current: (
+                current.get("input_name") or current.get("host", ""),
+                current.get("host", ""),
+            ),
+        ):
+            writer.writerow(cast(Any, row))
 
 
 def _merge_log_files(

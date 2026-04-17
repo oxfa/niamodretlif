@@ -698,9 +698,11 @@ jobs:
         if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
         run: |
           set -eo pipefail
-          # After publish cleanup, AGGREGATE_LOG_PATH contains the recreated
-          # post-cleanup segment only, so append it into the staged pre-cleanup log.
-          cat "${AGGREGATE_LOG_PATH}" >> ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
+          # Refresh the staged artifact from the final aggregate log after the
+          # later publish/upload-intent steps have appended to AGGREGATE_LOG_PATH.
+          staged_aggregate_log_path=".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
+          echo "refreshing staged aggregate job log source=${AGGREGATE_LOG_PATH} target=${staged_aggregate_log_path}" | tee -a "${AGGREGATE_LOG_PATH}"
+          cp "${AGGREGATE_LOG_PATH}" "${staged_aggregate_log_path}"
       - name: Upload aggregate log artifact
         if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
         uses: actions/upload-artifact@v7
