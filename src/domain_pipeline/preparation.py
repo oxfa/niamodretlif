@@ -57,7 +57,7 @@ class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
     prepared_entries: list[PreparedHostEntry]
     root_plans: dict[str, PreparedRootPlan]
     unmatched_review_rows: list[dict[str, Any]]
-    unmatched_audit_rows: list[dict[str, Any]]
+    unmatched_terminal_rows: list[dict[str, Any]]
     manual_filter_path: Path
 
     def runtime_payload(self) -> dict[str, Any]:
@@ -104,7 +104,7 @@ class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
                 }
                 for registrable_domain, plan in sorted(self.root_plans.items())
             },
-            "terminal_rows": [dict(row) for row in self.unmatched_audit_rows],
+            "terminal_rows": [dict(row) for row in self.unmatched_terminal_rows],
         }
 
     def split_entries_for_planning(
@@ -210,7 +210,7 @@ def _unmatched_manual_filter_row(
     host: str,
     manual_filter_path: Path,
 ) -> dict[str, Any]:
-    """Return one shared audit/review row for a manual-pass host absent from sources."""
+    """Return one shared terminal review/audit row for a manual-pass host absent from sources."""
     manual_filter_path_str = str(manual_filter_path)
     return {
         "source_id": "manual_filter_pass_unmatched",
@@ -229,6 +229,7 @@ def _unmatched_manual_filter_row(
         "classification_reason": (
             "manual filter-pass host was not present in any configured source"
         ),
+        "route": "review",
         "rdap_registration_status": "unavailable",
         "dns_status": "skipped",
         "canonical_name": "",
@@ -368,6 +369,6 @@ def prepare_inputs(
         prepared_entries=list(collapsed_entries.values()),
         root_plans=root_plans,
         unmatched_review_rows=unmatched_rows,
-        unmatched_audit_rows=[dict(row) for row in unmatched_rows],
+        unmatched_terminal_rows=[dict(row) for row in unmatched_rows],
         manual_filter_path=manual_filter_path,
     )

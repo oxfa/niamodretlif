@@ -30,10 +30,9 @@ except ModuleNotFoundError:  # pragma: no cover
     YAML_MODULE = None
 
 from .constants import GEO_PROVIDER_GEOJS, GEO_PROVIDER_IPINFO_LITE
+from ..path_layout import runtime_cache_path
 
-DEFAULT_CACHE_FILE = (
-    Path(__file__).resolve().parents[3] / ".tmp" / "runtime" / "check-cache.sqlite3"
-)
+DEFAULT_CACHE_FILE = runtime_cache_path(Path(__file__).resolve().parents[3])
 CONFIG_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ISO_REGION_RULE_PATTERN = re.compile(r"^[A-Z]{2}-[A-Z0-9]{1,3}$")
 

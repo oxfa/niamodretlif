@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..shared import OUTPUT_SUFFIXES, REVIEW_OUTPUT_FORMAT, SourceJob
+from ..path_layout import DEBUG_ARTIFACTS_DIR
 from ..runtime.pure_helpers import (
     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
@@ -17,7 +18,7 @@ from ..runtime.pure_helpers import (
 )
 
 log = logging.getLogger(__name__)
-RAW_OUTPUT_DIR = Path("output") / "raw"
+RAW_OUTPUT_DIR = DEBUG_ARTIFACTS_DIR / "runtime" / "raw"
 
 
 def review_basename_for_job(job: SourceJob) -> str:
@@ -42,6 +43,15 @@ def dead_output_path_for_job(job: SourceJob) -> Path:
     """Return the dead-output text path for one source job."""
     output_dir = Path(job.config["output"].get("directory", "."))
     return output_dir / "dead" / f"{job.output_stem}.{OUTPUT_SUFFIXES['txt']}"
+
+
+def audit_output_path_for_job(job: SourceJob) -> Path:
+    """Return the terminal-row path for one job, honoring runtime-only overrides."""
+    output_payload = job.config.get("output", {})
+    terminal_rows_file = str(output_payload.get("terminal_rows_file", "")).strip()
+    if terminal_rows_file:
+        return Path(terminal_rows_file)
+    return RAW_OUTPUT_DIR / f"{job.output_stem}.{OUTPUT_SUFFIXES['audit']}"
 
 
 def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> None:
@@ -95,7 +105,7 @@ def output_paths_for_job(job: SourceJob) -> dict[str, Path]:
     return {
         "filtered": filtered_output_path_for_job(job),
         "dead": dead_output_path_for_job(job),
-        "audit": RAW_OUTPUT_DIR / f"{job.output_stem}.{OUTPUT_SUFFIXES['audit']}",
+        "audit": audit_output_path_for_job(job),
     }
 
 

@@ -79,14 +79,14 @@ jobs:
       - name: Stage validation artifact
         run: |
           set -eo pipefail
-          mkdir -p .tmp/validation_artifact/logs
-          cp settings.json .tmp/validation_artifact/logs/settings.json
-          cp validate-settings.log .tmp/validation_artifact/logs/validate-settings.log
+          mkdir -p .debug_artifacts/prepare/validation/logs
+          cp settings.json .debug_artifacts/prepare/validation/logs/settings.json
+          cp validate-settings.log .debug_artifacts/prepare/validation/logs/validate-settings.log
       - name: Upload validation artifact
         uses: actions/upload-artifact@v7
         with:
           name: validation-settings
-          path: .tmp/validation_artifact
+          path: .debug_artifacts/prepare/validation
           include-hidden-files: true
           if-no-files-found: error
       - name: Build committed batch state
@@ -97,7 +97,7 @@ jobs:
             echo "=== Build committed batch state ==="
             python -m domain_pipeline.automation.cli orchestrate \
               --source-root . \
-              --state-root .tmp/automation_state \
+              --state-root . \
               --config "${{ inputs.config_path }}" \
               --run-id "${GITHUB_RUN_ID}" \
               --run-attempt "${GITHUB_RUN_ATTEMPT}" \
@@ -108,20 +108,28 @@ jobs:
       - name: Stage prepared batch artifact
         run: |
           set -eo pipefail
-          # The prepared batch directory now includes batch-manifest.json,
-          # worker-bundle.json files, and prepare-owned aggregate inputs.
-          mkdir -p .tmp/prepared_batch/.automation/batches
-          mkdir -p .tmp/prepared_batch/logs
+          mkdir -p .tmp/prepared_batch/.workflow_state/batches
           cp -R \
-            ".tmp/automation_state/.automation/batches/${{ steps.batch.outputs.batch_id }}" \
-            .tmp/prepared_batch/.automation/batches/
-          cp batch.json .tmp/prepared_batch/logs/batch.json
-          cp prepare-batch.log .tmp/prepared_batch/logs/prepare-batch.log
+            ".workflow_state/batches/${{ steps.batch.outputs.batch_id }}" \
+            .tmp/prepared_batch/.workflow_state/batches/
       - name: Upload prepared batch artifact
         uses: actions/upload-artifact@v7
         with:
           name: prepared-batch
           path: .tmp/prepared_batch
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Stage prepared batch debug artifact
+        run: |
+          set -eo pipefail
+          mkdir -p .debug_artifacts/prepare/batch/logs
+          cp batch.json .debug_artifacts/prepare/batch/logs/batch.json
+          cp prepare-batch.log .debug_artifacts/prepare/batch/logs/prepare-batch.log
+      - name: Upload prepared batch debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: prepared-batch-debug
+          path: .debug_artifacts/prepare/batch
           include-hidden-files: true
           if-no-files-found: error
 
@@ -157,9 +165,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: |
-            .tmp/runtime/check-cache.sqlite3
-            .tmp/runtime/check-cache.sqlite3-shm
-            .tmp/runtime/check-cache.sqlite3-wal
+            .workflow_state/runtime/cache/check-cache.sqlite3
+            .workflow_state/runtime/cache/check-cache.sqlite3-shm
+            .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             signal-light-sqlite-${{ inputs.config_name }}-
@@ -171,15 +179,15 @@ jobs:
       - name: Restore prepared batch state
         run: |
           set -eo pipefail
-          mkdir -p .tmp/automation_state
-          cp -R .tmp/prepared_batch/. .tmp/automation_state/
+          mkdir -p .workflow_state
+          cp -R .tmp/prepared_batch/.workflow_state/. .workflow_state/
       - name: Initialize worker statuses
         id: init
         run: |
           set -eo pipefail
           python -m domain_pipeline.automation.cli initialize-worker-statuses \
             --source-root . \
-            --state-root .tmp/automation_state \
+            --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             | tee init.json
@@ -192,7 +200,7 @@ jobs:
           set -eo pipefail
           python -m domain_pipeline.automation.cli worker \
             --source-root . \
-            --state-root .tmp/automation_state \
+            --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --log-level "${{ inputs.worker_log_level }}" \
@@ -205,7 +213,7 @@ jobs:
           set -eo pipefail
           python -m domain_pipeline.automation.cli finalize-worker-statuses \
             --source-root . \
-            --state-root .tmp/automation_state \
+            --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --output-commit-sha "" \
@@ -216,7 +224,7 @@ jobs:
           set -eo pipefail
           python -m domain_pipeline.automation.cli finalize-worker-statuses \
             --source-root . \
-            --state-root .tmp/automation_state \
+            --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --output-commit-sha "" \
@@ -228,17 +236,17 @@ jobs:
         run: |
           set -eo pipefail
           rm -rf .tmp/worker_bundle
-          if [ -d ".tmp/automation_state/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" ]; then
-            mkdir -p ".tmp/worker_bundle/.automation/results/${{ needs.prepare_run.outputs.batch_id }}"
+          if [ -d ".workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" ]; then
+            mkdir -p ".tmp/worker_bundle/.workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}"
             cp -R \
-              ".tmp/automation_state/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" \
-              ".tmp/worker_bundle/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/"
+              ".workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}" \
+              ".tmp/worker_bundle/.workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/"
           fi
-          if [ -f ".tmp/automation_state/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" ]; then
-            mkdir -p ".tmp/worker_bundle/.automation/status/${{ needs.prepare_run.outputs.batch_id }}"
+          if [ -f ".workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" ]; then
+            mkdir -p ".tmp/worker_bundle/.workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}"
             cp \
-              ".tmp/automation_state/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" \
-              ".tmp/worker_bundle/.automation/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json"
+              ".workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" \
+              ".tmp/worker_bundle/.workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json"
           fi
       - name: Upload worker artifact
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
@@ -246,6 +254,25 @@ jobs:
         with:
           name: worker-${{ matrix.worker_id }}
           path: .tmp/worker_bundle
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Stage worker debug artifact
+        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        run: |
+          set -eo pipefail
+          rm -rf .tmp/worker_debug_bundle
+          if [ -f ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" ]; then
+            mkdir -p ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs"
+            cp \
+              ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" \
+              ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
+          fi
+      - name: Upload worker debug artifact
+        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: worker-debug-${{ matrix.worker_id }}
+          path: .tmp/worker_debug_bundle
           include-hidden-files: true
           if-no-files-found: error
       - name: Fail worker when processing reported failure
@@ -270,7 +297,7 @@ jobs:
       actions: read
     env:
       AUTOMATION_PUSH_TOKEN: ${{ secrets.AUTOMATION_PUSH_TOKEN }}
-      AGGREGATE_LOG_PATH: .tmp/automation_worktree/.tmp/runtime/logs/${{ inputs.config_name }}--aggregate.log
+      AGGREGATE_LOG_PATH: .debug_artifacts/runtime/logs/${{ inputs.config_name }}--aggregate.log
     steps:
       - uses: actions/checkout@v6
         with:
@@ -295,50 +322,24 @@ jobs:
           # This is a local temporary worktree path, not the Git branch name.
           python -m domain_pipeline.automation.cli prepare-automation-worktree \
             --source-root . \
-            --state-root .tmp/automation_worktree \
+            --state-root . \
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
       - name: Restore aggregate baseline cache
         uses: actions/cache/restore@v5
         with:
           path: |
-            .tmp/runtime/check-cache.sqlite3
-            .tmp/runtime/check-cache.sqlite3-shm
-            .tmp/runtime/check-cache.sqlite3-wal
+            .workflow_state/runtime/cache/check-cache.sqlite3
+            .workflow_state/runtime/cache/check-cache.sqlite3-shm
+            .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             signal-light-sqlite-${{ inputs.config_name }}-
-      - name: Hydrate aggregate baseline cache into worktree
-        run: |
-          set -eo pipefail
-          # Actions cache restore/save stays anchored at repo-root paths.
-          # Aggregate runtime still merges into the dedicated worktree cache path.
-          mkdir -p .tmp/automation_worktree/.tmp/runtime
-          if [ -f .tmp/runtime/check-cache.sqlite3 ]; then
-            cp .tmp/runtime/check-cache.sqlite3 \
-              .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3
-            if [ -f .tmp/runtime/check-cache.sqlite3-shm ]; then
-              cp .tmp/runtime/check-cache.sqlite3-shm \
-                .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-shm
-            else
-              rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-shm
-            fi
-            if [ -f .tmp/runtime/check-cache.sqlite3-wal ]; then
-              cp .tmp/runtime/check-cache.sqlite3-wal \
-                .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-wal
-            else
-              rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-wal
-            fi
-          else
-            rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3
-            rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-shm
-            rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-wal
-          fi
       - name: Configure git actor
         run: |
           python -m domain_pipeline.automation.cli configure-git \
             --source-root . \
-            --state-root .tmp/automation_worktree
+            --state-root .
       - name: Download workflow artifacts
         uses: actions/download-artifact@v8
         with:
@@ -346,21 +347,19 @@ jobs:
       - name: Restore prepared and worker state
         run: |
           set -eo pipefail
-          mkdir -p .tmp/automation_worktree/.automation
-          # Aggregate restores the persisted batch manifest and worker bundles,
-          # then merges worker results without rereading the source YAML.
+          mkdir -p .workflow_state
           cp -R \
-            ".tmp/downloads/prepared-batch/.automation/batches" \
-            .tmp/automation_worktree/.automation/
+            ".tmp/downloads/prepared-batch/.workflow_state/." \
+            .workflow_state/
           for worker_dir in .tmp/downloads/worker-*; do
             [ -d "${worker_dir}" ] || continue
-            if [ -d "${worker_dir}/.automation/results" ]; then
-              mkdir -p .tmp/automation_worktree/.automation/results
-              cp -R "${worker_dir}/.automation/results/." .tmp/automation_worktree/.automation/results/
+            if [ -d "${worker_dir}/.workflow_state/workers" ]; then
+              mkdir -p .workflow_state/workers
+              cp -R "${worker_dir}/.workflow_state/workers/." .workflow_state/workers/
             fi
-            if [ -d "${worker_dir}/.automation/status" ]; then
-              mkdir -p .tmp/automation_worktree/.automation/status
-              cp -R "${worker_dir}/.automation/status/." .tmp/automation_worktree/.automation/status/
+            if [ -d "${worker_dir}/.workflow_state/status" ]; then
+              mkdir -p .workflow_state/status
+              cp -R "${worker_dir}/.workflow_state/status/." .workflow_state/status/
             fi
           done
       - name: Initialize aggregate job log
@@ -380,7 +379,7 @@ jobs:
             echo "=== Materialize incomplete worker statuses ==="
             python -m domain_pipeline.automation.cli materialize-incomplete-statuses \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
               --failure-reason "aggregate detected missing or incomplete worker artifacts" \
               --log-level "${{ inputs.aggregate_log_level }}" \
@@ -394,7 +393,7 @@ jobs:
             echo "=== Validate aggregate barrier ==="
             python -m domain_pipeline.automation.cli validate-aggregate \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               | tee readiness.json
@@ -408,7 +407,7 @@ jobs:
             echo "=== Aggregate batch outputs ==="
             python -m domain_pipeline.automation.cli aggregate \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
               --target-ref "${{ needs.prepare_run.outputs.target_branch }}" \
               --log-level "${{ inputs.aggregate_log_level }}" \
@@ -427,91 +426,54 @@ jobs:
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
           set -eo pipefail
-          rm -rf .tmp/aggregate_log_artifact
-          # Stage volatile logs early before publish cleanup removes them.
-          # The aggregate job log is refreshed again later by appending the
-          # recreated post-cleanup publish segment before upload.
-          mkdir -p .tmp/aggregate_log_artifact/validation-settings/logs
-          mkdir -p .tmp/aggregate_log_artifact/prepared-batch/logs
-          mkdir -p .tmp/aggregate_log_artifact/jsonl-log
-          mkdir -p .tmp/aggregate_log_artifact/runtime-logs
-          mkdir -p .tmp/aggregate_log_artifact/worker-logs
-          cp .tmp/downloads/validation-settings/logs/settings.json \
-            .tmp/aggregate_log_artifact/validation-settings/logs/settings.json
-          cp .tmp/downloads/validation-settings/logs/validate-settings.log \
-            .tmp/aggregate_log_artifact/validation-settings/logs/validate-settings.log
-          cp .tmp/downloads/prepared-batch/logs/batch.json \
-            .tmp/aggregate_log_artifact/prepared-batch/logs/batch.json
-          cp .tmp/downloads/prepared-batch/logs/prepare-batch.log \
-            .tmp/aggregate_log_artifact/prepared-batch/logs/prepare-batch.log
+          rm -rf .debug_artifacts/upload_bundle
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs"
+          cp .tmp/downloads/validation-settings/.debug_artifacts/prepare/validation/logs/settings.json \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/settings.json"
+          cp .tmp/downloads/validation-settings/.debug_artifacts/prepare/validation/logs/validate-settings.log \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/validate-settings.log"
+          cp .tmp/downloads/prepared-batch-debug/.debug_artifacts/prepare/batch/logs/batch.json \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/batch.json"
+          cp .tmp/downloads/prepared-batch-debug/.debug_artifacts/prepare/batch/logs/prepare-batch.log \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/prepare-batch.log"
           cp \
-            ".tmp/automation_worktree/output/raw/${{ steps.config.outputs.config_name }}.jsonl" \
-            ".tmp/aggregate_log_artifact/jsonl-log/${{ steps.config.outputs.config_name }}.jsonl"
+            ".debug_artifacts/runtime/raw/${{ steps.config.outputs.config_name }}.jsonl" \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log/${{ steps.config.outputs.config_name }}.jsonl"
           cp \
-            ".tmp/automation_worktree/.tmp/runtime/logs/${{ steps.config.outputs.config_name }}.log" \
-            ".tmp/aggregate_log_artifact/runtime-logs/${{ steps.config.outputs.config_name }}.log"
+            ".debug_artifacts/runtime/logs/${{ steps.config.outputs.config_name }}.log" \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}.log"
           cp \
-            ".tmp/automation_worktree/.tmp/runtime/logs/${{ steps.config.outputs.config_name }}--aggregate.log" \
-            ".tmp/aggregate_log_artifact/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
-          for worker_dir in .tmp/downloads/worker-*; do
+            ".debug_artifacts/runtime/logs/${{ steps.config.outputs.config_name }}--aggregate.log" \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
+          for worker_dir in .tmp/downloads/worker-debug-*; do
             [ -d "${worker_dir}" ] || continue
             artifact_name="${worker_dir##*/}"
-            worker_id="${artifact_name#worker-}"
-            worker_log_path="${worker_dir}/.automation/results/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/state/worker.log"
+            worker_id="${artifact_name#worker-debug-}"
+            worker_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/worker.log"
             [ -f "${worker_log_path}" ] || continue
-            cp "${worker_log_path}" ".tmp/aggregate_log_artifact/worker-logs/${worker_id}.log"
+            cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
           done
           echo "=== Aggregate artifact staging complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
-      - name: Persist aggregate baseline cache to repo root
-        if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
-        run: |
-          set -eo pipefail
-          mkdir -p .tmp/runtime
-          if [ -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3 ]; then
-            cp .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3 \
-              .tmp/runtime/check-cache.sqlite3
-            if [ -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-shm ]; then
-              cp .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-shm \
-                .tmp/runtime/check-cache.sqlite3-shm
-            else
-              rm -f .tmp/runtime/check-cache.sqlite3-shm
-            fi
-            if [ -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-wal ]; then
-              cp .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3-wal \
-                .tmp/runtime/check-cache.sqlite3-wal
-            else
-              rm -f .tmp/runtime/check-cache.sqlite3-wal
-            fi
-          fi
       - name: Save aggregate baseline cache
-        if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && hashFiles('.tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3') != '' && hashFiles('.tmp/runtime/check-cache.sqlite3') != '' }}
+        if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && hashFiles('.workflow_state/runtime/cache/check-cache.sqlite3') != '' }}
         uses: actions/cache/save@v5
         with:
           path: |
-            .tmp/runtime/check-cache.sqlite3
-            .tmp/runtime/check-cache.sqlite3-shm
-            .tmp/runtime/check-cache.sqlite3-wal
+            .workflow_state/runtime/cache/check-cache.sqlite3
+            .workflow_state/runtime/cache/check-cache.sqlite3-shm
+            .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Remove workflow-local automation state before publish
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
           set -eo pipefail
-          # `.automation/` is workflow-local staging state and must not be published.
-          # We still stage the path later so any previously tracked copies are deleted.
-          # The same applies to legacy tracked state/log surfaces from older publishes.
-          rm -rf .tmp/automation_worktree/.automation
-          rm -f ".tmp/automation_worktree/output/raw/${{ steps.config.outputs.config_name }}.jsonl"
-          rm -f .tmp/automation_worktree/.tmp/runtime/check-cache.sqlite3
-          rm -f .tmp/automation_worktree/state/check-cache.sqlite3
-          if [ -d .tmp/automation_worktree/.tmp/runtime/logs ]; then
-            find .tmp/automation_worktree/.tmp/runtime/logs -maxdepth 1 -type f -name '*.log' -delete
-          fi
-          if [ -d .tmp/automation_worktree/state/logs ]; then
-            find .tmp/automation_worktree/state/logs -maxdepth 1 -type f -name '*.log' -delete
-          fi
-          if [ -d .tmp/automation_worktree/log ]; then
-            find .tmp/automation_worktree/log -maxdepth 1 -type f -name '*.log' -delete
-          fi
+          # The publish worktree contains only branch-facing output paths.
+          # Workflow-internal state and debug artifacts live outside it under
+          # `.workflow_state/` and `.debug_artifacts/`.
       - name: Commit failed aggregate cleanup
         if: ${{ steps.aggregate_state.outputs.state == 'failed' }}
         run: |
@@ -520,13 +482,9 @@ jobs:
             echo "=== Commit failed aggregate cleanup ==="
             python -m domain_pipeline.automation.cli commit-paths \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --message "automation(${{ needs.prepare_run.outputs.batch_id }}): aggregate failed" \
-              --log-level "${{ inputs.aggregate_log_level }}" \
-              --path "state/check-cache.sqlite3" \
-              --path "state/logs/*.log" \
-              --path "log/*.log" \
-              --path ".automation"
+              --log-level "${{ inputs.aggregate_log_level }}"
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Validate publish candidate sizes
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' }}
@@ -536,7 +494,7 @@ jobs:
             echo "=== Validate publish candidate sizes ==="
             python -m domain_pipeline.automation.cli validate-publish-candidate-sizes \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
@@ -553,17 +511,12 @@ jobs:
             echo "=== Commit aggregate outputs ==="
             python -m domain_pipeline.automation.cli commit-paths \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --message "automation(${{ needs.prepare_run.outputs.batch_id }}): aggregate outputs" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
-              --path "$(jq -r '.final_output_paths.audit' aggregate.json)" \
-              --path "state/check-cache.sqlite3" \
-              --path "state/logs/*.log" \
-              --path "log/*.log" \
-              --path ".automation" \
               | tee aggregate-commit.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
           echo "commit_sha=$(jq -r '.commit_sha // empty' aggregate-commit.json)" >> "$GITHUB_OUTPUT"
@@ -576,7 +529,7 @@ jobs:
             echo "=== Push published state ==="
             python -m domain_pipeline.automation.cli push-branch \
               --source-root . \
-              --state-root .tmp/automation_worktree \
+              --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --branch "${{ needs.prepare_run.outputs.target_branch }}" \
               --max-retries 2
@@ -593,13 +546,13 @@ jobs:
           set -eo pipefail
           # After publish cleanup, AGGREGATE_LOG_PATH contains the recreated
           # post-cleanup segment only, so append it into the staged pre-cleanup log.
-          cat "${AGGREGATE_LOG_PATH}" >> ".tmp/aggregate_log_artifact/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
+          cat "${AGGREGATE_LOG_PATH}" >> ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
       - name: Upload aggregate log artifact
         if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
         uses: actions/upload-artifact@v7
         with:
           name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
-          path: .tmp/aggregate_log_artifact
+          path: .debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
           if-no-files-found: ignore
       - name: Fail failed aggregate runs
         if: ${{ steps.aggregate_state.outputs.state == 'failed' }}

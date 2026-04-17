@@ -586,6 +586,13 @@ def write_result_row(
     output_file.write("\n")
 
 
+def _audit_row(row: dict[str, Any], *, route: str) -> dict[str, Any]:
+    """Return the serialized raw-audit row for one sync runtime result."""
+    audit_row = dict(row)
+    audit_row["route"] = route
+    return audit_row
+
+
 def lookup_geo_results(
     cache: PipelineCache,
     provider: IPGeoProvider,
@@ -912,30 +919,30 @@ def classify_and_write_source(
                             rdap_registrable_domain_registered_ttl_days,
                         )
                         persisted_root_cache_updates.add(root)
-                    dead_rows.append(
-                        build_output_row(
-                            job,
-                            entry,
-                            CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-                            rdap_result,
-                            DNSResult(
-                                host=host,
-                                a_exists=False,
-                                a_nodata=False,
-                                a_nxdomain=True,
-                                a_timeout=False,
-                                a_servfail=False,
-                                canonical_name=None,
-                            ),
-                            [],
-                            "skipped",
-                            "dead_root",
-                            "skipped",
-                            "dead_root",
-                            None,
-                            dns_status_override="skipped",
-                        )
+                    dead_row = build_output_row(
+                        job,
+                        entry,
+                        CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+                        rdap_result,
+                        DNSResult(
+                            host=host,
+                            a_exists=False,
+                            a_nodata=False,
+                            a_nxdomain=True,
+                            a_timeout=False,
+                            a_servfail=False,
+                            canonical_name=None,
+                        ),
+                        [],
+                        "skipped",
+                        "dead_root",
+                        "skipped",
+                        "dead_root",
+                        None,
+                        dns_status_override="skipped",
                     )
+                    dead_rows.append(dead_row)
+                    audit_rows.append(_audit_row(dead_row, route=ROUTE_DROP))
                     continue
                 if not dns_enabled:
                     classification = (
@@ -1159,8 +1166,9 @@ def classify_and_write_source(
                 row["geo_attempts"] = geo_attempts
             if route == ROUTE_DROP:
                 counts["routed_drop"] += 1
+                audit_rows.append(_audit_row(row, route=route))
                 continue
-            audit_rows.append(row)
+            audit_rows.append(_audit_row(row, route=route))
             if route == ROUTE_REVIEW:
                 counts["routed_review"] += 1
                 review_rows.append(row)
