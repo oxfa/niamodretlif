@@ -552,13 +552,13 @@ jobs:
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs"
-          cp .tmp/downloads/validation-settings/.debug_artifacts/prepare/validation/logs/settings.json \
+          cp .tmp/downloads/validation-settings/logs/settings.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/settings.json"
-          cp .tmp/downloads/validation-settings/.debug_artifacts/prepare/validation/logs/validate-settings.log \
+          cp .tmp/downloads/validation-settings/logs/validate-settings.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/validate-settings.log"
-          cp .tmp/downloads/prepared-batch-debug/.debug_artifacts/prepare/batch/logs/batch.json \
+          cp .tmp/downloads/prepared-batch-debug/logs/batch.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/batch.json"
-          cp .tmp/downloads/prepared-batch-debug/.debug_artifacts/prepare/batch/logs/prepare-batch.log \
+          cp .tmp/downloads/prepared-batch-debug/logs/prepare-batch.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/prepare-batch.log"
           cp \
             ".debug_artifacts/runtime/raw/${{ steps.config.outputs.config_name }}.jsonl" \
