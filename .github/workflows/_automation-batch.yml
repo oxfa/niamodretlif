@@ -141,6 +141,7 @@ jobs:
     timeout-minutes: 355
     permissions:
       contents: read
+      actions: read
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(needs.prepare_run.outputs.max_parallel_workers) }}
@@ -179,10 +180,58 @@ jobs:
       - name: Log worker baseline cache restore
         run: |
           set -eo pipefail
+          cache_hit="${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
+          if [ -z "${cache_hit}" ]; then
+            restore_result="miss"
+          elif [ "${cache_hit}" = "true" ]; then
+            restore_result="exact"
+          else
+            restore_result="fallback"
+          fi
+          mkdir -p .workflow_state/runtime/cache
+          cache_paths=(
+            ".workflow_state/runtime/cache/check-cache.sqlite3"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-wal"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-shm"
+          )
+          summary_parts=()
+          for cache_path in "${cache_paths[@]}"; do
+            if [ -f "${cache_path}" ]; then
+              size_bytes="$(wc -c < "${cache_path}")"
+              summary_parts+=("${cache_path}:present:${size_bytes}")
+            else
+              summary_parts+=("${cache_path}:missing:0")
+            fi
+          done
+          summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "worker baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
           echo "worker baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "worker baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
-          echo "worker baseline cache cache-hit=${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
+          echo "worker baseline cache cache-hit=${cache_hit}"
+          echo "worker baseline cache restore_result=${restore_result}"
+          echo "worker baseline cache restored_paths=${summary}"
+          ls -la .workflow_state/runtime/cache
+      - name: Inspect worker cache candidates
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
+          key_prefix="signal-light-sqlite-${{ inputs.config_name }}-"
+          response_path="$(mktemp)"
+          trap 'rm -f "${response_path}"' EXIT
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_root}?per_page=20&key=${key_prefix}" \
+            > "${response_path}"
+          echo "worker baseline cache candidate query prefix=${key_prefix} current_ref=${GITHUB_REF}"
+          echo "worker baseline cache candidate_count=$(jq '.actions_caches | length' "${response_path}")"
+          jq -r '
+            .actions_caches[]? |
+            "worker baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
+          ' "${response_path}"
       - name: Download prepared batch artifact
         uses: actions/download-artifact@v8
         with:
@@ -354,10 +403,58 @@ jobs:
       - name: Log aggregate baseline cache restore
         run: |
           set -eo pipefail
+          cache_hit="${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
+          if [ -z "${cache_hit}" ]; then
+            restore_result="miss"
+          elif [ "${cache_hit}" = "true" ]; then
+            restore_result="exact"
+          else
+            restore_result="fallback"
+          fi
+          mkdir -p .workflow_state/runtime/cache
+          cache_paths=(
+            ".workflow_state/runtime/cache/check-cache.sqlite3"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-wal"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-shm"
+          )
+          summary_parts=()
+          for cache_path in "${cache_paths[@]}"; do
+            if [ -f "${cache_path}" ]; then
+              size_bytes="$(wc -c < "${cache_path}")"
+              summary_parts+=("${cache_path}:present:${size_bytes}")
+            else
+              summary_parts+=("${cache_path}:missing:0")
+            fi
+          done
+          summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "aggregate baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
           echo "aggregate baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "aggregate baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
-          echo "aggregate baseline cache cache-hit=${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
+          echo "aggregate baseline cache cache-hit=${cache_hit}"
+          echo "aggregate baseline cache restore_result=${restore_result}"
+          echo "aggregate baseline cache restored_paths=${summary}"
+          ls -la .workflow_state/runtime/cache
+      - name: Inspect aggregate cache candidates
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
+          key_prefix="signal-light-sqlite-${{ inputs.config_name }}-"
+          response_path="$(mktemp)"
+          trap 'rm -f "${response_path}"' EXIT
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_root}?per_page=20&key=${key_prefix}" \
+            > "${response_path}"
+          echo "aggregate baseline cache candidate query prefix=${key_prefix} current_ref=${GITHUB_REF}"
+          echo "aggregate baseline cache candidate_count=$(jq '.actions_caches | length' "${response_path}")"
+          jq -r '
+            .actions_caches[]? |
+            "aggregate baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
+          ' "${response_path}"
       - name: Configure git actor
         run: |
           python -m domain_pipeline.automation.cli configure-git \
@@ -508,6 +605,13 @@ jobs:
           echo "aggregate cache bundle summary=${summary} should_save=${should_save}"
           echo "should_save=${should_save}" >> "$GITHUB_OUTPUT"
           echo "bundle_summary=${summary}" >> "$GITHUB_OUTPUT"
+      - name: Log aggregate baseline cache save intent
+        if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
+        run: |
+          set -eo pipefail
+          echo "aggregate baseline cache save primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "aggregate baseline cache save should_save=${{ steps.inspect_aggregate_cache_bundle.outputs.should_save }}"
+          echo "aggregate baseline cache save bundle_summary=${{ steps.inspect_aggregate_cache_bundle.outputs.bundle_summary }}"
       - name: Save aggregate baseline cache
         if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && steps.inspect_aggregate_cache_bundle.outputs.should_save == 'true' }}
         uses: actions/cache/save@v5
