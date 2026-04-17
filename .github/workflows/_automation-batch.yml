@@ -162,6 +162,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Restore baseline cache
+        id: restore_worker_baseline_cache
         uses: actions/cache/restore@v5
         with:
           path: |
@@ -170,7 +171,18 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            # Prefer the prior attempt from the same workflow run when a rerun
+            # needs to resume cache progress, then fall back to the broader
+            # config-wide lineage.
+            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Log worker baseline cache restore
+        run: |
+          set -eo pipefail
+          echo "worker baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
+          echo "worker baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "worker baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
+          echo "worker baseline cache cache-hit=${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
       - name: Download prepared batch artifact
         uses: actions/download-artifact@v8
         with:
@@ -326,6 +338,7 @@ jobs:
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
       - name: Restore aggregate baseline cache
+        id: restore_aggregate_baseline_cache
         uses: actions/cache/restore@v5
         with:
           path: |
@@ -334,7 +347,17 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
           key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            # Keep aggregate reruns on the same per-run cache lineage before
+            # falling back to any newer config-wide cache generation.
+            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Log aggregate baseline cache restore
+        run: |
+          set -eo pipefail
+          echo "aggregate baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
+          echo "aggregate baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "aggregate baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
+          echo "aggregate baseline cache cache-hit=${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
       - name: Configure git actor
         run: |
           python -m domain_pipeline.automation.cli configure-git \
@@ -458,8 +481,35 @@ jobs:
             cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
           done
           echo "=== Aggregate artifact staging complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
+      - name: Inspect aggregate cache bundle
+        id: inspect_aggregate_cache_bundle
+        if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
+        run: |
+          set -eo pipefail
+          cache_paths=(
+            ".workflow_state/runtime/cache/check-cache.sqlite3"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-wal"
+            ".workflow_state/runtime/cache/check-cache.sqlite3-shm"
+          )
+          should_save=false
+          summary_parts=()
+          # Save eligibility must inspect the full SQLite WAL bundle because
+          # the main database alone is not a safe proxy for reusable state.
+          for cache_path in "${cache_paths[@]}"; do
+            if [ -f "${cache_path}" ]; then
+              should_save=true
+              size_bytes="$(wc -c < "${cache_path}")"
+              summary_parts+=("${cache_path}:present:${size_bytes}")
+            else
+              summary_parts+=("${cache_path}:missing:0")
+            fi
+          done
+          summary="$(IFS=,; echo "${summary_parts[*]}")"
+          echo "aggregate cache bundle summary=${summary} should_save=${should_save}"
+          echo "should_save=${should_save}" >> "$GITHUB_OUTPUT"
+          echo "bundle_summary=${summary}" >> "$GITHUB_OUTPUT"
       - name: Save aggregate baseline cache
-        if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && hashFiles('.workflow_state/runtime/cache/check-cache.sqlite3') != '' }}
+        if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && steps.inspect_aggregate_cache_bundle.outputs.should_save == 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
