@@ -1,6 +1,6 @@
-"""Configuration loading, normalization, and config-owned constants."""
+"""Configuration loading, normalization, and config-owned enumerations."""
 
-from .config import DEFAULT_CACHE_FILE, load_config
+from .config import load_config
 from .constants import (
     GEO_PROVIDER_GEOJS,
     GEO_PROVIDER_IP2LOCATION_IO,
@@ -11,7 +11,6 @@ from .constants import (
 )
 
 __all__ = [
-    "DEFAULT_CACHE_FILE",
     "GEO_PROVIDER_GEOJS",
     "GEO_PROVIDER_IP2LOCATION_IO",
     "GEO_PROVIDER_IP_API",

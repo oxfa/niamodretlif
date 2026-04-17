@@ -9,7 +9,7 @@ version: 2
 # - input/manual_filter_pass/<config-stem>.txt
 # This file is only supported when all enabled sources in the config have
 # dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes in
-# both automation and direct/manual runs.
+# workflow-owned runtime.
 # Hosts listed there still run through RDAP, but bypass DNS and geo.
 # RDAP-unregistered roots still route to dead output; otherwise they are
 # emitted to the filtered output for that config.
@@ -116,8 +116,6 @@ defaults:
     directory: output
 
 cache:
-  # SQLite file used to persist root RDAP, DNS, and geo cache data between runs.
-  cache_file: .workflow_state/runtime/cache/check-cache.sqlite3
   classification_ttl_days:
     # Cache retention, in days, for unregistered registrable-domain RDAP verdicts.
     rdap_registrable_domain_unregistered: 30

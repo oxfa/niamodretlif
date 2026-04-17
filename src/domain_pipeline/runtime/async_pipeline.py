@@ -44,14 +44,12 @@ from ..checking import (
     evaluate_geo_policy,
 )
 from ..io.parser import ParsedDomainEntry
-from ..preparation import prepare_inputs
 from ..io.output_manager import output_paths_for_job, review_output_path_for_job
 from ..path_layout import (
     incomplete_run_debug_root,
     incomplete_run_manifest_path,
     incomplete_run_publish_snapshot_root,
 )
-from ..settings.config import DEFAULT_CACHE_FILE, load_config
 from .async_constants import DNS_STAGE_WORKERS, GEO_STAGE_WORKERS, RDAP_STAGE_WORKERS
 from .bootstrap_async import AsyncBootstrapCache
 from .cache_async import start_writer_tasks, stop_writer_tasks
@@ -140,30 +138,7 @@ def _clear_existing_output_paths(output_paths: list[Path]) -> None:
 
 
 class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
-    """One staged async runtime instance for one config path."""
-
-    def __init__(
-        self,
-        config_path: Path,
-        *,
-        runtime_budget: RuntimeBudget | None = None,
-        prepared_metadata_path: Path | None = None,
-        prepared_metadata: dict[str, Any] | None = None,
-        time_source: Callable[[], float] = time.monotonic,
-    ) -> None:
-        config = load_config(config_path)
-        self._initialize(
-            config=config,
-            runtime_identity=RuntimeIdentity(
-                config_path=config_path.resolve(),
-                config_file_name=config_path.name,
-                config_name=str(config["config_name"]),
-            ),
-            runtime_budget=runtime_budget,
-            prepared_metadata_path=prepared_metadata_path,
-            prepared_metadata=prepared_metadata,
-            time_source=time_source,
-        )
+    """One staged async runtime instance for one workflow-owned runtime payload."""
 
     @classmethod
     def from_runtime_payload(
@@ -210,9 +185,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.runtime_paths = (
             dict(runtime_paths) if isinstance(runtime_paths, dict) else {}
         )
-        self.cache_path = Path(
-            self.config["cache"].get("cache_file", DEFAULT_CACHE_FILE)
-        )
+        self.cache_path = Path(str(self.config["cache"]["cache_file"]).strip())
         baseline_cache_file = str(
             self.config["cache"].get("baseline_cache_file", "")
         ).strip()
@@ -1784,71 +1757,6 @@ def _write_incomplete_run_state(
         encoding="utf-8",
     )
     return manifest_path
-
-
-async def run_pipeline_async(
-    config_path: Path,
-    *,
-    max_runtime_seconds: float | None = None,
-    prepared_metadata_path: Path | None = None,
-) -> int:
-    """Run the async pipeline from one config path."""
-    start_time = time.monotonic()
-    prepared_metadata: dict[str, Any] | None = None
-    if prepared_metadata_path is None:
-        prepared_inputs = prepare_inputs(
-            source_root=Path.cwd(),
-            config_path=config_path,
-        )
-        prepared_metadata = prepared_inputs.runtime_payload()
-    runtime_budget = (
-        RuntimeBudget(max_runtime_seconds=max_runtime_seconds)
-        if max_runtime_seconds is not None
-        else None
-    )
-    runtime = AsyncPipelineRuntime(
-        config_path,
-        runtime_budget=runtime_budget,
-        prepared_metadata_path=prepared_metadata_path,
-        prepared_metadata=prepared_metadata,
-    )
-    log.info("========================================")
-    log.info("Pipeline start")
-    log.info("  Config path: %s", runtime.runtime_identity.config_path)
-    log.info("  Config file: %s", runtime.runtime_identity.config_file_name)
-    log.info("  Config name: %s", runtime.runtime_identity.config_name)
-    log.info("  Python: %s", sys.version.split()[0])
-    log.info("  Working dir: %s", Path.cwd())
-    log.info("  Cache file: %s", runtime.cache_path)
-    log.info("  Sources configured: %d", len(runtime.config["sources"]))
-    if runtime_budget is not None:
-        log.info("  Soft runtime budget: %.1fs", runtime_budget.max_runtime_seconds)
-    log.info("========================================")
-    writer_result, output_paths, outputs_published = await runtime.run()
-    elapsed = time.monotonic() - start_time
-    if not outputs_published:
-        manifest_path = _write_incomplete_run_state(
-            runtime,
-            elapsed,
-            writer_result,
-            output_paths,
-        )
-        log.warning(
-            "Soft runtime budget stop after %.1fs; leaving previously published "
-            "outputs unchanged for this run and writing incomplete-run state to %s",
-            elapsed,
-            manifest_path,
-        )
-    else:
-        _clear_incomplete_run_state(runtime)
-    _log_run_summary(
-        elapsed,
-        writer_result,
-        runtime.cache_stats,
-        runtime.cache_path,
-        output_paths if outputs_published else [],
-    )
-    return 0
 
 
 async def run_prepared_pipeline_async(
