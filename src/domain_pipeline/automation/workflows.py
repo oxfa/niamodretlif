@@ -547,17 +547,6 @@ def _write_review_partial(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
 
 
-def _worker_target_counts(worker_ids: list[str], item_count: int) -> dict[str, int]:
-    """Return deterministic target counts that differ by at most one item."""
-    if not worker_ids:
-        raise ValueError("at least one worker_id is required to prepare a batch")
-    base_count, remainder = divmod(item_count, len(worker_ids))
-    return {
-        worker_id: base_count + (1 if index < remainder else 0)
-        for index, worker_id in enumerate(worker_ids)
-    }
-
-
 def _choose_balanced_worker(
     *,
     worker_ids: list[str],
@@ -576,10 +565,12 @@ def _log_prepared_assignment_summary(
     worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
     worker_entry_counts: Counter,
-    worker_server_counts: dict[str, Counter],
+    worker_root_counts: Counter,
+    worker_server_entry_counts: dict[str, Counter],
+    worker_server_root_counts: dict[str, Counter],
     roots_by_server: dict[str, list[str]],
 ) -> None:
-    """Emit one compact debug summary of RDAP-aware worker assignment quality."""
+    """Emit one compact debug summary of host-weighted RDAP worker assignment."""
     worker_summaries: list[dict[str, Any]] = []
     for worker_id in worker_ids:
         root_plans = worker_root_plans[worker_id]
@@ -594,7 +585,7 @@ def _log_prepared_assignment_summary(
             {
                 "worker_id": worker_id,
                 "entry_count": worker_entry_counts[worker_id],
-                "rdap_root_count": len(root_plans),
+                "rdap_root_count": worker_root_counts[worker_id],
                 "resolved_root_count": sum(
                     1 for plan in root_plans.values() if plan.status == "resolved"
                 ),
@@ -611,16 +602,22 @@ def _log_prepared_assignment_summary(
 
     server_summaries: list[dict[str, Any]] = []
     for authoritative_base_url in sorted(roots_by_server):
-        counts = {
-            worker_id: worker_server_counts[worker_id][authoritative_base_url]
+        entry_counts = {
+            worker_id: worker_server_entry_counts[worker_id][authoritative_base_url]
             for worker_id in worker_ids
-            if worker_server_counts[worker_id][authoritative_base_url] > 0
+            if worker_server_entry_counts[worker_id][authoritative_base_url] > 0
         }
-        if counts:
+        root_counts = {
+            worker_id: worker_server_root_counts[worker_id][authoritative_base_url]
+            for worker_id in worker_ids
+            if worker_server_root_counts[worker_id][authoritative_base_url] > 0
+        }
+        if entry_counts or root_counts:
             server_summaries.append(
                 {
                     "authoritative_server": authoritative_base_url,
-                    "worker_root_counts": counts,
+                    "worker_entry_counts": entry_counts,
+                    "worker_root_counts": root_counts,
                 }
             )
     if server_summaries:
@@ -653,7 +650,13 @@ def _assign_prepared_entries_to_workers(
     dict[str, dict[str, PreparedRootPlan]],
     Counter,
 ]:
-    """Assign RDAP-aware prepared entries across workers deterministically."""
+    """Assign RDAP-aware prepared entries across workers deterministically.
+
+    Resolved roots are spread within each authoritative RDAP server bucket by
+    host count rather than by a global root quota. Unknown and unavailable
+    roots still stay atomic per registrable domain and fall back to total host
+    load balancing.
+    """
     worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]] = {
         worker_id: defaultdict(list) for worker_id in worker_ids
     }
@@ -661,21 +664,17 @@ def _assign_prepared_entries_to_workers(
         worker_id: {} for worker_id in worker_ids
     }
     worker_entry_counts: Counter = Counter()
-    worker_rdap_root_counts: Counter = Counter()
-    worker_server_counts: dict[str, Counter] = {
+    worker_root_counts: Counter = Counter()
+    worker_server_entry_counts: dict[str, Counter] = {
         worker_id: Counter() for worker_id in worker_ids
     }
-
-    rdap_root_targets = _worker_target_counts(
-        worker_ids,
-        len(
-            [
-                plan
-                for plan in planning_inputs.root_plans.values()
-                if plan.status != "unavailable"
-            ]
-        ),
-    )
+    worker_server_root_counts: dict[str, Counter] = {
+        worker_id: Counter() for worker_id in worker_ids
+    }
+    root_entry_counts = {
+        registrable_domain: len(entries)
+        for registrable_domain, entries in planning_inputs.eligible_root_entries.items()
+    }
 
     def assign_root(worker_id: str, registrable_domain: str) -> None:
         for prepared_entry in sorted(
@@ -692,9 +691,8 @@ def _assign_prepared_entries_to_workers(
         worker_root_plans[worker_id][registrable_domain] = planning_inputs.root_plans[
             registrable_domain
         ]
-        worker_entry_counts[worker_id] += len(
-            planning_inputs.eligible_root_entries[registrable_domain]
-        )
+        worker_entry_counts[worker_id] += root_entry_counts[registrable_domain]
+        worker_root_counts[worker_id] += 1
         plan = planning_inputs.root_plans[registrable_domain]
         logger.debug(
             "Batch preparation assigned root=%s status=%s authoritative_server=%s "
@@ -703,7 +701,7 @@ def _assign_prepared_entries_to_workers(
             plan.status,
             plan.authoritative_base_url or "(none)",
             worker_id,
-            len(planning_inputs.eligible_root_entries[registrable_domain]),
+            root_entry_counts[registrable_domain],
         )
 
     roots_by_server: dict[str, list[str]] = defaultdict(list)
@@ -718,51 +716,40 @@ def _assign_prepared_entries_to_workers(
         else:
             unknown_roots.append(registrable_domain)
 
-    for authoritative_base_url, current_roots in sorted(
-        roots_by_server.items(),
-        key=lambda item: (-len(item[1]), item[0]),
-    ):
-        for registrable_domain in sorted(current_roots):
-            candidates = [
-                worker_id
-                for worker_id in worker_ids
-                if worker_rdap_root_counts[worker_id] < rdap_root_targets[worker_id]
-            ]
-            if not candidates:
-                candidates = list(worker_ids)
+    for authoritative_base_url in sorted(roots_by_server):
+        current_roots = sorted(
+            roots_by_server[authoritative_base_url],
+            key=lambda registrable_domain: (
+                -root_entry_counts[registrable_domain],
+                registrable_domain,
+            ),
+        )
+        for registrable_domain in current_roots:
             worker_id = min(
-                candidates,
+                worker_ids,
                 key=lambda current_worker_id, authoritative_server=authoritative_base_url: (
-                    worker_server_counts[current_worker_id][authoritative_server],
-                    -(
-                        rdap_root_targets[current_worker_id]
-                        - worker_rdap_root_counts[current_worker_id]
-                    ),
+                    worker_server_entry_counts[current_worker_id][authoritative_server],
+                    worker_entry_counts[current_worker_id],
+                    worker_root_counts[current_worker_id],
                     current_worker_id,
                 ),
             )
             assign_root(worker_id, registrable_domain)
-            worker_rdap_root_counts[worker_id] += 1
-            worker_server_counts[worker_id][authoritative_base_url] += 1
+            worker_server_entry_counts[worker_id][
+                authoritative_base_url
+            ] += root_entry_counts[registrable_domain]
+            worker_server_root_counts[worker_id][authoritative_base_url] += 1
 
     for registrable_domain in sorted(unknown_roots):
-        candidates = [
-            worker_id
-            for worker_id in worker_ids
-            if worker_rdap_root_counts[worker_id] < rdap_root_targets[worker_id]
-        ]
-        if not candidates:
-            candidates = list(worker_ids)
         worker_id = min(
-            candidates,
+            worker_ids,
             key=lambda current_worker_id: (
-                worker_rdap_root_counts[current_worker_id],
                 worker_entry_counts[current_worker_id],
+                worker_root_counts[current_worker_id],
                 current_worker_id,
             ),
         )
         assign_root(worker_id, registrable_domain)
-        worker_rdap_root_counts[worker_id] += 1
 
     for registrable_domain in sorted(unavailable_roots):
         worker_id = _choose_balanced_worker(
@@ -797,7 +784,9 @@ def _assign_prepared_entries_to_workers(
         worker_source_entries=worker_source_entries,
         worker_root_plans=worker_root_plans,
         worker_entry_counts=worker_entry_counts,
-        worker_server_counts=worker_server_counts,
+        worker_root_counts=worker_root_counts,
+        worker_server_entry_counts=worker_server_entry_counts,
+        worker_server_root_counts=worker_server_root_counts,
         roots_by_server=roots_by_server,
     )
     return worker_source_entries, worker_root_plans, worker_entry_counts
