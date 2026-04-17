@@ -104,6 +104,15 @@ class BudgetStopContext:
     host: str
 
 
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    """Stable config identity used for logging and incomplete-run state."""
+
+    config_path: Path
+    config_file_name: str
+    config_name: str
+
+
 def _collect_output_paths(jobs: list) -> list[Path]:
     output_paths: list[Path] = []
     seen_paths: set[Path] = set()
@@ -126,7 +135,7 @@ def _clear_existing_output_paths(output_paths: list[Path]) -> None:
             path.unlink()
 
 
-class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
+class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
     """One staged async runtime instance for one config path."""
 
     def __init__(
@@ -138,8 +147,56 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes
         prepared_metadata: dict[str, Any] | None = None,
         time_source: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.config_path = config_path
-        self.config = load_config(config_path)
+        config = load_config(config_path)
+        self._initialize(
+            config=config,
+            runtime_identity=RuntimeIdentity(
+                config_path=config_path.resolve(),
+                config_file_name=config_path.name,
+                config_name=str(config["config_name"]),
+            ),
+            runtime_budget=runtime_budget,
+            prepared_metadata_path=prepared_metadata_path,
+            prepared_metadata=prepared_metadata,
+            time_source=time_source,
+        )
+
+    @classmethod
+    def from_runtime_payload(
+        cls,
+        runtime_config: dict[str, Any],
+        *,
+        runtime_identity: RuntimeIdentity,
+        runtime_budget: RuntimeBudget | None = None,
+        prepared_metadata: dict[str, Any] | None = None,
+        time_source: Callable[[], float] = time.monotonic,
+    ) -> "AsyncPipelineRuntime":
+        """Build one runtime from a prepared automation payload."""
+        runtime = cls.__new__(cls)
+        runtime._initialize(
+            config=runtime_config,
+            runtime_identity=runtime_identity,
+            runtime_budget=runtime_budget,
+            prepared_metadata_path=None,
+            prepared_metadata=prepared_metadata,
+            time_source=time_source,
+        )
+        return runtime
+
+    def _initialize(
+        self,
+        *,
+        config: dict[str, Any],
+        runtime_identity: RuntimeIdentity,
+        runtime_budget: RuntimeBudget | None,
+        prepared_metadata_path: Path | None,
+        prepared_metadata: dict[str, Any] | None,
+        time_source: Callable[[], float],
+    ) -> None:
+        """Initialize one runtime from either a config path or prepared payload."""
+        self.runtime_identity = runtime_identity
+        self.config_path = runtime_identity.config_path
+        self.config = config
         self.prepared_metadata_path = prepared_metadata_path
         self.prepared_metadata = self._load_prepared_metadata(
             prepared_metadata_path,
@@ -1605,35 +1662,34 @@ def _log_run_summary(
     )
 
 
-def _incomplete_run_state_root(config_path: Path) -> Path:
+def _incomplete_run_state_root(config_name: str) -> Path:
     """Return the persisted incomplete-run directory for one config."""
-    return INCOMPLETE_RUN_STATE_DIR / config_path.stem
+    return INCOMPLETE_RUN_STATE_DIR / config_name
 
 
-def _clear_incomplete_run_state(config_path: Path) -> None:
+def _clear_incomplete_run_state(config_name: str) -> None:
     """Remove stale incomplete-run state after a successful full publish."""
-    state_root = _incomplete_run_state_root(config_path)
+    state_root = _incomplete_run_state_root(config_name)
     if state_root.is_dir():
         shutil.rmtree(state_root)
 
 
 def _write_incomplete_run_state(
-    config_path: Path,
     runtime: AsyncPipelineRuntime,
     elapsed: float,
     writer_result: WriterResult,
     output_paths: list[Path],
 ) -> Path:
     """Persist incomplete-run artifacts and one manifest for workflow commits."""
-    state_root = _incomplete_run_state_root(config_path)
+    state_root = _incomplete_run_state_root(runtime.runtime_identity.config_name)
     incomplete_writer_result = runtime.writer.write_incomplete_run(state_root)
     stop_context = runtime.budget_stop_context
     payload: dict[str, Any] = {
         "status": "incomplete",
         "reason": "max_runtime_seconds_reached",
-        "config_path": str(config_path.resolve()),
-        "config_file_name": config_path.name,
-        "config_name": str(runtime.config["config_name"]),
+        "config_path": str(runtime.runtime_identity.config_path),
+        "config_file_name": runtime.runtime_identity.config_file_name,
+        "config_name": runtime.runtime_identity.config_name,
         "cache_file": str(runtime.cache_path),
         "stopped_at": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": elapsed,
@@ -1692,10 +1748,11 @@ async def run_pipeline_async(
         prepared_metadata_path=prepared_metadata_path,
         prepared_metadata=prepared_metadata,
     )
-    resolved_config_path = config_path.resolve()
     log.info("========================================")
     log.info("Pipeline start")
-    log.info("  Config path: %s", resolved_config_path)
+    log.info("  Config path: %s", runtime.runtime_identity.config_path)
+    log.info("  Config file: %s", runtime.runtime_identity.config_file_name)
+    log.info("  Config name: %s", runtime.runtime_identity.config_name)
     log.info("  Python: %s", sys.version.split()[0])
     log.info("  Working dir: %s", Path.cwd())
     log.info("  Cache file: %s", runtime.cache_path)
@@ -1707,7 +1764,6 @@ async def run_pipeline_async(
     elapsed = time.monotonic() - start_time
     if not outputs_published:
         manifest_path = _write_incomplete_run_state(
-            config_path,
             runtime,
             elapsed,
             writer_result,
@@ -1720,7 +1776,71 @@ async def run_pipeline_async(
             manifest_path,
         )
     else:
-        _clear_incomplete_run_state(config_path)
+        _clear_incomplete_run_state(runtime.runtime_identity.config_name)
+    _log_run_summary(
+        elapsed,
+        writer_result,
+        runtime.cache_stats,
+        runtime.cache_path,
+        output_paths if outputs_published else [],
+    )
+    return 0
+
+
+async def run_prepared_pipeline_async(
+    runtime_config: dict[str, Any],
+    *,
+    runtime_identity: dict[str, str],
+    max_runtime_seconds: float | None = None,
+    prepared_metadata: dict[str, Any] | None = None,
+) -> int:
+    """Run the async pipeline from one prepared automation payload without YAML reload."""
+    start_time = time.monotonic()
+    runtime_budget = (
+        RuntimeBudget(max_runtime_seconds=max_runtime_seconds)
+        if max_runtime_seconds is not None
+        else None
+    )
+    config_identity = RuntimeIdentity(
+        config_path=Path(runtime_identity["config_path"]),
+        config_file_name=runtime_identity["config_file_name"],
+        config_name=runtime_identity["config_name"],
+    )
+    runtime = AsyncPipelineRuntime.from_runtime_payload(
+        runtime_config,
+        runtime_identity=config_identity,
+        runtime_budget=runtime_budget,
+        prepared_metadata=prepared_metadata,
+    )
+    log.info("========================================")
+    log.info("Pipeline start")
+    log.info("  Config path: %s", runtime.runtime_identity.config_path)
+    log.info("  Config file: %s", runtime.runtime_identity.config_file_name)
+    log.info("  Config name: %s", runtime.runtime_identity.config_name)
+    log.info("  Python: %s", sys.version.split()[0])
+    log.info("  Working dir: %s", Path.cwd())
+    log.info("  Cache file: %s", runtime.cache_path)
+    log.info("  Sources configured: %d", len(runtime.config["sources"]))
+    if runtime_budget is not None:
+        log.info("  Soft runtime budget: %.1fs", runtime_budget.max_runtime_seconds)
+    log.info("========================================")
+    writer_result, output_paths, outputs_published = await runtime.run()
+    elapsed = time.monotonic() - start_time
+    if not outputs_published:
+        manifest_path = _write_incomplete_run_state(
+            runtime,
+            elapsed,
+            writer_result,
+            output_paths,
+        )
+        log.warning(
+            "Soft runtime budget stop after %.1fs; leaving previously published "
+            "outputs unchanged for this run and writing incomplete-run state to %s",
+            elapsed,
+            manifest_path,
+        )
+    else:
+        _clear_incomplete_run_state(runtime.runtime_identity.config_name)
     _log_run_summary(
         elapsed,
         writer_result,

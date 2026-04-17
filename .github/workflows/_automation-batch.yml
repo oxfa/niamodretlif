@@ -108,6 +108,8 @@ jobs:
       - name: Stage prepared batch artifact
         run: |
           set -eo pipefail
+          # The prepared batch directory now includes batch-manifest.json,
+          # worker-bundle.json files, and prepare-owned aggregate inputs.
           mkdir -p .tmp/prepared_batch/.automation/batches
           mkdir -p .tmp/prepared_batch/logs
           cp -R \
@@ -193,7 +195,6 @@ jobs:
             --state-root .tmp/automation_state \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
-            --config "${{ inputs.config_path }}" \
             --log-level "${{ inputs.worker_log_level }}" \
             --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
             | tee worker.json
@@ -346,6 +347,8 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p .tmp/automation_worktree/.automation
+          # Aggregate restores the persisted batch manifest and worker bundles,
+          # then merges worker results without rereading the source YAML.
           cp -R \
             ".tmp/downloads/prepared-batch/.automation/batches" \
             .tmp/automation_worktree/.automation/
@@ -407,7 +410,6 @@ jobs:
               --source-root . \
               --state-root .tmp/automation_worktree \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
-              --config "${{ inputs.config_path }}" \
               --target-ref "${{ needs.prepare_run.outputs.target_branch }}" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               | tee aggregate.json

@@ -69,7 +69,9 @@ defaults:
     # Number of days to keep geo results cached.
     cache_ttl_days: 7
     # In GitHub Actions, pass GEO_IPINFO_TOKEN through step-level env for the
-    # country-only path instead of committing a token here.
+    # country-only worker-runtime path instead of committing a token here.
+    # The trusted automation aggregate step publishes from prepared manifests
+    # and does not reread this YAML or require GEO_IPINFO_TOKEN.
     policy:
       # Enable or disable geo policy filtering after geo lookups succeed.
       # When false, geo data may still be looked up, but hosts are not
