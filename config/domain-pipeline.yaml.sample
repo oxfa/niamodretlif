@@ -112,13 +112,12 @@ defaults:
     # - output/filtered/domain-pipeline.txt
     # - output/dead/domain-pipeline.txt
     # - output/review/domain-pipeline.csv
-    # - output/raw/domain-pipeline.jsonl
     # Keep one directory across enabled sources in the same config.
     directory: output
 
 cache:
   # SQLite file used to persist root RDAP, DNS, and geo cache data between runs.
-  cache_file: .tmp/runtime/check-cache.sqlite3
+  cache_file: .workflow_state/runtime/cache/check-cache.sqlite3
   classification_ttl_days:
     # Cache retention, in days, for unregistered registrable-domain RDAP verdicts.
     rdap_registrable_domain_unregistered: 30
@@ -189,8 +188,6 @@ sources:
       # - output/filtered/domain-pipeline.txt
       # - output/dead/domain-pipeline.txt
       # - output/review/domain-pipeline.csv
-      # - output/raw/domain-pipeline.jsonl
       #
       # The filtered/dead txt files and review file follow output.directory.
-      # The raw audit JSONL file is always written under output/raw.
       directory: output

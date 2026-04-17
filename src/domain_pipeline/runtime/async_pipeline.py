@@ -46,6 +46,11 @@ from ..checking import (
 from ..io.parser import ParsedDomainEntry
 from ..preparation import prepare_inputs
 from ..io.output_manager import output_paths_for_job, review_output_path_for_job
+from ..path_layout import (
+    incomplete_run_debug_root,
+    incomplete_run_manifest_path,
+    incomplete_run_publish_snapshot_root,
+)
 from ..settings.config import DEFAULT_CACHE_FILE, load_config
 from .async_constants import DNS_STAGE_WORKERS, GEO_STAGE_WORKERS, RDAP_STAGE_WORKERS
 from .bootstrap_async import AsyncBootstrapCache
@@ -81,10 +86,9 @@ from .transports import (
     AsyncRDAPTransport,
     resolve_geo_token,
 )
-from .writer import ResultCollectorWriter, WriterResult
+from .writer import IncompleteRunWriteResult, ResultCollectorWriter, WriterResult
 
 log = logging.getLogger(__name__)
-INCOMPLETE_RUN_STATE_DIR = Path(".tmp") / "runtime" / "incomplete_runs"
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,10 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             prepared_metadata_path,
             prepared_metadata=prepared_metadata,
         )
+        runtime_paths = self.config.get("runtime_paths", {})
+        self.runtime_paths = (
+            dict(runtime_paths) if isinstance(runtime_paths, dict) else {}
+        )
         self.cache_path = Path(
             self.config["cache"].get("cache_file", DEFAULT_CACHE_FILE)
         )
@@ -230,6 +238,40 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
         self.budget_stop_context: BudgetStopContext | None = None
+
+    def _runtime_override_path(self, key: str) -> Path | None:
+        """Return one optional runtime-only path override."""
+        raw_value = str(self.runtime_paths.get(key, "")).strip()
+        if not raw_value:
+            return None
+        return Path(raw_value)
+
+    def incomplete_manifest_path(self) -> Path:
+        """Return the incomplete-run manifest path for this runtime."""
+        return self._runtime_override_path(
+            "incomplete_manifest_path"
+        ) or incomplete_run_manifest_path(
+            Path.cwd(),
+            config_name=self.runtime_identity.config_name,
+        )
+
+    def incomplete_publish_snapshot_root(self) -> Path:
+        """Return the incomplete-run publish-snapshot root for this runtime."""
+        return self._runtime_override_path(
+            "incomplete_publish_snapshot_root"
+        ) or incomplete_run_publish_snapshot_root(
+            Path.cwd(),
+            config_name=self.runtime_identity.config_name,
+        )
+
+    def incomplete_debug_root(self) -> Path:
+        """Return the incomplete-run debug root for this runtime."""
+        return self._runtime_override_path(
+            "incomplete_debug_root"
+        ) or incomplete_run_debug_root(
+            Path.cwd(),
+            config_name=self.runtime_identity.config_name,
+        )
 
     @staticmethod
     def _load_prepared_metadata(
@@ -1662,16 +1704,22 @@ def _log_run_summary(
     )
 
 
-def _incomplete_run_state_root(config_name: str) -> Path:
-    """Return the persisted incomplete-run directory for one config."""
-    return INCOMPLETE_RUN_STATE_DIR / config_name
+def _path_display(path: Path) -> str:
+    """Render one path relative to cwd when possible."""
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
 
 
-def _clear_incomplete_run_state(config_name: str) -> None:
+def _clear_incomplete_run_state(runtime: AsyncPipelineRuntime) -> None:
     """Remove stale incomplete-run state after a successful full publish."""
-    state_root = _incomplete_run_state_root(config_name)
+    state_root = runtime.incomplete_manifest_path().parent
+    debug_root = runtime.incomplete_debug_root()
     if state_root.is_dir():
         shutil.rmtree(state_root)
+    if debug_root.is_dir():
+        shutil.rmtree(debug_root)
 
 
 def _write_incomplete_run_state(
@@ -1681,9 +1729,27 @@ def _write_incomplete_run_state(
     output_paths: list[Path],
 ) -> Path:
     """Persist incomplete-run artifacts and one manifest for workflow commits."""
-    state_root = _incomplete_run_state_root(runtime.runtime_identity.config_name)
-    incomplete_writer_result = runtime.writer.write_incomplete_run(state_root)
+    manifest_path = runtime.incomplete_manifest_path()
+    state_root = manifest_path.parent
+    publish_snapshot_root = runtime.incomplete_publish_snapshot_root()
+    debug_root = runtime.incomplete_debug_root()
+    incomplete_writer_result: IncompleteRunWriteResult = (
+        runtime.writer.write_incomplete_run(
+            publish_root=publish_snapshot_root,
+            debug_root=debug_root,
+        )
+    )
     stop_context = runtime.budget_stop_context
+    published_branch_paths = [
+        _path_display(path) for path in output_paths if path.parts[:1] == ("output",)
+    ]
+    state_artifact_paths = [
+        _path_display(manifest_path),
+        *[_path_display(path) for path in incomplete_writer_result.state_paths],
+    ]
+    debug_artifact_paths = [
+        _path_display(path) for path in incomplete_writer_result.debug_paths
+    ]
     payload: dict[str, Any] = {
         "status": "incomplete",
         "reason": "max_runtime_seconds_reached",
@@ -1699,11 +1765,9 @@ def _write_incomplete_run_state(
             else None
         ),
         "published_outputs_kept": True,
-        "published_output_paths": [str(path) for path in output_paths],
-        "incomplete_artifact_paths": [
-            str(path.relative_to(state_root))
-            for path in incomplete_writer_result.output_paths
-        ],
+        "published_branch_paths": published_branch_paths,
+        "state_artifact_paths": state_artifact_paths,
+        "debug_artifact_paths": debug_artifact_paths,
         "counts": dict(writer_result.counts),
         "cache_stats": dict(runtime.cache_stats),
     }
@@ -1714,7 +1778,7 @@ def _write_incomplete_run_state(
             "total": stop_context.total,
             "host": stop_context.host,
         }
-    manifest_path = state_root / "manifest.json"
+    state_root.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1776,7 +1840,7 @@ async def run_pipeline_async(
             manifest_path,
         )
     else:
-        _clear_incomplete_run_state(runtime.runtime_identity.config_name)
+        _clear_incomplete_run_state(runtime)
     _log_run_summary(
         elapsed,
         writer_result,
@@ -1840,7 +1904,7 @@ async def run_prepared_pipeline_async(
             manifest_path,
         )
     else:
-        _clear_incomplete_run_state(runtime.runtime_identity.config_name)
+        _clear_incomplete_run_state(runtime)
     _log_run_summary(
         elapsed,
         writer_result,

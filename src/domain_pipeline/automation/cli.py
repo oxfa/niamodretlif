@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from domain_pipeline.path_layout import publish_worktree_root
+
 from .workflows import (
     aggregate_batch,
     batch_id_from_run,
@@ -212,6 +214,7 @@ def _build_git_command_handlers(
     source_root: Path,
     state_root: Path,
 ) -> dict[str, Any]:
+    publish_root = publish_worktree_root(state_root)
     return {
         "batch-id": lambda: print(batch_id_from_run(args.run_id, args.run_attempt))
         or 0,
@@ -219,22 +222,22 @@ def _build_git_command_handlers(
         or _print_json(
             {
                 "commit_sha": commit_paths(
-                    state_root,
+                    publish_root,
                     paths=args.paths,
                     message=args.message,
                 )
             }
         )
         or 0,
-        "configure-git": lambda: configure_actor(state_root) or 0,
+        "configure-git": lambda: configure_actor(publish_root) or 0,
         "finalize-worker-statuses": lambda: _handle_finalize_worker_statuses(
             args,
             state_root,
         ),
-        "head-sha": lambda: print(current_head_sha(state_root)) or 0,
+        "head-sha": lambda: print(current_head_sha(publish_root)) or 0,
         "prepare-automation-worktree": lambda: prepare_automation_worktree(
             source_root,
-            worktree_path=state_root,
+            worktree_path=publish_root,
             target_branch=args.target_branch,
             base_ref=args.base_ref,
         )
@@ -244,7 +247,7 @@ def _build_git_command_handlers(
         )
         or _print_json(
             validate_publish_candidate_sizes(
-                state_root,
+                publish_root,
                 paths=args.paths,
                 warning_bytes=args.warning_bytes,
                 error_bytes=args.error_bytes,
@@ -255,7 +258,7 @@ def _build_git_command_handlers(
         or _print_json(
             {
                 "retries_used": push_current_branch(
-                    state_root,
+                    publish_root,
                     branch=args.branch,
                     max_retries=args.max_retries,
                 )

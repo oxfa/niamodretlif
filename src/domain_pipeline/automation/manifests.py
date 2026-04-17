@@ -9,6 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from domain_pipeline.path_layout import publish_worktree_root
+
 
 class AutomationModel(BaseModel):
     """Base automation manifest model that rejects unknown fields."""
@@ -25,25 +27,23 @@ class ConfigIdentity(AutomationModel):
 
 
 class WorkerOutputSpec(AutomationModel):
-    """Repo-relative per-worker output/cache/log paths."""
+    """Repo-relative per-worker publish-snapshot and internal-state paths."""
 
     result_root: str
     filtered: str
     dead: str
     review: str
-    audit: str
-    log: str
+    terminal_rows: str
     cache: str
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
-        """Return resolved per-worker paths rooted at one automation state root."""
+        """Return resolved per-worker paths rooted at one automation workspace root."""
         return {
             "result_root": state_root / Path(self.result_root),
             "filtered": state_root / Path(self.filtered),
             "dead": state_root / Path(self.dead),
             "review": state_root / Path(self.review),
-            "audit": state_root / Path(self.audit),
-            "log": state_root / Path(self.log),
+            "terminal_rows": state_root / Path(self.terminal_rows),
             "cache": state_root / Path(self.cache),
         }
 
@@ -60,11 +60,12 @@ class AggregateOutputSpec(AutomationModel):
     current: str
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
-        """Return resolved aggregate paths rooted at one automation state root."""
+        """Return resolved aggregate paths rooted at one automation workspace root."""
+        publish_root = publish_worktree_root(state_root)
         return {
-            "filtered": state_root / Path(self.filtered),
-            "dead": state_root / Path(self.dead),
-            "review": state_root / Path(self.review),
+            "filtered": publish_root / Path(self.filtered),
+            "dead": publish_root / Path(self.dead),
+            "review": publish_root / Path(self.review),
             "audit": state_root / Path(self.audit),
             "log": state_root / Path(self.log),
             "cache": state_root / Path(self.cache),
@@ -92,6 +93,8 @@ class WorkerRuntimeSpec(AutomationModel):
     cache: dict[str, Any]
     sources: list[dict[str, Any]]
     output_spec: WorkerOutputSpec
+    debug_log_path: str
+    runtime_paths: dict[str, str] = Field(default_factory=dict)
 
     def to_runtime_payload(
         self,
@@ -107,6 +110,7 @@ class WorkerRuntimeSpec(AutomationModel):
             "config_file_name": self.config_identity.config_file_name,
             "cache": copy.deepcopy(self.cache),
             "sources": copy.deepcopy(self.sources),
+            "runtime_paths": copy.deepcopy(self.runtime_paths),
         }
         cache_payload = payload["cache"]
         cache_file = str(cache_payload.get("cache_file", "")).strip()
@@ -124,6 +128,14 @@ class WorkerRuntimeSpec(AutomationModel):
                 output_payload["directory"] = str(
                     (state_root / Path(directory)).resolve()
                 )
+            output_payload["terminal_rows_file"] = str(
+                (state_root / Path(self.output_spec.terminal_rows)).resolve()
+            )
+        for key, raw_value in payload["runtime_paths"].items():
+            stripped = str(raw_value).strip()
+            if not stripped:
+                continue
+            payload["runtime_paths"][key] = str((state_root / Path(stripped)).resolve())
         return payload
 
 
@@ -169,7 +181,7 @@ class BatchManifest(AutomationModel):
     aggregate_output_spec: AggregateOutputSpec
     worker_ids: list[str]
     aggregate_input_review_path: str
-    aggregate_input_audit_path: str
+    aggregate_input_terminal_rows_path: str
 
     @classmethod
     def from_prepared_batch(
@@ -181,7 +193,7 @@ class BatchManifest(AutomationModel):
         aggregate_output_spec: AggregateOutputSpec,
         worker_ids: list[str],
         aggregate_input_review_path: str,
-        aggregate_input_audit_path: str,
+        aggregate_input_terminal_rows_path: str,
     ) -> "BatchManifest":
         """Build one persisted batch manifest from prepared batch state."""
         return cls(
@@ -191,7 +203,7 @@ class BatchManifest(AutomationModel):
             aggregate_output_spec=aggregate_output_spec,
             worker_ids=list(worker_ids),
             aggregate_input_review_path=aggregate_input_review_path,
-            aggregate_input_audit_path=aggregate_input_audit_path,
+            aggregate_input_terminal_rows_path=aggregate_input_terminal_rows_path,
         )
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
@@ -200,8 +212,8 @@ class BatchManifest(AutomationModel):
         resolved["aggregate_input_review"] = state_root / Path(
             self.aggregate_input_review_path
         )
-        resolved["aggregate_input_audit"] = state_root / Path(
-            self.aggregate_input_audit_path
+        resolved["aggregate_input_terminal_rows"] = state_root / Path(
+            self.aggregate_input_terminal_rows_path
         )
         return resolved
 
