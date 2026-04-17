@@ -9,9 +9,7 @@ arkid.org
 as01271kkp.xyz
 as02010kkp.xyz
 assets.uxengine.net
-aurumdriver.vip
 bdyz.xyz
-cn-api-test.lenovo.com
 cn-ccs-sdc.blurdev.com
 cn.bing.net
 cqls.work
@@ -22,6 +20,8 @@ fangcunshan.xyz
 fengousm.com
 geo.kaspersky.com
 hgs001.com
+holoway.lenovo.com
+holowaytest.lenovo.com
 icc.lenovo.com
 ictdns.cloud
 jingtuliutongchu.work
@@ -49,9 +49,12 @@ www.uz0.xyz
 xn--9wy264ea.xn--6qq986b3xl
 xn--f5q14tug.xn--6qq986b3xl
 xn--tesiro-n17nh93r.net
+xuhenghandicraft.com
 xxaks01080sspao.xyz
 xxaks01081sspao.xyz
 yanyapeng.com
 yhmsfc.com
-ysx8.vip
+ym.today
+zgtygg.com
+zmubf.com
 zzxbn.com
