@@ -12,6 +12,7 @@ from ..path_layout import DEBUG_ARTIFACTS_DIR
 from ..runtime.pure_helpers import (
     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
+    REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
     REVIEW_OUTPUT_COLUMNS,
     ReviewOutputRow,
     build_review_output_row,
@@ -84,6 +85,7 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
                 in {
                     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
                     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
+                    REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
                 }
                 and input_reason
                 and input_reason != review_row["classification_reason"]
