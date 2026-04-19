@@ -5,17 +5,21 @@ version: 2
 # sources, but emitted artifacts are grouped by the config filename instead of
 # by each source id.
 #
-# Optional manual-pass file:
+# Optional manual filter files:
 # - input/manual_filter_pass/<config-stem>.txt
-# This file is only supported when all enabled sources in the config have
-# dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes in
-# workflow-owned runtime.
-# Hosts listed there still run through RDAP, but bypass DNS and geo.
-# RDAP-unregistered roots still route to dead output; otherwise they are
-# emitted to the filtered output for that config.
+# - input/manual_filter_out/<config-stem>.txt
+# The manual-pass file is only supported when all enabled sources in the config
+# have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
+# in workflow-owned runtime. Hosts listed there still run through RDAP, but
+# bypass DNS and geo. RDAP-unregistered roots still route to dead output;
+# otherwise they are emitted to the filtered output for that config.
+# The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
+# and emits review rows only.
+# A host must not appear in both manual filter files for the same config.
 # When the same host appears in multiple enabled sources, shared preparation
 # collapses it only if the effective dns/rdap/geo behavior is identical across
-# those sources; conflicting behavior raises a validation error.
+# those sources; conflicting behavior raises a validation error unless the host
+# is removed up front by manual_filter_out.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
