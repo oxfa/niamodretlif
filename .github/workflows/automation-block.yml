@@ -3,7 +3,7 @@ run-name: automation block / ${{ github.run_id }}
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 concurrency:
