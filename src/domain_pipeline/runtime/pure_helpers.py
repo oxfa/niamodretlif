@@ -35,6 +35,7 @@ from domain_pipeline.classifications import (
     RDAP_STATUS_CLASSIFICATIONS,
     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
+    REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
     ROUTE_DROP_CLASSIFICATIONS,
     ROUTE_NORMAL_CLASSIFICATIONS,
     ROUTE_REVIEW_CLASSIFICATIONS,
@@ -181,6 +182,11 @@ def review_classification_for_row(row: dict[str, Any]) -> str:
     """Return the public review classification exposed in the CSV output."""
     classification = str(row.get("classification", ""))
     geo_policy_status = str(row.get("geo_policy_status", ""))
+    if classification in {
+        CLASSIFICATION_MANUAL_FILTER_OUT,
+        CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+    }:
+        return REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT
     if classification in GEO_REVIEW_CLASSIFICATIONS or geo_policy_status == "rejected":
         return REVIEW_CLASSIFICATION_GEO_FILTERED_OUT
     return REVIEW_CLASSIFICATION_DNS_FILTERED_OUT
