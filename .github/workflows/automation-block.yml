@@ -14,6 +14,9 @@ permissions:
   contents: write
   actions: read
 
+# Optional per-config manual files:
+# - input/manual_filter_pass/block.txt
+# - input/manual_filter_out/block.txt
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml

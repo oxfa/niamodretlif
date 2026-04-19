@@ -93,8 +93,8 @@ class PreparedBatch:
     config_name: str
     batch_manifest: BatchManifest
     worker_bundles: list[PreparedWorkerBundle]
-    unmatched_review_rows: list[dict[str, Any]]
-    unmatched_terminal_rows: list[dict[str, Any]]
+    preparation_review_rows: list[dict[str, Any]]
+    preparation_terminal_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -839,25 +839,29 @@ def prepare_batch(
     total_work_units = len(planning_inputs.root_plans) + len(
         planning_inputs.public_suffix_entries
     )
-    if total_work_units < 1:
+    if total_work_units < 1 and not prepared_inputs.preparation_review_rows:
         raise ValueError("config produced no input lines to process")
     participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
-    if not participating_worker_ids:
+    if total_work_units > 0 and not participating_worker_ids:
         raise ValueError("at least one worker_id is required to prepare a batch")
 
-    worker_source_entries, worker_root_plans, _worker_entry_counts = (
-        _assign_prepared_entries_to_workers(
-            planning_inputs=planning_inputs,
-            worker_ids=participating_worker_ids,
+    if participating_worker_ids:
+        worker_source_entries, worker_root_plans, _worker_entry_counts = (
+            _assign_prepared_entries_to_workers(
+                planning_inputs=planning_inputs,
+                worker_ids=participating_worker_ids,
+            )
         )
-    )
-    worker_bundles = _build_worker_bundles(
-        config=prepared_inputs.config,
-        batch_id=batch_id,
-        worker_ids=participating_worker_ids,
-        worker_source_entries=worker_source_entries,
-        worker_root_plans=worker_root_plans,
-    )
+        worker_bundles = _build_worker_bundles(
+            config=prepared_inputs.config,
+            batch_id=batch_id,
+            worker_ids=participating_worker_ids,
+            worker_source_entries=worker_source_entries,
+            worker_root_plans=worker_root_plans,
+        )
+    else:
+        worker_source_entries = {}
+        worker_bundles = []
     matched_manual_hosts = {
         entry.entry.host
         for source_entries in worker_source_entries.values()
@@ -884,14 +888,14 @@ def prepare_batch(
             ),
         ),
         worker_bundles=worker_bundles,
-        unmatched_review_rows=[
+        preparation_review_rows=[
             row
-            for row in prepared_inputs.unmatched_review_rows
+            for row in prepared_inputs.preparation_review_rows
             if row["host"] not in matched_manual_hosts
         ],
-        unmatched_terminal_rows=[
+        preparation_terminal_rows=[
             row
-            for row in prepared_inputs.unmatched_terminal_rows
+            for row in prepared_inputs.preparation_terminal_rows
             if row["host"] not in matched_manual_hosts
         ],
     )
@@ -918,8 +922,8 @@ def write_prepared_batch(prepared: PreparedBatch, *, state_root: Path) -> list[s
         committed_paths.append(_relative(bundle_path))
     review_path = _aggregate_input_review_path(batch_id=prepared.batch_id)
     audit_path = _aggregate_input_terminal_rows_path(batch_id=prepared.batch_id)
-    _write_review_partial(state_root / review_path, prepared.unmatched_review_rows)
-    _write_audit_rows(state_root / audit_path, prepared.unmatched_terminal_rows)
+    _write_review_partial(state_root / review_path, prepared.preparation_review_rows)
+    _write_audit_rows(state_root / audit_path, prepared.preparation_terminal_rows)
     committed_paths.extend([_relative(review_path), _relative(audit_path)])
     return sorted(committed_paths)
 
@@ -1752,10 +1756,10 @@ def aggregate_batch(
             for worker_id in worker_ids
         ],
     }
-    unmatched_review_path = state_root / Path(
+    preparation_review_path = state_root / Path(
         batch_manifest.aggregate_input_review_path
     )
-    unmatched_terminal_rows_path = state_root / Path(
+    preparation_terminal_rows_path = state_root / Path(
         batch_manifest.aggregate_input_terminal_rows_path
     )
     logger.debug(
@@ -1782,8 +1786,8 @@ def aggregate_batch(
                 "final_cache_path": _relative(
                     Path(batch_manifest.aggregate_output_spec.cache)
                 ),
-                "unmatched_review_path": batch_manifest.aggregate_input_review_path,
-                "unmatched_terminal_rows_path": (
+                "preparation_review_path": batch_manifest.aggregate_input_review_path,
+                "preparation_terminal_rows_path": (
                     batch_manifest.aggregate_input_terminal_rows_path
                 ),
             },
@@ -1848,11 +1852,11 @@ def aggregate_batch(
         )
         _merge_host_txt_files(worker_output_paths["dead"], final_output_paths["dead"])
         _merge_audit_files(
-            [*worker_output_paths["terminal_rows"], unmatched_terminal_rows_path],
+            [*worker_output_paths["terminal_rows"], preparation_terminal_rows_path],
             final_output_paths["audit"],
         )
         _merge_review_files(
-            [*worker_output_paths["review"], unmatched_review_path],
+            [*worker_output_paths["review"], preparation_review_path],
             final_output_paths["review"],
         )
     except DuplicateOutputInvariantError as exc:

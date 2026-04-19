@@ -246,6 +246,9 @@ jobs:
         id: init
         run: |
           set -eo pipefail
+          # Preparation may now produce zero participating worker bundles when
+          # every host becomes a preparation-owned review/raw row, such as via
+          # input/manual_filter_out/<config>.txt.
           python -m domain_pipeline.automation.cli initialize-worker-statuses \
             --source-root . \
             --state-root . \

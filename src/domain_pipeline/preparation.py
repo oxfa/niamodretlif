@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from domain_pipeline.classifications import (
+    CLASSIFICATION_MANUAL_FILTER_OUT,
+    CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.io.parser import (
@@ -17,6 +19,7 @@ from domain_pipeline.io.parser import (
     InputFileFormat,
     ParsedDomainEntry,
 )
+from domain_pipeline.runtime.pure_helpers import row_identity_fields
 from domain_pipeline.runtime.pipeline_runner import build_checker, build_source_jobs
 from domain_pipeline.settings.config import load_config
 from domain_pipeline.shared import SourceJob
@@ -56,9 +59,8 @@ class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
     source_jobs_by_id: dict[str, SourceJob]
     prepared_entries: list[PreparedHostEntry]
     root_plans: dict[str, PreparedRootPlan]
-    unmatched_review_rows: list[dict[str, Any]]
-    unmatched_terminal_rows: list[dict[str, Any]]
-    manual_filter_path: Path
+    preparation_review_rows: list[dict[str, Any]]
+    preparation_terminal_rows: list[dict[str, Any]]
 
     def runtime_payload(self) -> dict[str, Any]:
         """Serialize the prepared inputs into the runtime metadata shape."""
@@ -104,7 +106,7 @@ class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
                 }
                 for registrable_domain, plan in sorted(self.root_plans.items())
             },
-            "terminal_rows": [dict(row) for row in self.unmatched_terminal_rows],
+            "terminal_rows": [dict(row) for row in self.preparation_terminal_rows],
         }
 
     def split_entries_for_planning(
@@ -163,17 +165,57 @@ def _prepared_entries_for_job(
     ]
 
 
+def _load_manual_filter_hosts(
+    *,
+    source_root: Path,
+    config_name: str,
+    directory_name: str,
+) -> tuple[Path, set[str]]:
+    manual_filter_path = source_root / "input" / directory_name / f"{config_name}.txt"
+    if not manual_filter_path.is_file():
+        return manual_filter_path, set()
+
+    parser = DomainListParser()
+    hosts = {
+        entry.host
+        for entry in parser.process_entries(
+            manual_filter_path.read_text(encoding="utf-8").splitlines(keepends=True),
+            source_name=str(manual_filter_path),
+            stats=Counter(),
+            forced_format=InputFileFormat.PLAIN,
+        )
+    }
+    return manual_filter_path, hosts
+
+
 def load_manual_filter_pass_hosts(
     *,
     source_root: Path,
     config: dict[str, Any],
 ) -> tuple[Path, set[str]]:
     """Return the shared manual-pass file path and parsed host set."""
-    manual_filter_path = (
-        source_root / "input" / "manual_filter_pass" / f"{config['config_name']}.txt"
+    manual_filter_path, hosts = _load_manual_filter_hosts(
+        source_root=source_root,
+        config_name=str(config["config_name"]),
+        directory_name="manual_filter_pass",
     )
-    if not manual_filter_path.is_file():
-        return manual_filter_path, set()
+    _validate_manual_filter_pass_hosts(
+        config=config,
+        manual_filter_path=manual_filter_path,
+        hosts=hosts,
+    )
+    return manual_filter_path, hosts
+
+
+def _validate_manual_filter_pass_hosts(
+    *,
+    config: dict[str, Any],
+    manual_filter_path: Path,
+    hosts: set[str],
+) -> None:
+    """Validate config-scoped manual-pass semantics after file parsing."""
+    if not hosts:
+        return
 
     enabled_sources = [source for source in config["sources"] if source["enabled"]]
     dns_enabled_values = {
@@ -192,25 +234,26 @@ def load_manual_filter_pass_hosts(
             "(all enabled sources have dns.enabled=false)"
         )
 
-    parser = DomainListParser()
-    hosts = {
-        entry.host
-        for entry in parser.process_entries(
-            manual_filter_path.read_text(encoding="utf-8").splitlines(keepends=True),
-            source_name=str(manual_filter_path),
-            stats=Counter(),
-            forced_format=InputFileFormat.PLAIN,
-        )
-    }
-    return manual_filter_path, hosts
+
+def load_manual_filter_out_hosts(
+    *,
+    source_root: Path,
+    config: dict[str, Any],
+) -> tuple[Path, set[str]]:
+    """Return the shared manual-reject file path and parsed host set."""
+    return _load_manual_filter_hosts(
+        source_root=source_root,
+        config_name=str(config["config_name"]),
+        directory_name="manual_filter_out",
+    )
 
 
-def _unmatched_manual_filter_row(
+def _manual_filter_pass_not_in_sources_row(
     *,
     host: str,
     manual_filter_path: Path,
 ) -> dict[str, Any]:
-    """Return one shared terminal review/audit row for a manual-pass host absent from sources."""
+    """Return one preparation-owned row for a manual-pass host absent from sources."""
     manual_filter_path_str = str(manual_filter_path)
     return {
         "source_id": "manual_filter_pass_unmatched",
@@ -245,6 +288,162 @@ def _unmatched_manual_filter_row(
     }
 
 
+def _matched_manual_filter_out_row(prepared_entry: PreparedHostEntry) -> dict[str, Any]:
+    """Return one preparation-owned row for a matched manual-reject host."""
+    entry = prepared_entry.entry
+    source_input_labels = list(prepared_entry.source_input_labels)
+    return {
+        **row_identity_fields(
+            source_id=prepared_entry.source_id,
+            source_input_label=source_input_labels[0],
+            source_ids=list(prepared_entry.source_ids),
+            source_input_labels=source_input_labels,
+            entry=entry,
+        ),
+        "classification": CLASSIFICATION_MANUAL_FILTER_OUT,
+        "classification_reason": "manual filter-out host was explicitly rejected",
+        "route": "review",
+        "rdap_registration_status": "unavailable",
+        "dns_status": "skipped",
+        "canonical_name": "",
+        "resolved_ips": [],
+        "geo_status": "skipped",
+        "geo_reason": "manual_filter_out",
+        "geo_policy_status": "skipped",
+        "geo_policy_reason": "manual_filter_out",
+        "geo_provider": "",
+        "geo_countries": [],
+        "geo_region_codes": [],
+        "geo_region_names": [],
+    }
+
+
+def _manual_filter_out_not_in_sources_row(
+    *,
+    host: str,
+    manual_filter_path: Path,
+) -> dict[str, Any]:
+    """Return one preparation-owned row for a manual-reject host absent from sources."""
+    manual_filter_path_str = str(manual_filter_path)
+    parsed_entry = next(
+        DomainListParser().process_entries(
+            [f"{host}\n"],
+            source_name=manual_filter_path_str,
+            forced_format=InputFileFormat.PLAIN,
+        )
+    )
+    return {
+        "source_id": "manual_filter_out_unmatched",
+        "source_input_label": manual_filter_path_str,
+        "source_ids": ["manual_filter_out_unmatched"],
+        "source_input_labels": [manual_filter_path_str],
+        "input_name": host,
+        "host": host,
+        "registrable_domain": parsed_entry.registrable_domain,
+        "public_suffix": parsed_entry.public_suffix,
+        "is_public_suffix_input": parsed_entry.is_public_suffix_input,
+        "input_kind": parsed_entry.input_kind,
+        "apex_scope": parsed_entry.apex_scope,
+        "source_format": parsed_entry.source_format,
+        "classification": CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+        "classification_reason": (
+            "manual filter-out host was not present in any configured source"
+        ),
+        "route": "review",
+        "rdap_registration_status": "unavailable",
+        "dns_status": "skipped",
+        "canonical_name": "",
+        "resolved_ips": [],
+        "geo_status": "skipped",
+        "geo_reason": "manual_filter_out_not_in_sources",
+        "geo_policy_status": "skipped",
+        "geo_policy_reason": "manual_filter_out_not_in_sources",
+        "geo_provider": "",
+        "geo_countries": [],
+        "geo_region_codes": [],
+        "geo_region_names": [],
+    }
+
+
+def _resolve_root_plan(  # pylint: disable=protected-access,broad-exception-caught
+    *,
+    checker: Any,
+    registrable_domain: str,
+    source_id: str,
+) -> PreparedRootPlan:
+    """Return preparation-time RDAP metadata for one registrable domain."""
+    try:
+        authoritative_base_url = checker._authoritative_base_url(registrable_domain)
+    except Exception as exc:
+        logger.warning(
+            "RDAP preparation could not resolve authoritative server for "
+            "root=%s source=%s: %s",
+            registrable_domain,
+            source_id,
+            exc,
+        )
+        return PreparedRootPlan(
+            registrable_domain=registrable_domain,
+            status="unknown",
+        )
+    if authoritative_base_url is None:
+        return PreparedRootPlan(
+            registrable_domain=registrable_domain,
+            status="unavailable",
+        )
+    return PreparedRootPlan(
+        registrable_domain=registrable_domain,
+        status="resolved",
+        authoritative_base_url=authoritative_base_url,
+    )
+
+
+def _manual_filter_preparation_rows(
+    *,
+    collapsed_entries: dict[str, PreparedHostEntry],
+    manual_filter_pass_hosts: set[str],
+    manual_filter_pass_path: Path,
+    manual_filter_out_entries: dict[str, PreparedHostEntry],
+    manual_filter_out_hosts: set[str],
+    manual_filter_out_path: Path,
+) -> list[dict[str, Any]]:
+    """Build all preparation-owned review/raw rows from manual filter files."""
+    matched_manual_hosts = {
+        prepared_entry.entry.host
+        for prepared_entry in collapsed_entries.values()
+        if prepared_entry.manual_filter_pass
+    }
+    unmatched_manual_pass_hosts = sorted(
+        manual_filter_pass_hosts - matched_manual_hosts
+    )
+    unmatched_manual_pass_rows = [
+        _manual_filter_pass_not_in_sources_row(
+            host=host,
+            manual_filter_path=manual_filter_pass_path,
+        )
+        for host in unmatched_manual_pass_hosts
+    ]
+    matched_manual_filter_out_rows = [
+        _matched_manual_filter_out_row(manual_filter_out_entries[host])
+        for host in sorted(manual_filter_out_entries)
+    ]
+    unmatched_manual_filter_out_hosts = sorted(
+        manual_filter_out_hosts - set(manual_filter_out_entries)
+    )
+    unmatched_manual_filter_out_rows = [
+        _manual_filter_out_not_in_sources_row(
+            host=host,
+            manual_filter_path=manual_filter_out_path,
+        )
+        for host in unmatched_manual_filter_out_hosts
+    ]
+    return [
+        *matched_manual_filter_out_rows,
+        *unmatched_manual_filter_out_rows,
+        *unmatched_manual_pass_rows,
+    ]
+
+
 def prepare_inputs(
     *,
     source_root: Path,
@@ -257,14 +456,35 @@ def prepare_inputs(
     if not jobs:
         raise ValueError(f"config {config_path} produced no runnable source jobs")
 
-    manual_filter_path, manual_filter_hosts = load_manual_filter_pass_hosts(
+    manual_filter_pass_path, manual_filter_pass_hosts = _load_manual_filter_hosts(
+        source_root=source_root,
+        config_name=str(config["config_name"]),
+        directory_name="manual_filter_pass",
+    )
+    manual_filter_out_path, manual_filter_out_hosts = load_manual_filter_out_hosts(
         source_root=source_root,
         config=config,
+    )
+    overlapping_manual_hosts = sorted(
+        manual_filter_pass_hosts & manual_filter_out_hosts
+    )
+    if overlapping_manual_hosts:
+        conflicting_host = overlapping_manual_hosts[0]
+        raise ValueError(
+            "host "
+            f"{conflicting_host!r} appears in both manual filter files "
+            f"{manual_filter_pass_path} and {manual_filter_out_path}"
+        )
+    _validate_manual_filter_pass_hosts(
+        config=config,
+        manual_filter_path=manual_filter_pass_path,
+        hosts=manual_filter_pass_hosts,
     )
     parser = DomainListParser()
     source_jobs_by_id = {job.source_id: job for job in jobs}
     checker_cache: dict[str, Any] = {}
     collapsed_entries: dict[str, PreparedHostEntry] = {}
+    manual_filter_out_entries: dict[str, PreparedHostEntry] = {}
     execution_profiles_by_host: dict[str, str] = {}
 
     for source_index, job in enumerate(jobs):
@@ -282,11 +502,23 @@ def prepare_inputs(
         )
         for prepared_entry in prepared_entries:
             host = prepared_entry.entry.host
+            if host in manual_filter_out_hosts:
+                existing = manual_filter_out_entries.get(host)
+                if existing is None:
+                    manual_filter_out_entries[host] = prepared_entry
+                    continue
+                manual_filter_out_entries[host] = replace(
+                    existing,
+                    source_ids=existing.source_ids + (job.source_id,),
+                    source_input_labels=existing.source_input_labels
+                    + (job.input_label,),
+                )
+                continue
             existing = collapsed_entries.get(host)
             if existing is None:
                 collapsed_entries[host] = replace(
                     prepared_entry,
-                    manual_filter_pass=host in manual_filter_hosts,
+                    manual_filter_pass=host in manual_filter_pass_hosts,
                 )
                 execution_profiles_by_host[host] = execution_profile
                 continue
@@ -300,7 +532,7 @@ def prepare_inputs(
             collapsed_entries[host] = replace(
                 existing,
                 manual_filter_pass=existing.manual_filter_pass
-                or host in manual_filter_hosts,
+                or host in manual_filter_pass_hosts,
                 source_ids=existing.source_ids + (job.source_id,),
                 source_input_labels=existing.source_input_labels + (job.input_label,),
             )
@@ -317,58 +549,26 @@ def prepare_inputs(
     root_plans: dict[str, PreparedRootPlan] = {}
     for registrable_domain, entries in sorted(eligible_root_entries.items()):
         source_id = entries[0].source_id
-        checker = checker_cache[source_id]
-        try:
-            authoritative_base_url = (
-                checker._authoritative_base_url(  # pylint: disable=protected-access
-                    registrable_domain
-                )
-            )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "RDAP preparation could not resolve authoritative server for "
-                "root=%s source=%s: %s",
-                registrable_domain,
-                source_id,
-                exc,
-            )
-            root_plans[registrable_domain] = PreparedRootPlan(
-                registrable_domain=registrable_domain,
-                status="unknown",
-            )
-            continue
-        if authoritative_base_url is None:
-            root_plans[registrable_domain] = PreparedRootPlan(
-                registrable_domain=registrable_domain,
-                status="unavailable",
-            )
-            continue
-        root_plans[registrable_domain] = PreparedRootPlan(
+        root_plans[registrable_domain] = _resolve_root_plan(
+            checker=checker_cache[source_id],
             registrable_domain=registrable_domain,
-            status="resolved",
-            authoritative_base_url=authoritative_base_url,
+            source_id=source_id,
         )
 
-    matched_manual_hosts = {
-        prepared_entry.entry.host
-        for prepared_entry in collapsed_entries.values()
-        if prepared_entry.manual_filter_pass
-    }
-    unmatched_manual_hosts = sorted(manual_filter_hosts - matched_manual_hosts)
-    unmatched_rows = [
-        _unmatched_manual_filter_row(
-            host=host,
-            manual_filter_path=manual_filter_path,
-        )
-        for host in unmatched_manual_hosts
-    ]
+    preparation_rows = _manual_filter_preparation_rows(
+        collapsed_entries=collapsed_entries,
+        manual_filter_pass_hosts=manual_filter_pass_hosts,
+        manual_filter_pass_path=manual_filter_pass_path,
+        manual_filter_out_entries=manual_filter_out_entries,
+        manual_filter_out_hosts=manual_filter_out_hosts,
+        manual_filter_out_path=manual_filter_out_path,
+    )
     return PreparedInputSet(
         config=config,
         jobs=jobs,
         source_jobs_by_id=source_jobs_by_id,
         prepared_entries=list(collapsed_entries.values()),
         root_plans=root_plans,
-        unmatched_review_rows=unmatched_rows,
-        unmatched_terminal_rows=[dict(row) for row in unmatched_rows],
-        manual_filter_path=manual_filter_path,
+        preparation_review_rows=preparation_rows,
+        preparation_terminal_rows=[dict(row) for row in preparation_rows],
     )

@@ -17,6 +17,8 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_LOOKUP_FAILED,
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
+    CLASSIFICATION_MANUAL_FILTER_OUT,
+    CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
     CLASSIFICATION_RDAP_STATUS_CLIENT_HOLD,
@@ -107,6 +109,12 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
             "manual filter-pass host was not present in any configured source"
         ),
+        CLASSIFICATION_MANUAL_FILTER_OUT: (
+            "manual filter-out host was explicitly rejected"
+        ),
+        CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
+            "manual filter-out host was not present in any configured source"
+        ),
         CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN: (
             f"{registered_subject} returned NXDOMAIN"
         ),
@@ -185,6 +193,31 @@ def review_rdap_registration_status(rdap_result: RDAPResult | None) -> str:
     if rdap_result.exists:
         return "registered"
     return "unregistered"
+
+
+def row_identity_fields(
+    *,
+    source_id: str,
+    source_input_label: str,
+    source_ids: list[str],
+    source_input_labels: list[str],
+    entry: ParsedDomainEntry,
+) -> dict[str, Any]:
+    """Build the shared provenance and parsed-entry fields for one output row."""
+    return {
+        "source_id": source_id,
+        "source_input_label": source_input_label,
+        "source_ids": list(source_ids),
+        "source_input_labels": list(source_input_labels),
+        "input_name": entry.input_name or entry.host,
+        "host": entry.host,
+        "registrable_domain": entry.registrable_domain,
+        "public_suffix": entry.public_suffix,
+        "is_public_suffix_input": entry.is_public_suffix_input,
+        "input_kind": entry.input_kind,
+        "apex_scope": entry.apex_scope,
+        "source_format": entry.source_format,
+    }
 
 
 def classify_host_from_results(
@@ -277,21 +310,14 @@ def build_output_row(
         or geo_reason == "lookup_succeeded"
     ):
         geo_provider_name = effective_geo_provider
-    source_ids = source_ids_override or [job.source_id]
-    source_input_labels = source_input_labels_override or [job.input_label]
     return {
-        "source_id": job.source_id,
-        "source_input_label": job.input_label,
-        "source_ids": list(source_ids),
-        "source_input_labels": list(source_input_labels),
-        "input_name": entry.input_name or entry.host,
-        "host": entry.host,
-        "registrable_domain": entry.registrable_domain,
-        "public_suffix": entry.public_suffix,
-        "is_public_suffix_input": entry.is_public_suffix_input,
-        "input_kind": entry.input_kind,
-        "apex_scope": entry.apex_scope,
-        "source_format": entry.source_format,
+        **row_identity_fields(
+            source_id=job.source_id,
+            source_input_label=job.input_label,
+            source_ids=source_ids_override or [job.source_id],
+            source_input_labels=source_input_labels_override or [job.input_label],
+            entry=entry,
+        ),
         "classification": classification,
         "rdap_registration_status": review_rdap_registration_status(rdap_result),
         "dns_status": dns_status_override or dns_result.status,
