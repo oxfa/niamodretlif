@@ -57,7 +57,7 @@ ubnt.com
 vive.com
 viveport.com
 volvocars.com
-wechatpay.com.my
+# wechatpay.com.my
 windowssearch.com
 windowsupdate.com
 standardchartered.com
