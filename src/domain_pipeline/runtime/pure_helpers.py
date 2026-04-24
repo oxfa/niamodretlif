@@ -8,6 +8,8 @@ from typing import Any, TypedDict, cast
 from domain_pipeline.classifications import (
     CLASSIFICATION_DNS_LOOKUP_SERVFAIL,
     CLASSIFICATION_DNS_LOOKUP_TIMEOUT,
+    CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
+    CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
     CLASSIFICATION_DNS_REGISTERED_APEX_NODATA,
     CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN,
     CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NODATA,
@@ -116,6 +118,12 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
             "manual filter-out host was not present in any configured source"
         ),
+        CLASSIFICATION_MANUAL_ADD_UNREGISTERED: (
+            "manual-add host has an RDAP-unregistered registrable domain"
+        ),
+        CLASSIFICATION_MANUAL_ADD_UNAVAILABLE: (
+            "manual-add host could not get an RDAP registration verdict"
+        ),
         CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN: (
             f"{registered_subject} returned NXDOMAIN"
         ),
@@ -185,6 +193,8 @@ def review_classification_for_row(row: dict[str, Any]) -> str:
     if classification in {
         CLASSIFICATION_MANUAL_FILTER_OUT,
         CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+        CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
+        CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
     }:
         return REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT
     if classification in GEO_REVIEW_CLASSIFICATIONS or geo_policy_status == "rejected":
@@ -300,6 +310,8 @@ def build_output_row(
     provider: IPGeoProvider | None,
     *,
     dns_status_override: str | None = None,
+    source_id_override: str | None = None,
+    source_input_label_override: str | None = None,
     source_ids_override: list[str] | None = None,
     source_input_labels_override: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -318,8 +330,8 @@ def build_output_row(
         geo_provider_name = effective_geo_provider
     return {
         **row_identity_fields(
-            source_id=job.source_id,
-            source_input_label=job.input_label,
+            source_id=source_id_override or job.source_id,
+            source_input_label=source_input_label_override or job.input_label,
             source_ids=source_ids_override or [job.source_id],
             source_input_labels=source_input_labels_override or [job.input_label],
             entry=entry,

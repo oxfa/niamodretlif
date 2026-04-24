@@ -8,6 +8,7 @@ version: 2
 # Optional manual filter files:
 # - input/manual_filter_pass/<config-stem>.txt
 # - input/manual_filter_out/<config-stem>.txt
+# - input/manual_add/<config-stem>.txt
 # The manual-pass file is only supported when all enabled sources in the config
 # have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
 # in workflow-owned runtime. Hosts listed there still run through RDAP, but
@@ -15,11 +16,18 @@ version: 2
 # otherwise they are emitted to the filtered output for that config.
 # The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
 # and emits review rows only.
+# The manual-add file is config-scoped, always skips DNS/geo, and is validated
+# against the config's shared RDAP settings. RDAP-registered roots are emitted
+# to filtered output, while RDAP-unregistered or RDAP-unavailable roots emit
+# review rows instead of dead output. Public-suffix inputs such as "com" are
+# rejected because manual-add entries must still run through RDAP.
 # A host must not appear in both manual filter files for the same config.
+# A host must not appear in manual_add and either manual_filter_pass or
+# manual_filter_out for the same config.
 # When the same host appears in multiple enabled sources, shared preparation
 # collapses it only if the effective dns/rdap/geo behavior is identical across
 # those sources; conflicting behavior raises a validation error unless the host
-# is removed up front by manual_filter_out.
+# is removed up front by manual_filter_out or overridden by manual_add.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
