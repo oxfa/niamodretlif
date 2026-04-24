@@ -3,6 +3,10 @@ version: 2
 # Optional per-config manual files:
 # - input/manual_filter_pass/direct.txt
 # - input/manual_filter_out/direct.txt
+# - input/manual_add/direct.txt
+# manual_add entries still run through RDAP, always skip DNS/geo, emit
+# registered roots to filtered output, and emit unregistered/unavailable roots
+# to review instead of dead output.
 
 defaults:
   fetch:

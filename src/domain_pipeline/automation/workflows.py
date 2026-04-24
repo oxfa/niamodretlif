@@ -334,6 +334,9 @@ def _build_prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
         "raw_line": entry.raw_line,
         "line_index": entry.line_index,
         "manual_filter_pass": entry.manual_filter_pass,
+        "manual_add": entry.manual_add,
+        "source_id_override": entry.source_id_override,
+        "source_input_label_override": entry.source_input_label_override,
         "source_ids": list(entry.source_ids),
         "source_input_labels": list(entry.source_input_labels),
     }

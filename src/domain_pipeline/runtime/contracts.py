@@ -1,5 +1,7 @@
 """Explicit async runtime contracts and payload types."""
 
+# pylint: disable=duplicate-code
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,13 +23,16 @@ ResultRoute = Literal["normal_output", "review", "drop"]
 
 @dataclass(frozen=True)
 class ParsedHostItem:  # pylint: disable=too-many-instance-attributes
-    """Normalized parsed host with run-time context."""
+    """Normalized parsed host with run-time context and output provenance overrides."""
 
     job: SourceJob
     entry: ParsedDomainEntry
     sequence: int
     total: int
     manual_filter_pass: bool = False
+    manual_add: bool = False
+    source_id_override: str | None = None
+    source_input_label_override: str | None = None
     source_ids: tuple[str, ...] = ()
     source_input_labels: tuple[str, ...] = ()
     prepared_rdap_status: str | None = None

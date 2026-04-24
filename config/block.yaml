@@ -3,6 +3,9 @@ version: 2
 # Optional per-config manual files:
 # - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
+# - input/manual_add/block.txt
+# manual_add entries are allowed for this RDAP-only config because they only do
+# RDAP. They bypass DNS/geo and never emit dead-output rows.
 
 defaults:
   fetch:

@@ -24,6 +24,9 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
     CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+    CLASSIFICATION_MANUAL_ADD_REGISTERED,
+    CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
+    CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
     CLASSIFICATION_MANUAL_FILTER_PASSED,
     CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
@@ -360,6 +363,17 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             sequence=sequence,
             total=total,
             manual_filter_pass=bool(payload.get("manual_filter_pass", False)),
+            manual_add=bool(payload.get("manual_add", False)),
+            source_id_override=(
+                None
+                if payload.get("source_id_override") is None
+                else str(payload.get("source_id_override"))
+            ),
+            source_input_label_override=(
+                None
+                if payload.get("source_input_label_override") is None
+                else str(payload.get("source_input_label_override"))
+            ),
             source_ids=tuple(
                 str(item) for item in payload.get("source_ids", [job.source_id])
             ),
@@ -427,6 +441,94 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 route=ROUTE_NORMAL_OUTPUT,
                 row=row,
                 rdap_result=None,
+                dns_result=dns_result,
+            )
+        )
+
+    async def _emit_manual_add_result(
+        self,
+        parsed: ParsedHostItem,
+        rdap_result: RDAPResult | None,
+    ) -> None:
+        """Emit one manual-add host after RDAP, always skipping DNS and geo."""
+        provenance_label = parsed.source_input_label_override or parsed.job.input_label
+        if rdap_result is not None and rdap_result.exists:
+            classification = CLASSIFICATION_MANUAL_ADD_REGISTERED
+            route = ROUTE_NORMAL_OUTPUT
+            geo_reason = "manual_add_registered"
+            geo_policy_reason = "manual_add_registered"
+            log.info(
+                "[%s %d/%d] %s bypassed DNS/geo via manual-add file %s "
+                "(rdap=registered)",
+                parsed.job.source_id,
+                parsed.sequence,
+                parsed.total,
+                parsed.entry.host,
+                provenance_label,
+            )
+        elif rdap_result is not None:
+            classification = CLASSIFICATION_MANUAL_ADD_UNREGISTERED
+            route = "review"
+            geo_reason = "manual_add_unregistered"
+            geo_policy_reason = "manual_add_unregistered"
+            log.info(
+                "[%s %d/%d] %s routed to review via manual-add file %s "
+                "(rdap=unregistered)",
+                parsed.job.source_id,
+                parsed.sequence,
+                parsed.total,
+                parsed.entry.host,
+                provenance_label,
+            )
+        else:
+            classification = CLASSIFICATION_MANUAL_ADD_UNAVAILABLE
+            route = "review"
+            geo_reason = "manual_add_unavailable"
+            geo_policy_reason = "manual_add_unavailable"
+            log.info(
+                "[%s %d/%d] %s routed to review via manual-add file %s "
+                "(rdap=unavailable)",
+                parsed.job.source_id,
+                parsed.sequence,
+                parsed.total,
+                parsed.entry.host,
+                provenance_label,
+            )
+        dns_result = DNSResult(
+            host=parsed.entry.host,
+            a_exists=False,
+            a_nodata=False,
+            a_nxdomain=False,
+            a_timeout=False,
+            a_servfail=False,
+            canonical_name=None,
+        )
+        row = build_output_row(
+            parsed.job,
+            parsed.entry,
+            classification,
+            rdap_result,
+            dns_result,
+            [],
+            "skipped",
+            geo_reason,
+            "skipped",
+            geo_policy_reason,
+            None,
+            dns_status_override="skipped",
+            source_id_override=parsed.source_id_override,
+            source_input_label_override=parsed.source_input_label_override,
+            source_ids_override=list(parsed.source_ids) or None,
+            source_input_labels_override=list(parsed.source_input_labels) or None,
+        )
+        await self.queue_bundle.result_queue.put(
+            CompletedHostResult(
+                job=parsed.job,
+                entry=parsed.entry,
+                classification=classification,
+                route=route,
+                row=row,
+                rdap_result=rdap_result,
                 dns_result=dns_result,
             )
         )
@@ -985,6 +1087,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                                 parsed.entry.registrable_domain,
                             )
                         rdap_result = None
+                if parsed.manual_add:
+                    await self._emit_manual_add_result(parsed, rdap_result)
+                    continue
                 if rdap_result is not None and not rdap_result.exists:
                     log.debug(
                         "[%s %d/%d] %s filtered before DNS because registrable_domain=%s "

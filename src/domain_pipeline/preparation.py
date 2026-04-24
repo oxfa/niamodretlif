@@ -18,6 +18,7 @@ from domain_pipeline.io.parser import (
     DomainListParser,
     InputFileFormat,
     ParsedDomainEntry,
+    ParsedDomainEntryRecord,
 )
 from domain_pipeline.runtime.pure_helpers import row_identity_fields
 from domain_pipeline.runtime.pipeline_runner import build_checker, build_source_jobs
@@ -25,6 +26,7 @@ from domain_pipeline.settings.config import load_config
 from domain_pipeline.shared import SourceJob
 
 logger = logging.getLogger(__name__)
+MANUAL_ADD_SOURCE_ID = "manual_add"
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,7 @@ class PreparedRootPlan:
 
 @dataclass(frozen=True)
 class PreparedHostEntry:  # pylint: disable=too-many-instance-attributes
-    """One shared prepared host entry with canonical and aggregated provenance."""
+    """One shared prepared host entry with runtime ownership and output overrides."""
 
     source_id: str
     source_index: int
@@ -46,6 +48,9 @@ class PreparedHostEntry:  # pylint: disable=too-many-instance-attributes
     raw_line: str
     line_index: int
     manual_filter_pass: bool = False
+    manual_add: bool = False
+    source_id_override: str | None = None
+    source_input_label_override: str | None = None
     source_ids: tuple[str, ...] = ()
     source_input_labels: tuple[str, ...] = ()
 
@@ -86,6 +91,11 @@ class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
                     "raw_line": prepared_entry.raw_line,
                     "line_index": prepared_entry.line_index,
                     "manual_filter_pass": prepared_entry.manual_filter_pass,
+                    "manual_add": prepared_entry.manual_add,
+                    "source_id_override": prepared_entry.source_id_override,
+                    "source_input_label_override": (
+                        prepared_entry.source_input_label_override
+                    ),
                     "source_ids": list(prepared_entry.source_ids),
                     "source_input_labels": list(prepared_entry.source_input_labels),
                 }
@@ -138,6 +148,11 @@ def _execution_profile_fingerprint(source_config: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _rdap_profile_fingerprint(source_config: dict[str, Any]) -> str:
+    """Return the RDAP-relevant fingerprint for one source."""
+    return json.dumps(source_config["rdap"], sort_keys=True, separators=(",", ":"))
+
+
 def _prepared_entries_for_job(
     *,
     parser: DomainListParser,
@@ -186,6 +201,34 @@ def _load_manual_filter_hosts(
         )
     }
     return manual_filter_path, hosts
+
+
+def _load_manual_add_records(
+    *,
+    source_root: Path,
+    config_name: str,
+) -> tuple[Path, dict[str, ParsedDomainEntryRecord]]:
+    """Return the manual-add file path and first-seen parsed entry records."""
+    manual_add_path = source_root / "input" / "manual_add" / f"{config_name}.txt"
+    if not manual_add_path.is_file():
+        return manual_add_path, {}
+
+    parser = DomainListParser()
+    records_by_host: dict[str, ParsedDomainEntryRecord] = {}
+    for record in parser.process_entry_records(
+        manual_add_path.read_text(encoding="utf-8").splitlines(keepends=True),
+        source_name=str(manual_add_path),
+        stats=Counter(),
+        forced_format=InputFileFormat.PLAIN,
+    ):
+        if record.entry.is_public_suffix_input:
+            raise ValueError(
+                "manual-add file "
+                f"{manual_add_path} does not support public suffix inputs such as "
+                f"{record.entry.host!r} because manual-add hosts must run through RDAP"
+            )
+        records_by_host.setdefault(record.entry.host, record)
+    return manual_add_path, records_by_host
 
 
 def load_manual_filter_pass_hosts(
@@ -245,6 +288,51 @@ def load_manual_filter_out_hosts(
         source_root=source_root,
         config_name=str(config["config_name"]),
         directory_name="manual_filter_out",
+    )
+
+
+def _validate_manual_add_records(
+    *,
+    config: dict[str, Any],
+    manual_add_path: Path,
+    records_by_host: dict[str, ParsedDomainEntryRecord],
+) -> None:
+    """Validate config-scoped manual-add semantics after file parsing."""
+    if not records_by_host:
+        return
+
+    enabled_sources = [source for source in config["sources"] if source["enabled"]]
+    rdap_fingerprints = {
+        _rdap_profile_fingerprint(source) for source in enabled_sources
+    }
+    if len(rdap_fingerprints) > 1:
+        raise ValueError(
+            "manual-add file "
+            f"{manual_add_path} requires all enabled sources in one config "
+            "to share RDAP settings because manual-add behavior is config-scoped"
+        )
+
+
+def _manual_add_override_entry(
+    *,
+    record: ParsedDomainEntryRecord,
+    carrier_job: SourceJob,
+    source_index: int,
+    manual_add_path: Path,
+) -> PreparedHostEntry:
+    """Return one prepared manual-add entry owned by the carrier source job."""
+    manual_add_path_str = str(manual_add_path)
+    return PreparedHostEntry(
+        source_id=carrier_job.source_id,
+        source_index=source_index,
+        entry=record.entry,
+        raw_line=record.raw_line,
+        line_index=record.line_index,
+        manual_add=True,
+        source_id_override=MANUAL_ADD_SOURCE_ID,
+        source_input_label_override=manual_add_path_str,
+        source_ids=(MANUAL_ADD_SOURCE_ID,),
+        source_input_labels=(manual_add_path_str,),
     )
 
 
@@ -444,6 +532,7 @@ def _manual_filter_preparation_rows(
     ]
 
 
+# pylint: disable=too-many-statements
 def prepare_inputs(
     *,
     source_root: Path,
@@ -455,6 +544,10 @@ def prepare_inputs(
     jobs = build_source_jobs(config)
     if not jobs:
         raise ValueError(f"config {config_path} produced no runnable source jobs")
+    carrier_job = jobs[0]
+    source_index_by_id = {
+        job.source_id: source_index for source_index, job in enumerate(jobs)
+    }
 
     manual_filter_pass_path, manual_filter_pass_hosts = _load_manual_filter_hosts(
         source_root=source_root,
@@ -465,6 +558,11 @@ def prepare_inputs(
         source_root=source_root,
         config=config,
     )
+    manual_add_path, manual_add_records = _load_manual_add_records(
+        source_root=source_root,
+        config_name=str(config["config_name"]),
+    )
+    manual_add_hosts = set(manual_add_records)
     overlapping_manual_hosts = sorted(
         manual_filter_pass_hosts & manual_filter_out_hosts
     )
@@ -475,10 +573,35 @@ def prepare_inputs(
             f"{conflicting_host!r} appears in both manual filter files "
             f"{manual_filter_pass_path} and {manual_filter_out_path}"
         )
+    overlapping_manual_add_pass_hosts = sorted(
+        manual_add_hosts & manual_filter_pass_hosts
+    )
+    if overlapping_manual_add_pass_hosts:
+        conflicting_host = overlapping_manual_add_pass_hosts[0]
+        raise ValueError(
+            "host "
+            f"{conflicting_host!r} appears in both manual-add file "
+            f"{manual_add_path} and manual filter-pass file {manual_filter_pass_path}"
+        )
+    overlapping_manual_add_out_hosts = sorted(
+        manual_add_hosts & manual_filter_out_hosts
+    )
+    if overlapping_manual_add_out_hosts:
+        conflicting_host = overlapping_manual_add_out_hosts[0]
+        raise ValueError(
+            "host "
+            f"{conflicting_host!r} appears in both manual-add file "
+            f"{manual_add_path} and manual filter-out file {manual_filter_out_path}"
+        )
     _validate_manual_filter_pass_hosts(
         config=config,
         manual_filter_path=manual_filter_pass_path,
         hosts=manual_filter_pass_hosts,
+    )
+    _validate_manual_add_records(
+        config=config,
+        manual_add_path=manual_add_path,
+        records_by_host=manual_add_records,
     )
     parser = DomainListParser()
     source_jobs_by_id = {job.source_id: job for job in jobs}
@@ -486,10 +609,22 @@ def prepare_inputs(
     collapsed_entries: dict[str, PreparedHostEntry] = {}
     manual_filter_out_entries: dict[str, PreparedHostEntry] = {}
     execution_profiles_by_host: dict[str, str] = {}
+    rdap_profiles_by_host: dict[str, str] = {}
+    first_source_id_by_host: dict[str, str] = {}
+    manual_add_entries = {
+        host: _manual_add_override_entry(
+            record=record,
+            carrier_job=carrier_job,
+            source_index=source_index_by_id[carrier_job.source_id],
+            manual_add_path=manual_add_path,
+        )
+        for host, record in manual_add_records.items()
+    }
 
     for source_index, job in enumerate(jobs):
         checker_cache[job.source_id] = build_checker(job.config)
         execution_profile = _execution_profile_fingerprint(job.config)
+        rdap_profile = _rdap_profile_fingerprint(job.config)
         prepared_entries = _prepared_entries_for_job(
             parser=parser,
             job=job,
@@ -514,6 +649,22 @@ def prepare_inputs(
                     + (job.input_label,),
                 )
                 continue
+            if host in manual_add_entries:
+                existing = collapsed_entries.get(host)
+                if existing is None:
+                    collapsed_entries[host] = manual_add_entries[host]
+                    rdap_profiles_by_host[host] = rdap_profile
+                    first_source_id_by_host[host] = job.source_id
+                    continue
+                if rdap_profiles_by_host[host] != rdap_profile:
+                    raise ValueError(
+                        "duplicate host "
+                        f"{host!r} appears in multiple enabled sources with different "
+                        "effective RDAP behavior while manual-add overrides it; "
+                        "conflicting sources are "
+                        f"{first_source_id_by_host[host]!r} and {job.source_id!r}"
+                    )
+                continue
             existing = collapsed_entries.get(host)
             if existing is None:
                 collapsed_entries[host] = replace(
@@ -521,13 +672,14 @@ def prepare_inputs(
                     manual_filter_pass=host in manual_filter_pass_hosts,
                 )
                 execution_profiles_by_host[host] = execution_profile
+                first_source_id_by_host[host] = job.source_id
                 continue
             if execution_profiles_by_host[host] != execution_profile:
                 raise ValueError(
                     "duplicate host "
                     f"{host!r} appears in multiple enabled sources with different "
                     "effective runtime behavior; conflicting sources are "
-                    f"{existing.source_id!r} and {job.source_id!r}"
+                    f"{first_source_id_by_host[host]!r} and {job.source_id!r}"
                 )
             collapsed_entries[host] = replace(
                 existing,
@@ -536,6 +688,8 @@ def prepare_inputs(
                 source_ids=existing.source_ids + (job.source_id,),
                 source_input_labels=existing.source_input_labels + (job.input_label,),
             )
+    for host, manual_add_entry in manual_add_entries.items():
+        collapsed_entries.setdefault(host, manual_add_entry)
 
     eligible_root_entries: dict[str, list[PreparedHostEntry]] = defaultdict(list)
     public_suffix_entries: list[PreparedHostEntry] = []
