@@ -51,7 +51,7 @@ samsung.com
 samsungapps.com
 sc.com
 st.com
-tencent.co.id
+# tencent.co.id
 tutorabc.com
 ubnt.com
 vive.com
@@ -60,3 +60,4 @@ volvocars.com
 wechatpay.com.my
 windowssearch.com
 windowsupdate.com
+standardchartered.com
