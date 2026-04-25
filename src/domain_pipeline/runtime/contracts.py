@@ -18,7 +18,7 @@ CacheTableName = Literal[
     "dns_history",
     "geo_history",
 ]
-ResultRoute = Literal["normal_output", "review", "drop"]
+ResultRoute = Literal["filtered", "review", "dead"]
 
 
 @dataclass(frozen=True)

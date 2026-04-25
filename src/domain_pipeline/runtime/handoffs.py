@@ -38,8 +38,9 @@ def handoff_path(phase_name: str) -> Path:
 def validate_handoff_payload(payload: dict[str, Any]) -> None:
     """Raise ValueError when a handoff payload does not meet the required schema."""
     if payload.get("schema_version") != SCHEMA_VERSION:
+        actual_schema_version = payload.get("schema_version")
         raise ValueError(
-            f"handoff schema_version must be {SCHEMA_VERSION}, got {payload.get('schema_version')!r}"
+            f"handoff schema_version must be {SCHEMA_VERSION}, got {actual_schema_version!r}"
         )
     if not isinstance(payload.get("inputs_read"), list):
         raise ValueError("handoff inputs_read must be a list")
@@ -68,7 +69,9 @@ def validate_handoff_payload(payload: dict[str, Any]) -> None:
         )
 
 
-def read_and_validate_handoff(path: Path, *, expected_phase: str | None = None) -> dict[str, Any]:
+def read_and_validate_handoff(
+    path: Path, *, expected_phase: str | None = None
+) -> dict[str, Any]:
     """Load a handoff from disk and validate the required schema."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -85,5 +88,6 @@ def write_handoff(path: Path, payload: dict[str, Any]) -> None:
     """Validate and persist a handoff JSON file."""
     validate_handoff_payload(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )

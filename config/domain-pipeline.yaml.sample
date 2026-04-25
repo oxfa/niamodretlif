@@ -21,6 +21,10 @@ version: 2
 # to filtered output, while RDAP-unregistered or RDAP-unavailable roots emit
 # review rows instead of dead output. Public-suffix inputs such as "com" are
 # rejected because manual-add entries must still run through RDAP.
+# Runtime rows use three terminal routes: filtered for positive output, review
+# for uncertain or operator-attention cases, and dead only for RDAP-unregistered
+# registrable domains. Public suffix inputs and RDAP-unavailable hosts with DNS
+# disabled route to review.
 # A host must not appear in both manual filter files for the same config.
 # A host must not appear in manual_add and either manual_filter_pass or
 # manual_filter_out for the same config.
@@ -120,6 +124,8 @@ defaults:
   output:
     # Output directory for files written by the pipeline.
     # Equivalent paths such as output and ./output are treated as the same target.
+    # Route outputs are filtered, review, and dead. Dead output is reserved for
+    # RDAP-unregistered registrable domains.
     # For a config named config/domain-pipeline.yaml, the runtime writes:
     # - output/filtered/domain-pipeline.txt
     # - output/dead/domain-pipeline.txt
@@ -200,4 +206,6 @@ sources:
       # - output/review/domain-pipeline.csv
       #
       # The filtered/dead txt files and review file follow output.directory.
+      # Public suffix inputs and RDAP-unavailable DNS-disabled hosts write
+      # review rows instead of filtered or dead rows.
       directory: output

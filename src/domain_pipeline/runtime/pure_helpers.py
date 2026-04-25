@@ -19,6 +19,8 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_LOOKUP_FAILED,
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
+    CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+    CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_MANUAL_FILTER_OUT,
     CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
@@ -38,8 +40,8 @@ from domain_pipeline.classifications import (
     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
     REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
-    ROUTE_DROP_CLASSIFICATIONS,
-    ROUTE_NORMAL_CLASSIFICATIONS,
+    ROUTE_DEAD_CLASSIFICATIONS,
+    ROUTE_FILTERED_CLASSIFICATIONS,
     ROUTE_REVIEW_CLASSIFICATIONS,
 )
 from ..checking import DNSResult, IPGeoProvider, IPGeoResult, RDAPResult
@@ -86,9 +88,9 @@ class ReviewOutputRow(TypedDict):
     source_input_labels: str
 
 
-ROUTE_NORMAL_OUTPUT = "normal_output"
+ROUTE_FILTERED = "filtered"
 ROUTE_REVIEW = "review"
-ROUTE_DROP = "drop"
+ROUTE_DEAD = "dead"
 
 
 def _registered_domain_subject(row: dict[str, Any]) -> str:
@@ -107,6 +109,12 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
     geo_policy_reason = str(row.get("geo_policy_reason", ""))
     registered_subject = _registered_domain_subject(row)
     reason_by_classification = {
+        CLASSIFICATION_INPUT_PUBLIC_SUFFIX: (
+            "input is a public suffix rather than a registrable host"
+        ),
+        CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED: (
+            "RDAP lookup was unavailable and DNS is disabled"
+        ),
         CLASSIFICATION_DNS_LOOKUP_TIMEOUT: "DNS lookup returned timeout",
         CLASSIFICATION_DNS_LOOKUP_SERVFAIL: "DNS lookup returned servfail",
         CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
@@ -278,16 +286,16 @@ def route_for_row(
     geo_reason: str,
 ) -> ResultRoute:
     """Return the final route for one classified row."""
-    if classification in ROUTE_DROP_CLASSIFICATIONS:
-        return ROUTE_DROP
+    if classification in ROUTE_DEAD_CLASSIFICATIONS:
+        return ROUTE_DEAD
     if classification in ROUTE_REVIEW_CLASSIFICATIONS:
         return ROUTE_REVIEW
-    if classification in ROUTE_NORMAL_CLASSIFICATIONS:
+    if classification in ROUTE_FILTERED_CLASSIFICATIONS:
         if geo_reason == "no_resolved_ips":
             return ROUTE_REVIEW
         if geo_policy_status == "rejected":
             return ROUTE_REVIEW
-        return ROUTE_NORMAL_OUTPUT
+        return ROUTE_FILTERED
     return ROUTE_REVIEW
 
 

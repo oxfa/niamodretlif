@@ -203,7 +203,7 @@ class DNSResult:
         return "error"
 
 
-class DomainChecker:
+class DomainChecker:  # pylint: disable=too-many-instance-attributes
     """High-level orchestrator for root RDAP and host DNS checks.
 
     An instance of ``DomainChecker`` encapsulates configuration for RDAP
