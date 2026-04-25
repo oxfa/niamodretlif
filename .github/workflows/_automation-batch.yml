@@ -177,6 +177,36 @@ jobs:
           restore-keys: |
             signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Restore legacy worker baseline cache
+        id: restore_worker_legacy_baseline_cache
+        if: ${{ steps.restore_worker_baseline_cache.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .tmp/runtime/check-cache.sqlite3
+            .tmp/runtime/check-cache.sqlite3-shm
+            .tmp/runtime/check-cache.sqlite3-wal
+          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
+            signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Hydrate migrated baseline cache
+        if: ${{ steps.restore_worker_baseline_cache.outputs.cache-hit == '' }}
+        run: |
+          set -eo pipefail
+          mkdir -p .workflow_state/runtime/cache
+          if [ -f ".tmp/runtime/check-cache.sqlite3" ]; then
+            cp .tmp/runtime/check-cache.sqlite3 \
+            .workflow_state/runtime/cache/check-cache.sqlite3
+          fi
+          if [ -f ".tmp/runtime/check-cache.sqlite3-shm" ]; then
+            cp .tmp/runtime/check-cache.sqlite3-shm \
+            .workflow_state/runtime/cache/check-cache.sqlite3-shm
+          fi
+          if [ -f ".tmp/runtime/check-cache.sqlite3-wal" ]; then
+            cp .tmp/runtime/check-cache.sqlite3-wal \
+            .workflow_state/runtime/cache/check-cache.sqlite3-wal
+          fi
       - name: Log worker baseline cache restore
         run: |
           set -eo pipefail
@@ -403,6 +433,36 @@ jobs:
           restore-keys: |
             signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
             signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Restore legacy aggregate baseline cache
+        id: restore_aggregate_legacy_baseline_cache
+        if: ${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit == '' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .tmp/runtime/check-cache.sqlite3
+            .tmp/runtime/check-cache.sqlite3-shm
+            .tmp/runtime/check-cache.sqlite3-wal
+          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
+            signal-light-sqlite-${{ inputs.config_name }}-
+      - name: Hydrate migrated aggregate baseline cache
+        if: ${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit == '' }}
+        run: |
+          set -eo pipefail
+          mkdir -p .workflow_state/runtime/cache
+          if [ -f ".tmp/runtime/check-cache.sqlite3" ]; then
+            cp .tmp/runtime/check-cache.sqlite3 \
+            .workflow_state/runtime/cache/check-cache.sqlite3
+          fi
+          if [ -f ".tmp/runtime/check-cache.sqlite3-shm" ]; then
+            cp .tmp/runtime/check-cache.sqlite3-shm \
+            .workflow_state/runtime/cache/check-cache.sqlite3-shm
+          fi
+          if [ -f ".tmp/runtime/check-cache.sqlite3-wal" ]; then
+            cp .tmp/runtime/check-cache.sqlite3-wal \
+            .workflow_state/runtime/cache/check-cache.sqlite3-wal
+          fi
       - name: Log aggregate baseline cache restore
         run: |
           set -eo pipefail

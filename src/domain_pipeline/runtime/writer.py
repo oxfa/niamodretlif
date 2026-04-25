@@ -18,7 +18,7 @@ from ..io.output_manager import (
 )
 from ..output_invariants import DuplicateOutputInvariantError
 from .pure_helpers import build_review_output_row
-from .contracts import CompletedHostResult
+from .contracts import CompletedHostResult, ResultRoute
 from ..shared import SourceJob
 
 logger = logging.getLogger(__name__)
@@ -163,8 +163,7 @@ class ResultCollectorWriter:
         )
         self.counts[result.classification] += 1
         self.counts[f"route_{result.route}"] += 1
-        if result.route == "drop":
-            self.counts["filtered_dead_root"] += 1
+        if result.route == "dead":
             host = result.row["host"]
             if host in group.seen_host_outputs["dead"]:
                 raise DuplicateOutputInvariantError(
@@ -176,10 +175,10 @@ class ResultCollectorWriter:
             group.dead_rows.append(result.row)
             logger.debug("Queued host=%s for dead output", host)
             logger.debug(
-                "Dropped host=%s after terminal routing decision",
+                "Routed host=%s to dead output after terminal routing decision",
                 result.row["host"],
             )
-        elif result.route == "normal_output":
+        elif result.route == "filtered":
             host = result.row["host"]
             if host in group.seen_host_outputs["filtered"]:
                 raise DuplicateOutputInvariantError(
@@ -213,7 +212,7 @@ class ResultCollectorWriter:
         *,
         job: SourceJob,
         row: dict[str, Any],
-        route: str = "review",
+        route: ResultRoute = "review",
     ) -> None:
         """Record one preparation-owned terminal row without synthetic runtime objects."""
         group = self._group_for_job(job)
@@ -222,7 +221,7 @@ class ResultCollectorWriter:
         self.counts[f"route_{route}"] += 1
         if route == "review":
             self._queue_review_row(group=group, row=row)
-        elif route == "normal_output":
+        elif route == "filtered":
             host = str(row["host"])
             if host in group.seen_host_outputs["filtered"]:
                 raise DuplicateOutputInvariantError(
@@ -232,9 +231,8 @@ class ResultCollectorWriter:
                 )
             group.seen_host_outputs["filtered"].add(host)
             group.filtered_rows.append(row)
-        elif route == "drop":
+        elif route == "dead":
             host = str(row["host"])
-            self.counts["filtered_dead_root"] += 1
             if host in group.seen_host_outputs["dead"]:
                 raise DuplicateOutputInvariantError(
                     "dead_host",

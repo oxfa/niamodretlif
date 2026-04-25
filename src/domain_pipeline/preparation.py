@@ -56,7 +56,7 @@ class PreparedHostEntry:  # pylint: disable=too-many-instance-attributes
 
 
 @dataclass(frozen=True)
-class PreparedInputSet:  # pylint: disable=too-many-instance-attributes
+class PreparedInputSet:
     """Prepared inputs shared across workflow preparation and worker runtime."""
 
     config: dict[str, Any]

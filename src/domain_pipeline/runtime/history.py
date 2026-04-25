@@ -170,7 +170,6 @@ class DNSHistoryRecord:
         return self.expires_at <= now
 
 
-# pylint: disable=too-many-public-methods
 class PipelineCache:
     """Persistent SQLite-backed cache for root RDAP, DNS, and geo results."""
 
@@ -286,7 +285,6 @@ class PipelineCache:
 
     # The cache lookup helper intentionally takes a few fields so call sites
     # can log the exact cache table, key, and expiration state in one place.
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def _log_cache_lookup(
         self,
         cache_name: str,
@@ -344,7 +342,6 @@ class PipelineCache:
         return record
 
     # These write helpers mirror the cache table schema for readability.
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def upsert_root(
         self,
         domain: str,
@@ -459,7 +456,6 @@ class PipelineCache:
         return record
 
     # These write helpers mirror the cache table schema for readability.
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def upsert_geo(
         self,
         provider: str,
@@ -569,7 +565,6 @@ class PipelineCache:
             return None
         return record
 
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
     def upsert_dns(
         self,
         host: str,

@@ -60,17 +60,15 @@ def _log_run_summary(
             line_count,
             output_path.stat().st_size,
         )
-    emitted_hosts = counts.get("routed_normal_output", 0)
+    emitted_hosts = counts.get("routed_filtered", 0)
     review_hosts = counts.get("routed_review", 0)
-    filtered_dead_roots = counts.get("filtered_dead_root", 0)
-    log.info(
-        "  Total input hosts: %d", emitted_hosts + review_hosts + filtered_dead_roots
-    )
+    dead_hosts = counts.get("routed_dead", 0)
+    log.info("  Total input hosts: %d", emitted_hosts + review_hosts + dead_hosts)
     log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
     log.info("  Hosts routed to review: %d", review_hosts)
     log.info(
         "  Hosts written to output/dead after RDAP-unregistered verdict: %d",
-        filtered_dead_roots,
+        dead_hosts,
     )
     log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))
     log.info("  Cache refreshes: %d", cache_stats.get("cached_refreshed", 0))

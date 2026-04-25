@@ -76,7 +76,9 @@ from .pipeline_runner import (
     schedule_rdap_entries,
 )
 from .pure_helpers import (
-    ROUTE_NORMAL_OUTPUT,
+    ROUTE_DEAD,
+    ROUTE_FILTERED,
+    ROUTE_REVIEW,
     build_output_row,
     classify_host_from_results,
     route_for_row,
@@ -438,7 +440,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 job=parsed.job,
                 entry=parsed.entry,
                 classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-                route=ROUTE_NORMAL_OUTPUT,
+                route=ROUTE_REVIEW,
                 row=row,
                 rdap_result=None,
                 dns_result=dns_result,
@@ -454,7 +456,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         provenance_label = parsed.source_input_label_override or parsed.job.input_label
         if rdap_result is not None and rdap_result.exists:
             classification = CLASSIFICATION_MANUAL_ADD_REGISTERED
-            route = ROUTE_NORMAL_OUTPUT
+            route = ROUTE_FILTERED
             geo_reason = "manual_add_registered"
             geo_policy_reason = "manual_add_registered"
             log.info(
@@ -468,7 +470,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             )
         elif rdap_result is not None:
             classification = CLASSIFICATION_MANUAL_ADD_UNREGISTERED
-            route = "review"
+            route = ROUTE_REVIEW
             geo_reason = "manual_add_unregistered"
             geo_policy_reason = "manual_add_unregistered"
             log.info(
@@ -482,7 +484,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             )
         else:
             classification = CLASSIFICATION_MANUAL_ADD_UNAVAILABLE
-            route = "review"
+            route = ROUTE_REVIEW
             geo_reason = "manual_add_unavailable"
             geo_policy_reason = "manual_add_unavailable"
             log.info(
@@ -581,7 +583,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 job=parsed.job,
                 entry=parsed.entry,
                 classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
-                route=ROUTE_NORMAL_OUTPUT,
+                route=ROUTE_FILTERED,
                 row=row,
                 rdap_result=rdap_result,
                 dns_result=dns_result,
@@ -1132,7 +1134,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             job=parsed.job,
                             entry=parsed.entry,
                             classification=CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-                            route="drop",
+                            route=ROUTE_DEAD,
                             row=row,
                             rdap_result=rdap_result,
                             dns_result=dns_result,
@@ -1190,7 +1192,11 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                                 if rdap_result is not None
                                 else CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
                             ),
-                            route=ROUTE_NORMAL_OUTPUT,
+                            route=(
+                                ROUTE_FILTERED
+                                if rdap_result is not None
+                                else ROUTE_REVIEW
+                            ),
                             row=row,
                             rdap_result=rdap_result,
                             dns_result=dns_result,
@@ -1735,17 +1741,15 @@ def _log_run_summary(
             line_count,
             output_path.stat().st_size,
         )
-    emitted_hosts = writer_result.counts.get("route_normal_output", 0)
+    emitted_hosts = writer_result.counts.get("route_filtered", 0)
     review_hosts = writer_result.counts.get("route_review", 0)
-    filtered_dead_roots = writer_result.counts.get("filtered_dead_root", 0)
-    log.info(
-        "  Total input hosts: %d", emitted_hosts + review_hosts + filtered_dead_roots
-    )
+    dead_hosts = writer_result.counts.get("route_dead", 0)
+    log.info("  Total input hosts: %d", emitted_hosts + review_hosts + dead_hosts)
     log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
     log.info("  Hosts routed to review: %d", review_hosts)
     log.info(
         "  Hosts written to output/dead after RDAP-unregistered verdict: %d",
-        filtered_dead_roots,
+        dead_hosts,
     )
     log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))
     log.info("  Cache refreshes: %d", cache_stats.get("cached_refreshed", 0))

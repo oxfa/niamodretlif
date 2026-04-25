@@ -54,7 +54,13 @@ from ..io.output_manager import (
 )
 from ..io.parser import DomainListParser, InputFileFormat, ParsedDomainEntry
 from ..shared import SourceJob
-from .pure_helpers import build_output_row, route_for_row
+from .pure_helpers import (
+    ROUTE_DEAD,
+    ROUTE_FILTERED,
+    ROUTE_REVIEW,
+    build_output_row,
+    route_for_row,
+)
 from ..settings.constants import (
     GEO_PROVIDER_GEOJS,
     GEO_PROVIDER_IPINFO_LITE,
@@ -63,9 +69,6 @@ from .history import PipelineCache
 from .transports import resolve_geo_token
 
 log = logging.getLogger(__name__)
-ROUTE_NORMAL_OUTPUT = "normal_output"
-ROUTE_REVIEW = "review"
-ROUTE_DROP = "drop"
 GOOGLE_PUBLIC_DNS_NAMESERVERS = [
     "8.8.8.8",
     "8.8.4.4",
@@ -839,10 +842,11 @@ def classify_and_write_source(
             geo_policy_reason = "geo_disabled"
             geo_attempts: list[dict[str, Any]] = []
             dns_status_override: str | None = None
-            route = ROUTE_NORMAL_OUTPUT
+            route = ROUTE_FILTERED
 
             if entry.is_public_suffix_input:
                 classification = CLASSIFICATION_INPUT_PUBLIC_SUFFIX
+                route = ROUTE_REVIEW
                 counts[classification] += 1
                 counts["geo_skipped"] += 1
                 counts["geo_policy_skipped"] += 1
@@ -897,7 +901,6 @@ def classify_and_write_source(
                 else:
                     rdap_result = rdap_cache[root]
                 if rdap_result is not None and not rdap_result.exists:
-                    counts["filtered_dead_root"] += 1
                     log.info(
                         "[%s %d/%d] %s filtered "
                         "(rdap_unregistered_registrable_domain=%s, rdap_source=%s)",
@@ -942,7 +945,8 @@ def classify_and_write_source(
                         dns_status_override="skipped",
                     )
                     dead_rows.append(dead_row)
-                    audit_rows.append(_audit_row(dead_row, route=ROUTE_DROP))
+                    audit_rows.append(_audit_row(dead_row, route=ROUTE_DEAD))
+                    counts["routed_dead"] += 1
                     continue
                 if not dns_enabled:
                     classification = (
@@ -1164,16 +1168,16 @@ def classify_and_write_source(
                 and geo_attempts
             ):
                 row["geo_attempts"] = geo_attempts
-            if route == ROUTE_DROP:
-                counts["routed_drop"] += 1
-                audit_rows.append(_audit_row(row, route=route))
-                continue
             audit_rows.append(_audit_row(row, route=route))
             if route == ROUTE_REVIEW:
                 counts["routed_review"] += 1
                 review_rows.append(row)
                 continue
-            counts["routed_normal_output"] += 1
+            if route == ROUTE_DEAD:
+                counts["routed_dead"] += 1
+                dead_rows.append(row)
+                continue
+            counts["routed_filtered"] += 1
             output_rows.append(row)
         if row_collector is not None:
             row_collector.setdefault("output_rows", []).extend(output_rows)
