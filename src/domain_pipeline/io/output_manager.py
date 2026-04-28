@@ -7,12 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+from ..classifications import PUBLIC_REVIEW_CLASSIFICATIONS
 from ..shared import OUTPUT_SUFFIXES, REVIEW_OUTPUT_FORMAT, SourceJob
 from ..path_layout import DEBUG_ARTIFACTS_DIR
 from ..runtime.pure_helpers import (
-    REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
-    REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
-    REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
     REVIEW_OUTPUT_COLUMNS,
     ReviewOutputRow,
     build_review_output_row,
@@ -81,12 +79,7 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
             input_classification = str(row.get("classification", ""))
             input_reason = str(row.get("classification_reason", ""))
             if (
-                input_classification
-                in {
-                    REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
-                    REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
-                    REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
-                }
+                input_classification in PUBLIC_REVIEW_CLASSIFICATIONS
                 and input_reason
                 and input_reason != review_row["classification_reason"]
             ):
