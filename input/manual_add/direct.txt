@@ -17,6 +17,7 @@ lenovo.net
 shanghai.nyu.edu
 skypixel.com
 tripcdn.com
+uz0.xyz
 # f
 acer.com
 adobe.com
@@ -27,6 +28,8 @@ alphassl.com
 amd.com
 analog.com
 bing.com
+bing.net
+live.com
 bingj.com
 blurdev.com
 cdnetworks.com

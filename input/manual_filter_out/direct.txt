@@ -1,4 +1,5 @@
 # filtered out
+assets.uxengine.net
 0.xn--czrs0t
 0.xn--unup4y
 000.link
@@ -29347,6 +29348,11 @@ whpu.lenovo.com
 xapi.lenovo.com
 xiaoyi.lenovo.com
 yun.lenovo.com
+icc.lenovo.com
+lcp.gtm.lenovo.com
+le-reporting.lenovo.com
+holoway.lenovo.com
+holowaytest.lenovo.com
 zlzpdemo.cube.lenovo.com
 account-api.dji.com
 active.dji.com
@@ -29506,6 +29512,8 @@ sp-webfront.skypixel.com
 spcn-webfront.skypixel.com
 tokyo.skypixel.com
 www.skypixel.com
+wscont1.apps.microsoft.com
+wscont2.apps.microsoft.com
 azuremigrate.download.prss.microsoft.com
 azuremigratetest.download.prss.microsoft.com
 azurestackhub.download.prss.microsoft.com
@@ -29566,6 +29574,7 @@ datk.anythinktech.com
 api.anythinktech.com
 tk.anythinktech.com
 cdn.shanghai.nyu.edu
+cn-ccs-sdc.blurdev.com
 cn-argo-sdc200.blurdev.com
 cn-dlmgr-sdc.blurdev.com
 cn-otaproxy-sdc.blurdev.com
@@ -29575,6 +29584,8 @@ bj1.api.bing.com
 cn.bing.com
 r.bing.com
 th.bing.com
+cn.bing.net
+ditu.live.com
 time.izatcloud.net
 support-cn.samsung.com
 suz-vpn.amd.com
@@ -29602,3 +29613,6 @@ lx3.cok.elexapp.com
 source.tutorabc.com
 crl.globalsign.net
 crl.kaspersky.com
+geo.kaspersky.com
+upd.kaspersky.com
+www.uz0.xyz
