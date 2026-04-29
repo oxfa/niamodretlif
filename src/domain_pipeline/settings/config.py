@@ -19,6 +19,8 @@ from pydantic import (
 )
 
 from domain_pipeline.classifications import (
+    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON,
+    RDAP_UNAVAILABLE_REASON_UNKNOWN,
     ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
@@ -160,6 +162,27 @@ class RDAPConfig(StrictModel):
     """RDAP lookup settings."""
 
     timeout: float = 10.0
+    unavailable_dns_disabled_routes: dict[str, Literal["filtered", "review"]] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("unavailable_dns_disabled_routes", mode="after")
+    @classmethod
+    def _validate_unavailable_dns_disabled_routes(
+        cls,
+        value: dict[str, Literal["filtered", "review"]],
+    ) -> dict[str, Literal["filtered", "review"]]:
+        valid_reasons = set(RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON)
+        valid_reasons.discard(RDAP_UNAVAILABLE_REASON_UNKNOWN)
+        invalid_reasons = sorted(set(value) - valid_reasons)
+        if invalid_reasons:
+            raise ValueError(
+                "rdap.unavailable_dns_disabled_routes keys must be known "
+                "RDAP-unavailable DNS-disabled reasons, excluding "
+                f"{RDAP_UNAVAILABLE_REASON_UNKNOWN!r} "
+                f"(invalid: {', '.join(invalid_reasons)})"
+            )
+        return dict(value)
 
 
 class OutputConfig(StrictModel):

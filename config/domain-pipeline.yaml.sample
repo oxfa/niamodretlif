@@ -27,8 +27,10 @@ version: 2
 # are rejected because manual-add entries must still run through RDAP.
 # Runtime rows use three terminal routes: filtered for positive output, review
 # for uncertain or operator-attention cases, and dead only for RDAP-unregistered
-# ICANN registrable domains. ICANN public suffix inputs and RDAP-unavailable
-# hosts with DNS disabled route to review.
+# ICANN registrable domains. ICANN public suffix inputs route to review unless
+# explicitly approved through manual_filter_pass. RDAP-unavailable hosts with
+# DNS disabled route to review unless rdap.unavailable_dns_disabled_routes maps
+# the specific unavailable reason to filtered.
 # A host must not appear in both manual filter files for the same config.
 # A host must not appear in manual_add and either manual_filter_pass or
 # manual_filter_out for the same config.
@@ -73,6 +75,16 @@ defaults:
   rdap:
     # Per-request RDAP timeout, in seconds.
     timeout: 10.0
+    # Optional per-reason routing policy for RDAP-unavailable hosts when DNS is
+    # disabled. Omitted reasons route to review. Allowed route values are
+    # review and filtered; dead is intentionally unsupported because dead output
+    # is reserved for RDAP-unregistered ICANN registrable domains.
+    unavailable_dns_disabled_routes: {}
+    # Example for RDAP-only block-style configs:
+    # unavailable_dns_disabled_routes:
+    #   rdap_no_authoritative_bootstrap: filtered
+    # Source-level mappings merge with defaults. To override an inherited
+    # reason, set the same reason to review or filtered.
 
   geo:
     # Enable geo lookups and evaluate the resolved IPs against the policy
@@ -184,6 +196,10 @@ sources:
     rdap:
       # Override RDAP behavior for this source only.
       timeout: 10.0
+      # Optional per-source route overrides. Omit this key to inherit the
+      # default mapping above.
+      # unavailable_dns_disabled_routes:
+      #   rdap_no_authoritative_bootstrap: review
     geo:
       # Source-specific geo settings. Explicit fields override defaults; omit
       # nested keys to keep inheriting the matching default values.
@@ -214,7 +230,8 @@ sources:
       # - output/review/domain-pipeline.csv
       #
       # The filtered/dead txt files and review file follow output.directory.
-      # ICANN public suffix inputs and RDAP-unavailable DNS-disabled hosts write
-      # review rows instead of filtered or dead rows, except when an ICANN
-      # public suffix input is explicitly approved through manual_filter_pass.
+      # ICANN public suffix inputs write review rows instead of filtered or dead
+      # rows, except when explicitly approved through manual_filter_pass.
+      # RDAP-unavailable DNS-disabled hosts write review rows unless the
+      # specific RDAP-unavailable reason is mapped to filtered under rdap.
       directory: output
