@@ -15,9 +15,9 @@ permissions:
   actions: read
 
 # Optional per-config manual files:
-# - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
+# manual_filter_pass is intentionally unsupported for this RDAP-only config.
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml

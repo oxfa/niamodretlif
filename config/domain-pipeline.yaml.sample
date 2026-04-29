@@ -11,11 +11,15 @@ version: 2
 # - input/manual_add/<config-stem>.txt
 # The manual-pass file is only supported when all enabled sources in the config
 # have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
-# in workflow-owned runtime. Hosts listed there still run through RDAP, but
-# bypass DNS and geo. RDAP-unregistered roots still route to dead output;
-# otherwise they are emitted to the filtered output for that config.
+# in workflow-owned runtime. Hosts listed there run through RDAP when they have
+# a registrable root, but bypass DNS and geo. RDAP-unregistered roots still
+# route to dead output; otherwise matched hosts are emitted to the filtered
+# output for that config.
 # The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
 # and emits review rows only.
+# manual_filter_pass entries that are public suffix inputs have no registrable
+# root to query, so explicit approval sends them directly to filtered output with
+# RDAP/DNS/geo skipped.
 # The manual-add file is config-scoped, always skips DNS/geo, and is validated
 # against the config's shared RDAP settings. RDAP-registered roots are emitted
 # to filtered output, while RDAP-unregistered or RDAP-unavailable roots emit
@@ -207,5 +211,6 @@ sources:
       #
       # The filtered/dead txt files and review file follow output.directory.
       # Public suffix inputs and RDAP-unavailable DNS-disabled hosts write
-      # review rows instead of filtered or dead rows.
+      # review rows instead of filtered or dead rows, except when a public
+      # suffix input is explicitly approved through manual_filter_pass.
       directory: output

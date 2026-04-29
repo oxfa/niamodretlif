@@ -538,21 +538,32 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
     async def _emit_manual_filter_pass(
         self, parsed: ParsedHostItem, rdap_result: RDAPResult | None
     ) -> None:
-        """Emit one manually approved host after RDAP, skipping DNS and geo."""
-        log.info(
-            "[%s %d/%d] %s bypassed DNS/geo via manual filter-pass file %s "
-            "(rdap=%s)",
-            parsed.job.source_id,
-            parsed.sequence,
-            parsed.total,
-            parsed.entry.host,
-            parsed.job.input_label,
-            (
-                "registered"
-                if rdap_result is not None and rdap_result.exists
-                else "unavailable"
-            ),
-        )
+        """Emit one manually approved host, skipping unavailable downstream stages."""
+        if parsed.entry.is_public_suffix_input:
+            log.info(
+                "[%s %d/%d] %s bypassed RDAP/DNS/geo via manual filter-pass file %s "
+                "because input is a public suffix with no registrable root",
+                parsed.job.source_id,
+                parsed.sequence,
+                parsed.total,
+                parsed.entry.host,
+                parsed.job.input_label,
+            )
+        else:
+            log.info(
+                "[%s %d/%d] %s bypassed DNS/geo via manual filter-pass file %s "
+                "(rdap=%s)",
+                parsed.job.source_id,
+                parsed.sequence,
+                parsed.total,
+                parsed.entry.host,
+                parsed.job.input_label,
+                (
+                    "registered"
+                    if rdap_result is not None and rdap_result.exists
+                    else "unavailable"
+                ),
+            )
         dns_result = DNSResult(
             host=parsed.entry.host,
             a_exists=False,
@@ -812,6 +823,14 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             host=parsed.entry.host,
                         )
                         break
+                    if (
+                        parsed.entry.is_public_suffix_input
+                        and parsed.manual_filter_pass
+                    ):
+                        # Manual approval is the only path that can emit a
+                        # public-suffix input without a registrable RDAP root.
+                        await self._emit_manual_filter_pass(parsed, None)
+                        continue
                     if parsed.entry.is_public_suffix_input:
                         await self._emit_public_suffix_guard(parsed)
                         continue
