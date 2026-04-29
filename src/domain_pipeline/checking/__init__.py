@@ -6,6 +6,7 @@ from .domain_checker import (
     DomainChecker,
     MissingAuthoritativeBootstrapError,
     RDAPResult,
+    RDAPUnavailableInfo,
     RDAPUnavailableError,
     classify,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "IPInfoLiteProvider",
     "MissingAuthoritativeBootstrapError",
     "RDAPResult",
+    "RDAPUnavailableInfo",
     "RDAPUnavailableError",
     "build_geo_provider",
     "classify",

@@ -39,6 +39,8 @@ Usage example:
 
 from __future__ import annotations
 
+# pylint: disable=too-many-lines
+
 import dataclasses
 import email.utils
 import ipaddress
@@ -68,6 +70,21 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
     CLASSIFICATION_RDAP_STATUS_DELETION_OTHER,
     CLASSIFICATION_RDAP_STATUS_HOLD_OTHER,
+    RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS,
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501,
+    RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON,
+    RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
+    RDAP_UNAVAILABLE_REASON_BY_QUERY_RETRY_HTTP_STATUS,
+    RDAP_UNAVAILABLE_REASON_UNKNOWN,
     RDAP_STATUS_CLASSIFICATION_ORDER,
     RDAP_STATUS_CLASSIFICATIONS,
 )
@@ -80,12 +97,41 @@ class MissingAuthoritativeBootstrapError(RuntimeError):
     """Raised when the IANA bootstrap has no authoritative RDAP entry."""
 
 
+@dataclasses.dataclass(frozen=True)
+class RDAPUnavailableInfo:
+    """Structured reason metadata for an RDAP-unavailable verdict."""
+
+    reason: str
+    message: str
+    cache_classification: str | None = None
+    http_status: int | None = None
+
+
 class RDAPUnavailableError(RuntimeError):
     """Raised when RDAP cannot produce a semantic 200/404 verdict."""
 
+    def __init__(
+        self,
+        info: RDAPUnavailableInfo | str,
+        *,
+        reason: str = RDAP_UNAVAILABLE_REASON_UNKNOWN,
+        cache_classification: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
+        if isinstance(info, RDAPUnavailableInfo):
+            self.info = info
+        else:
+            self.info = RDAPUnavailableInfo(
+                reason=reason,
+                message=str(info),
+                cache_classification=cache_classification,
+                http_status=http_status,
+            )
+        super().__init__(self.info.message)
+
 
 class CacheableRDAPUnavailableError(RDAPUnavailableError):
-    """Raised for RDAP-unavailable states that should be cached."""
+    """Raised for RDAP-unavailable states that carry a reusable root cache class."""
 
 
 class RetryableRDAPError(RuntimeError):
@@ -112,6 +158,41 @@ class RetryableRDAPTransportError(RetryableRDAPError):
 
 class RetryableDNSLookupError(RuntimeError):
     """Raised for transient DNS failures that should be retried."""
+
+
+def _rdap_unavailable_info(
+    *,
+    reason: str,
+    message: str,
+    cache_classification: str | None = None,
+    http_status: int | None = None,
+) -> RDAPUnavailableInfo:
+    """Build structured RDAP-unavailable metadata."""
+    return RDAPUnavailableInfo(
+        reason=reason,
+        message=message,
+        cache_classification=cache_classification,
+        http_status=http_status,
+    )
+
+
+def _query_retry_http_unavailable_info(
+    exc: RetryableRDAPHTTPStatusError,
+) -> RDAPUnavailableInfo:
+    """Return cacheable query metadata for an exhausted retryable HTTP status."""
+    status_code = exc.response.status_code
+    reason = RDAP_UNAVAILABLE_REASON_BY_QUERY_RETRY_HTTP_STATUS.get(
+        status_code,
+        RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
+    )
+    return _rdap_unavailable_info(
+        reason=reason,
+        message=str(exc),
+        cache_classification=RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON.get(
+            reason
+        ),
+        http_status=status_code,
+    )
 
 
 @dataclasses.dataclass
@@ -367,25 +448,56 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
 
     def _load_bootstrap_services(self) -> Dict[str, List[str]]:
         """Fetch and parse the IANA RDAP DNS bootstrap registry."""
-        response = self._get_with_rdap_retry_policy(
-            self.IANA_DNS_BOOTSTRAP_URL,
-            "bootstrap",
-        )
+        try:
+            response = self._get_with_rdap_retry_policy(
+                self.IANA_DNS_BOOTSTRAP_URL,
+                "bootstrap",
+            )
+        except RetryableRDAPHTTPStatusError as exc:
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED,
+                    message=str(exc),
+                    http_status=exc.response.status_code,
+                )
+            ) from exc
+        except RetryableRDAPTransportError as exc:
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED,
+                    message=str(exc),
+                )
+            ) from exc
 
         if response.status_code != 200:
-            raise RuntimeError(
-                f"bootstrap request returned unexpected status {response.status_code}"
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS,
+                    message=(
+                        "bootstrap request returned unexpected status "
+                        f"{response.status_code}"
+                    ),
+                    http_status=response.status_code,
+                )
             )
 
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:
-            raise RuntimeError("bootstrap response is not valid JSON") from exc
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON,
+                    message="bootstrap response is not valid JSON",
+                )
+            ) from exc
 
         services = payload.get("services")
         if not isinstance(services, list):
-            raise RuntimeError(
-                "bootstrap response does not contain a valid services array"
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES,
+                    message="bootstrap response does not contain a valid services array",
+                )
             )
 
         parsed_services: Dict[str, List[str]] = {}
@@ -473,10 +585,24 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         """GET a fully resolved RDAP URL and return a semantic verdict."""
         try:
             resp = self._get_with_rdap_retry_policy(url, f"RDAP query for {domain}")
-        except RetryableRDAPError as exc:
+        except RetryableRDAPHTTPStatusError as exc:
             # Cache retry-exhausted lookup failures only after we know the final
             # per-root RDAP query URL. Bootstrap/setup failures stay non-cacheable.
-            raise CacheableRDAPUnavailableError(str(exc)) from exc
+            raise CacheableRDAPUnavailableError(
+                _query_retry_http_unavailable_info(exc)
+            ) from exc
+        except RetryableRDAPTransportError as exc:
+            raise CacheableRDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED,
+                    message=str(exc),
+                    cache_classification=(
+                        RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON[
+                            RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED
+                        ]
+                    ),
+                )
+            ) from exc
         return self._parse_rdap_response(resp, domain)
 
     def _parse_rdap_response(
@@ -488,7 +614,10 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
                 data = response.json()
             except json.JSONDecodeError as exc:
                 raise RDAPUnavailableError(
-                    f"RDAP response for {domain} is not valid JSON"
+                    _rdap_unavailable_info(
+                        reason=RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON,
+                        message=f"RDAP response for {domain} is not valid JSON",
+                    )
                 ) from exc
             statuses: List[str] = []
             if isinstance(data, dict):
@@ -527,7 +656,26 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
                 response.status_code,
             )
             raise CacheableRDAPUnavailableError(
-                f"RDAP query for {domain} returned HTTP {response.status_code}"
+                _rdap_unavailable_info(
+                    reason=(
+                        RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400
+                        if response.status_code == 400
+                        else RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501
+                    ),
+                    message=(
+                        f"RDAP query for {domain} returned HTTP {response.status_code}"
+                    ),
+                    cache_classification=(
+                        RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON[
+                            (
+                                RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400
+                                if response.status_code == 400
+                                else RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501
+                            )
+                        ]
+                    ),
+                    http_status=response.status_code,
+                )
             )
         logger.debug(
             "Authoritative RDAP query for %s returned unexpected non-cacheable "
@@ -537,7 +685,11 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         )
 
         raise RDAPUnavailableError(
-            f"Unexpected RDAP status {response.status_code} for {domain}"
+            _rdap_unavailable_info(
+                reason=RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
+                message=f"Unexpected RDAP status {response.status_code} for {domain}",
+                http_status=response.status_code,
+            )
         )
 
     def rdap_lookup(
@@ -574,10 +726,28 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
             )
         except MissingAuthoritativeBootstrapError as exc:
             logger.info("RDAP lookup setup for %s skipped: %s", domain, exc)
-            raise CacheableRDAPUnavailableError(str(exc)) from exc
+            raise CacheableRDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+                    message=str(exc),
+                    cache_classification=(
+                        RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON[
+                            RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP
+                        ]
+                    ),
+                )
+            ) from exc
+        except RDAPUnavailableError as exc:
+            logger.warning("RDAP lookup setup for %s failed: %s", domain, exc)
+            raise
         except RuntimeError as exc:
             logger.warning("RDAP lookup setup for %s failed: %s", domain, exc)
-            raise RDAPUnavailableError(str(exc)) from exc
+            raise RDAPUnavailableError(
+                _rdap_unavailable_info(
+                    reason=RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED,
+                    message=str(exc),
+                )
+            ) from exc
         return self._perform_rdap_request(url, self._normalize_lookup_domain(domain))
 
     # ------------------------------------------------------------------
