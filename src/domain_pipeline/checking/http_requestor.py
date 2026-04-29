@@ -31,6 +31,9 @@ class HTTPRetryPolicy:
         default_factory=frozenset
     )
     status_delay_overrides: dict[int, float] = dataclasses.field(default_factory=dict)
+    status_fallback_wait_seconds: dict[int, tuple[float, ...]] = dataclasses.field(
+        default_factory=dict
+    )
     backoff_multiplier: float = 0.5
     backoff_min: float = 0.5
     backoff_max: float = 30.0
@@ -120,6 +123,15 @@ class HTTPRequester:
                 retry_after_seconds = self._retry_after_seconds(response)
                 if retry_after_seconds is not None:
                     return float(retry_after_seconds)
+            fallback_waits = self.retry_policy.status_fallback_wait_seconds.get(
+                status_code
+            )
+            if fallback_waits:
+                fallback_index = min(
+                    retry_state.attempt_number - 1,
+                    len(fallback_waits) - 1,
+                )
+                return float(fallback_waits[fallback_index])
         return float(
             wait_exponential(
                 multiplier=self.retry_policy.backoff_multiplier,

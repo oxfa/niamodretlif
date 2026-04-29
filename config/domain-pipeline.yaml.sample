@@ -75,6 +75,14 @@ defaults:
   rdap:
     # Per-request RDAP timeout, in seconds.
     timeout: 10.0
+    # Fallback retry waits, in seconds, for RDAP HTTP 429 rate-limit responses
+    # that do not include a usable Retry-After header. A valid Retry-After
+    # response header takes precedence over this sequence. If retries exceed
+    # the sequence length, the final value is reused.
+    rate_limit_retry_fallback_seconds:
+      - 30.0
+      - 60.0
+      - 120.0
     # Optional per-reason routing policy for RDAP-unavailable hosts when DNS is
     # disabled. Omitted reasons route to review. Allowed route values are
     # review and filtered; dead is intentionally unsupported because dead output

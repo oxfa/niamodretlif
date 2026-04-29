@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import ipaddress
+import math
 import os
 from pathlib import Path
 import re
@@ -162,9 +163,29 @@ class RDAPConfig(StrictModel):
     """RDAP lookup settings."""
 
     timeout: float = 10.0
+    rate_limit_retry_fallback_seconds: tuple[float, ...] = (
+        30.0,
+        60.0,
+        120.0,
+    )
     unavailable_dns_disabled_routes: dict[str, Literal["filtered", "review"]] = Field(
         default_factory=dict
     )
+
+    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
+    @classmethod
+    def _validate_rate_limit_retry_fallback_seconds(
+        cls, value: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        if not value:
+            raise ValueError("rdap.rate_limit_retry_fallback_seconds must be non-empty")
+        for seconds in value:
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError(
+                    "rdap.rate_limit_retry_fallback_seconds entries must be "
+                    "finite non-negative numbers"
+                )
+        return tuple(float(seconds) for seconds in value)
 
     @field_validator("unavailable_dns_disabled_routes", mode="after")
     @classmethod

@@ -217,6 +217,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.dns_transports: dict[str, AsyncDNSTransport] = {}
         self.geo_transports: dict[str, AsyncGeoTransport] = {}
         self.root_tasks: dict[str, asyncio.Task[RDAPResult]] = {}
+        self.rdap_server_locks: dict[str, asyncio.Lock] = {}
         self.prepared_unavailable_cache_written_roots: set[str] = set()
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
@@ -1038,21 +1039,33 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
 
     async def _live_rdap_lookup(self, parsed: ParsedHostItem) -> RDAPResult:
         transport = self.rdap_transport_for(parsed.job.source_id, parsed.job.config)
-        if parsed.prepared_authoritative_base_url is not None:
+        authoritative_base_url = parsed.prepared_authoritative_base_url
+        if authoritative_base_url is not None:
             log.debug(
                 "[%s %d/%d] %s using precomputed authoritative RDAP base URL %s for root=%s",
                 parsed.job.source_id,
                 parsed.sequence,
                 parsed.total,
                 parsed.entry.host,
-                parsed.prepared_authoritative_base_url,
+                authoritative_base_url,
                 parsed.entry.registrable_domain,
             )
         try:
-            rdap_result = await transport.lookup(
-                parsed.entry.registrable_domain,
-                authoritative_base_url=parsed.prepared_authoritative_base_url,
-            )
+            if authoritative_base_url is None:
+                rdap_result = await transport.lookup(
+                    parsed.entry.registrable_domain,
+                    authoritative_base_url=None,
+                )
+            else:
+                lock = self.rdap_server_locks.setdefault(
+                    authoritative_base_url,
+                    asyncio.Lock(),
+                )
+                async with lock:
+                    rdap_result = await transport.lookup(
+                        parsed.entry.registrable_domain,
+                        authoritative_base_url=authoritative_base_url,
+                    )
         except CacheableRDAPUnavailableError as exc:
             ttl_days = int(
                 self.config["cache"]["classification_ttl_days"][
