@@ -8410,6 +8410,7 @@ appbsl.com
 appbz.info
 appbza.com
 appchina.com
+appchizi.com
 appcms.org
 appcoo.com
 appcool.com
@@ -8440,6 +8441,7 @@ applebl.com
 applemei.com
 applepopo.com
 applezhang.com
+applinzi.com
 applogcdn.com
 applon.net
 applysquare.com
@@ -17048,6 +17050,7 @@ cmgos.com
 cmgrasp.com
 cmhijs.com
 cmhk.com
+cn
 cmic.site
 cmicapm.com
 cmiotcd.com
@@ -65481,6 +65484,7 @@ simxhs.com
 sin0sites.com
 sina.com
 sina.net
+sinaapp.com
 sinacdn.com
 sinacloud.com
 sinacloud.net
@@ -73926,6 +73930,7 @@ vipshare.com
 vipshop.com
 vipshou.com
 vipskill.com
+vipsinaapp.com
 vipslib.com
 vipsmt.com
 vipsoft.cc

@@ -4,7 +4,8 @@ This package processes host lists in three stages:
 
 1. ``DomainListParser`` extracts and normalizes exact hosts from supported
    input formats, derives the registrable domain for each host, and removes
-   duplicates within the current input.
+   duplicates within the current input. Inputs with no registrable domain are
+   handled by the public-suffix guard or by explicit manual-pass approval.
 2. RDAP is consulted only at the registrable-domain level to decide whether a
    registrable domain is unregistered. When a registrable domain is proven
    unregistered, that domain and every input host under it are written to the

@@ -6,7 +6,10 @@ version: 2
 # - input/manual_add/direct.txt
 # manual_add entries still run through RDAP, always skip DNS/geo, emit
 # registered roots to filtered output, and emit unregistered/unavailable roots
-# to review instead of dead output.
+# to review instead of dead output. manual_filter_pass entries run through RDAP
+# when they have a registrable root, then skip DNS/geo. Public-suffix
+# manual_filter_pass inputs have no registrable root to query, so explicit
+# approval sends them directly to filtered output with RDAP/DNS/geo skipped.
 
 defaults:
   fetch:
