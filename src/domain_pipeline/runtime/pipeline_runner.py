@@ -59,6 +59,7 @@ from .pure_helpers import (
     ROUTE_REVIEW,
     build_output_row,
     rdap_unavailable_dns_disabled_classification,
+    route_for_rdap_dns_disabled,
     route_for_row,
 )
 from ..settings.constants import (
@@ -986,6 +987,11 @@ def classify_and_write_source(
                             else "(none)"
                         ),
                     )
+                    route = route_for_rdap_dns_disabled(
+                        rdap_config=job.config.get("rdap", {}),
+                        rdap_result=rdap_result,
+                        rdap_unavailable=rdap_unavailable,
+                    )
                 else:
                     classification, rdap_result, dns_result, dns_stats = (
                         classify_host_with_cached_dns(
@@ -1154,7 +1160,12 @@ def classify_and_write_source(
                     geo_stats.get("geo_cache_hits", 0),
                     geo_stats.get("geo_cache_misses", 0),
                 )
-                route = route_for_row(classification, geo_policy_status, geo_reason)
+                if dns_enabled:
+                    route = route_for_row(
+                        classification,
+                        geo_policy_status,
+                        geo_reason,
+                    )
 
             row = build_output_row(
                 job,

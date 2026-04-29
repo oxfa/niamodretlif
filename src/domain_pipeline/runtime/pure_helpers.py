@@ -124,6 +124,29 @@ ROUTE_FILTERED = "filtered"
 ROUTE_REVIEW = "review"
 ROUTE_DEAD = "dead"
 
+
+def route_for_rdap_dns_disabled(
+    *,
+    rdap_config: dict[str, Any],
+    rdap_result: RDAPResult | None,
+    rdap_unavailable: RDAPUnavailableInfo | None,
+) -> ResultRoute:
+    """Return the configured terminal route after RDAP when DNS is disabled."""
+    if rdap_result is not None:
+        return ROUTE_FILTERED
+    if rdap_unavailable is None:
+        return ROUTE_REVIEW
+    route_mapping = rdap_config.get("unavailable_dns_disabled_routes", {})
+    if not isinstance(route_mapping, dict):
+        return ROUTE_REVIEW
+    configured_route = route_mapping.get(rdap_unavailable.reason)
+    if configured_route == ROUTE_FILTERED:
+        return ROUTE_FILTERED
+    if configured_route == ROUTE_REVIEW:
+        return ROUTE_REVIEW
+    return ROUTE_REVIEW
+
+
 RDAP_UNAVAILABLE_REASON_TEXT = {
     RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP: (
         "RDAP has no authoritative bootstrap server and DNS is disabled"

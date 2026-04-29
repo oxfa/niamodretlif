@@ -84,6 +84,7 @@ from .pure_helpers import (
     build_output_row,
     classify_host_from_results,
     rdap_unavailable_dns_disabled_classification,
+    route_for_rdap_dns_disabled,
     route_for_row,
 )
 from .transports import (
@@ -1330,10 +1331,10 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                                     rdap_unavailable
                                 )
                             ),
-                            route=(
-                                ROUTE_FILTERED
-                                if rdap_result is not None
-                                else ROUTE_REVIEW
+                            route=route_for_rdap_dns_disabled(
+                                rdap_config=parsed.job.config.get("rdap", {}),
+                                rdap_result=rdap_result,
+                                rdap_unavailable=rdap_unavailable,
                             ),
                             row=row,
                             rdap_result=rdap_result,

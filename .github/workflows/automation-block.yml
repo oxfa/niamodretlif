@@ -18,6 +18,7 @@ permissions:
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
 # manual_filter_pass is intentionally unsupported for this RDAP-only config.
+# config/block.yaml maps rdap_no_authoritative_bootstrap DNS-disabled rows to filtered.
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml
