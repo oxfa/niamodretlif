@@ -353,10 +353,7 @@ def _prepared_sources_payload(
         source_entries.items(),
         key=lambda item: (item[1][0].source_index, item[0]),
     ):
-        ordered_entries = sorted(
-            entries,
-            key=lambda current: (current.line_index, current.entry.host),
-        )
+        ordered_entries = list(entries)
         sources_payload[source_id] = {
             "source_index": ordered_entries[0].source_index,
             "entries": [
@@ -639,6 +636,90 @@ def _planning_inputs_from_prepared(
     )
 
 
+def _entry_sort_key(entry: PreparedHostEntry) -> tuple[int, int, str]:
+    """Return the stable source-order key for one prepared host entry."""
+    return (entry.source_index, entry.line_index, entry.entry.host)
+
+
+def _ordered_entries_for_root(
+    planning_inputs: PreparedBatchPlanningInputs,
+    registrable_domain: str,
+) -> list[PreparedHostEntry]:
+    """Return one root's entries in deterministic source order."""
+    return sorted(
+        planning_inputs.eligible_root_entries[registrable_domain],
+        key=_entry_sort_key,
+    )
+
+
+def _round_robin_resolved_roots_by_server(
+    *,
+    root_plans: dict[str, PreparedRootPlan],
+) -> list[str]:
+    """Return assigned resolved roots interleaved by authoritative RDAP server."""
+    server_to_roots: dict[str, list[str]] = defaultdict(list)
+    for registrable_domain, plan in sorted(root_plans.items()):
+        if plan.status != "resolved" or plan.authoritative_base_url is None:
+            continue
+        server_to_roots[plan.authoritative_base_url].append(registrable_domain)
+
+    ordered_servers = sorted(server_to_roots)
+    server_queues = {
+        server: list(reversed(sorted(roots)))
+        for server, roots in server_to_roots.items()
+        if roots
+    }
+    ordered_roots: list[str] = []
+    while server_queues:
+        exhausted_servers: list[str] = []
+        for server in ordered_servers:
+            roots = server_queues.get(server)
+            if roots is None:
+                continue
+            ordered_roots.append(roots.pop())
+            if not roots:
+                exhausted_servers.append(server)
+        for server in exhausted_servers:
+            server_queues.pop(server, None)
+    return ordered_roots
+
+
+def _reorder_worker_entries_by_rdap_server(
+    *,
+    planning_inputs: PreparedBatchPlanningInputs,
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
+    worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
+) -> None:
+    """Interleave each worker's live-RDAP roots by authoritative server."""
+    entry_ids_by_source: dict[str, set[int]] = defaultdict(set)
+    for entries_by_source in worker_source_entries.values():
+        for source_id, entries in entries_by_source.items():
+            entry_ids_by_source[source_id].update(id(entry) for entry in entries)
+
+    for worker_id, root_plans in worker_root_plans.items():
+        ordered_live_entries: dict[str, list[PreparedHostEntry]] = defaultdict(list)
+        ordered_live_entry_ids: dict[str, set[int]] = defaultdict(set)
+        for registrable_domain in _round_robin_resolved_roots_by_server(
+            root_plans=root_plans
+        ):
+            for entry in _ordered_entries_for_root(planning_inputs, registrable_domain):
+                if id(entry) not in entry_ids_by_source[entry.source_id]:
+                    continue
+                ordered_live_entries[entry.source_id].append(entry)
+                ordered_live_entry_ids[entry.source_id].add(id(entry))
+
+        for source_id, entries in list(worker_source_entries[worker_id].items()):
+            live_entries = ordered_live_entries.get(source_id, [])
+            live_entry_ids = ordered_live_entry_ids.get(source_id, set())
+            fallback_entries = [
+                entry for entry in entries if id(entry) not in live_entry_ids
+            ]
+            worker_source_entries[worker_id][source_id] = [
+                *live_entries,
+                *fallback_entries,
+            ]
+
+
 def _assign_prepared_entries_to_workers(
     *,
     planning_inputs: PreparedBatchPlanningInputs,
@@ -675,13 +756,8 @@ def _assign_prepared_entries_to_workers(
     }
 
     def assign_root(worker_id: str, registrable_domain: str) -> None:
-        for prepared_entry in sorted(
-            planning_inputs.eligible_root_entries[registrable_domain],
-            key=lambda current: (
-                current.source_index,
-                current.line_index,
-                current.entry.host,
-            ),
+        for prepared_entry in _ordered_entries_for_root(
+            planning_inputs, registrable_domain
         ):
             worker_source_entries[worker_id][prepared_entry.source_id].append(
                 prepared_entry
@@ -758,11 +834,7 @@ def _assign_prepared_entries_to_workers(
 
     for prepared_entry in sorted(
         planning_inputs.public_suffix_entries,
-        key=lambda current: (
-            current.source_index,
-            current.line_index,
-            current.entry.host,
-        ),
+        key=_entry_sort_key,
     ):
         worker_id = _choose_balanced_worker(
             worker_ids=worker_ids,
@@ -777,6 +849,11 @@ def _assign_prepared_entries_to_workers(
             prepared_entry.entry.host,
             worker_id,
         )
+    _reorder_worker_entries_by_rdap_server(
+        planning_inputs=planning_inputs,
+        worker_source_entries=worker_source_entries,
+        worker_root_plans=worker_root_plans,
+    )
     _log_prepared_assignment_summary(
         worker_ids=worker_ids,
         worker_source_entries=worker_source_entries,

@@ -179,18 +179,22 @@ def _rdap_unavailable_info(
 def _query_retry_http_unavailable_info(
     exc: RetryableRDAPHTTPStatusError,
 ) -> RDAPUnavailableInfo:
-    """Return cacheable query metadata for an exhausted retryable HTTP status."""
+    """Return query metadata for an exhausted retryable HTTP status."""
     status_code = exc.response.status_code
     reason = RDAP_UNAVAILABLE_REASON_BY_QUERY_RETRY_HTTP_STATUS.get(
         status_code,
         RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
     )
+    cache_classification = RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON.get(reason)
+    if status_code == 429:
+        # Rate limits are transient. Keep the emitted unavailable metadata, but
+        # avoid storing a reusable root-cache verdict that would suppress future
+        # live RDAP attempts after the limit clears.
+        cache_classification = None
     return _rdap_unavailable_info(
         reason=reason,
         message=str(exc),
-        cache_classification=RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON.get(
-            reason
-        ),
+        cache_classification=cache_classification,
         http_status=status_code,
     )
 
@@ -300,6 +304,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
     RDAP_MODE_AUTHORITATIVE = "authoritative"
     MAX_RDAP_RETRY_ATTEMPTS = 4
     MAX_DNS_RETRY_ATTEMPTS = 3
+    DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS = (30.0, 60.0, 120.0)
 
     #: EPP status codes which indicate a domain is registered but not
     #: published in the DNS. When any of these are present, the domain is
@@ -324,6 +329,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         dns_timeout: float = 5.0,
         resolver: Optional[dns.resolver.Resolver] = None,
         rdap_mode: str = RDAP_MODE_AUTHORITATIVE,
+        rdap_rate_limit_retry_fallback_seconds: tuple[float, ...] | None = None,
     ) -> None:
         if rdap_mode != self.RDAP_MODE_AUTHORITATIVE:
             raise ValueError(
@@ -332,6 +338,10 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         self.rdap_timeout = rdap_timeout
         self.dns_timeout = dns_timeout
         self.rdap_mode = self.RDAP_MODE_AUTHORITATIVE
+        if rdap_rate_limit_retry_fallback_seconds is None:
+            rdap_rate_limit_retry_fallback_seconds = (
+                self.DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS
+            )
         self.session = requests.Session()
         self._rdap_requestor = HTTPRequester(
             session=self.session,
@@ -341,6 +351,9 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
                 retryable_status_codes=frozenset({408, 429, 502, 503, 504}),
                 retry_after_status_codes=frozenset({429, 503}),
                 status_delay_overrides={408: 0.0},
+                status_fallback_wait_seconds={
+                    429: tuple(rdap_rate_limit_retry_fallback_seconds)
+                },
                 backoff_multiplier=0.5,
                 backoff_min=0.5,
                 backoff_max=30.0,

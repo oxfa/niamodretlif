@@ -1262,4 +1262,10 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
         rdap_timeout=source_config["rdap"]["timeout"],
         dns_timeout=dns_config["timeout"],
         resolver=resolver,
+        rdap_rate_limit_retry_fallback_seconds=tuple(
+            source_config["rdap"].get(
+                "rate_limit_retry_fallback_seconds",
+                DomainChecker.DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS,
+            )
+        ),
     )
