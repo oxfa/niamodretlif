@@ -36,6 +36,27 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_RDAP_STATUS_SERVER_HOLD,
     GEO_REVIEW_CLASSIFICATIONS,
     PUBLIC_REVIEW_CLASSIFICATIONS,
+    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON,
+    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS,
+    RDAP_UNAVAILABLE_REASON_BY_DNS_DISABLED_CLASSIFICATION,
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_408_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_502_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_503_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_504_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON,
+    RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED,
+    RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
+    RDAP_UNAVAILABLE_REASON_UNKNOWN,
     RDAP_STATUS_CLASSIFICATION_ORDER,
     RDAP_STATUS_CLASSIFICATIONS,
     RDAP_REVIEW_CLASSIFICATIONS,
@@ -49,7 +70,13 @@ from domain_pipeline.classifications import (
     ROUTE_FILTERED_CLASSIFICATIONS,
     ROUTE_REVIEW_CLASSIFICATIONS,
 )
-from ..checking import DNSResult, IPGeoProvider, IPGeoResult, RDAPResult
+from ..checking import (
+    DNSResult,
+    IPGeoProvider,
+    IPGeoResult,
+    RDAPResult,
+    RDAPUnavailableInfo,
+)
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
 from .contracts import ResultRoute
@@ -96,6 +123,90 @@ class ReviewOutputRow(TypedDict):
 ROUTE_FILTERED = "filtered"
 ROUTE_REVIEW = "review"
 ROUTE_DEAD = "dead"
+
+RDAP_UNAVAILABLE_REASON_TEXT = {
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP: (
+        "RDAP has no authoritative bootstrap server and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED: (
+        "RDAP bootstrap transport retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED: (
+        "RDAP bootstrap retryable HTTP status retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS: (
+        "RDAP bootstrap returned an unexpected HTTP status and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON: (
+        "RDAP bootstrap returned malformed JSON and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES: (
+        "RDAP bootstrap returned malformed services and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED: (
+        "RDAP bootstrap setup failed and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON: (
+        "RDAP authoritative query returned malformed JSON and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS: (
+        "RDAP authoritative query returned an unexpected HTTP status and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED: (
+        "RDAP authoritative query transport retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400: (
+        "RDAP authoritative query returned HTTP 400 and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501: (
+        "RDAP authoritative query returned HTTP 501 and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_408_RETRY_EXHAUSTED: (
+        "RDAP authoritative query HTTP 408 retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED: (
+        "RDAP authoritative query HTTP 429 retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_502_RETRY_EXHAUSTED: (
+        "RDAP authoritative query HTTP 502 retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_503_RETRY_EXHAUSTED: (
+        "RDAP authoritative query HTTP 503 retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_504_RETRY_EXHAUSTED: (
+        "RDAP authoritative query HTTP 504 retry exhausted and DNS is disabled"
+    ),
+    RDAP_UNAVAILABLE_REASON_UNKNOWN: "RDAP lookup was unavailable and DNS is disabled",
+}
+
+
+def rdap_unavailable_dns_disabled_classification(
+    rdap_unavailable: RDAPUnavailableInfo | None,
+) -> str:
+    """Return the internal DNS-disabled class for one unavailable RDAP reason."""
+    reason = (
+        rdap_unavailable.reason
+        if rdap_unavailable is not None
+        else RDAP_UNAVAILABLE_REASON_UNKNOWN
+    )
+    return RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON.get(
+        reason,
+        CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
+    )
+
+
+def _rdap_unavailable_reason_text(row: dict[str, Any]) -> str:
+    """Return a user-facing review reason for RDAP-unavailable DNS-disabled rows."""
+    reason = str(row.get("rdap_unavailable_reason", ""))
+    if not reason:
+        reason = RDAP_UNAVAILABLE_REASON_BY_DNS_DISABLED_CLASSIFICATION.get(
+            str(row.get("classification", "")),
+            RDAP_UNAVAILABLE_REASON_UNKNOWN,
+        )
+    return RDAP_UNAVAILABLE_REASON_TEXT.get(
+        reason,
+        "RDAP lookup was unavailable and DNS is disabled",
+    )
 
 
 def _registered_domain_subject(row: dict[str, Any]) -> str:
@@ -194,6 +305,8 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         return "geo policy rejected resolved IPs"
     if classification in reason_by_classification:
         return reason_by_classification[classification]
+    if classification in RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS:
+        return _rdap_unavailable_reason_text(row)
     if classification:
         return classification
     return "review routing triggered without a recorded classification"
@@ -218,6 +331,7 @@ def review_classification_for_row(row: dict[str, Any]) -> str:
         return REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT
     if (
         classification == CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
+        or classification in RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS
         or classification in RDAP_REVIEW_CLASSIFICATIONS
     ):
         return REVIEW_CLASSIFICATION_RDAP_FILTERED_OUT
@@ -333,13 +447,18 @@ def build_output_row(
     geo_policy_reason: str,
     provider: IPGeoProvider | None,
     *,
+    rdap_unavailable: RDAPUnavailableInfo | None = None,
     dns_status_override: str | None = None,
     source_id_override: str | None = None,
     source_input_label_override: str | None = None,
     source_ids_override: list[str] | None = None,
     source_input_labels_override: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build the full audit row for one processed host."""
+    """Build the full audit row for one processed host.
+
+    RDAP-unavailable metadata is raw/terminal JSONL-only; review CSV projection
+    keeps the existing column set.
+    """
     effective_geo_provider = str(
         job.config.get("geo", {}).get("effective_provider", "")
     )
@@ -352,7 +471,7 @@ def build_output_row(
         or geo_reason == "lookup_succeeded"
     ):
         geo_provider_name = effective_geo_provider
-    return {
+    row: dict[str, Any] = {
         **row_identity_fields(
             source_id=source_id_override or job.source_id,
             source_input_label=source_input_label_override or job.input_label,
@@ -384,6 +503,11 @@ def build_output_row(
             }
         ),
     }
+    if rdap_unavailable is not None:
+        row["rdap_unavailable_reason"] = rdap_unavailable.reason
+        if rdap_unavailable.http_status is not None:
+            row["rdap_unavailable_http_status"] = rdap_unavailable.http_status
+    return row
 
 
 def build_review_output_row(row: dict[str, Any]) -> ReviewOutputRow:

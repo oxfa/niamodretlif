@@ -9,7 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from ..checking import DNSResult, GeoPolicyDecision, IPGeoResult, RDAPResult
+from ..checking import (
+    DNSResult,
+    GeoPolicyDecision,
+    IPGeoResult,
+    RDAPResult,
+    RDAPUnavailableInfo,
+)
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
 
@@ -37,6 +43,15 @@ class ParsedHostItem:  # pylint: disable=too-many-instance-attributes
     source_input_labels: tuple[str, ...] = ()
     prepared_rdap_status: str | None = None
     prepared_authoritative_base_url: str | None = None
+    prepared_rdap_unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RDAPLookupOutcome:
+    """RDAP stage outcome plus unavailable metadata when no verdict exists."""
+
+    rdap_result: RDAPResult | None
+    rdap_unavailable: RDAPUnavailableInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +60,7 @@ class DNSWorkItem:
 
     parsed: ParsedHostItem
     rdap_result: RDAPResult | None
+    rdap_unavailable: RDAPUnavailableInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +71,7 @@ class GeoWorkItem:
     rdap_result: RDAPResult | None
     dns_result: DNSResult
     classification: str
+    rdap_unavailable: RDAPUnavailableInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +85,7 @@ class CompletedHostResult:  # pylint: disable=too-many-instance-attributes
     row: dict[str, Any]
     rdap_result: RDAPResult | None
     dns_result: DNSResult
+    rdap_unavailable: RDAPUnavailableInfo | None = None
     geo_results: list[IPGeoResult] = field(default_factory=list)
     geo_policy: GeoPolicyDecision | None = None
     geo_attempts: list[dict[str, Any]] = field(default_factory=list)

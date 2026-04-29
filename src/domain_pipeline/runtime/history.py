@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
 from domain_pipeline.classifications import (
+    RDAP_UNAVAILABLE_HTTP_STATUS_BY_REASON,
+    RDAP_UNAVAILABLE_REASON_BY_CACHE_CLASSIFICATION,
     ROOT_CACHE_CLASSIFICATIONS,
     ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
+from domain_pipeline.checking import RDAPUnavailableInfo
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +97,32 @@ class RootDomainClassificationRecord:
         """Return True when the cached record has expired."""
         return self.expires_at <= now
 
-    def is_cached_rdap_unavailable(self) -> bool:
-        """Return True when this cached root encodes a reusable RDAP-unavailable state."""
+    def is_legacy_rdap_unavailable(self) -> bool:
+        """Return True for broad legacy RDAP-unavailable rows that must refresh."""
         return self.classification == ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE
+
+    def is_reason_specific_rdap_unavailable(self) -> bool:
+        """Return True when this root has a reusable reason-specific unavailable row."""
+        return self.classification in RDAP_UNAVAILABLE_REASON_BY_CACHE_CLASSIFICATION
+
+    def is_cached_rdap_unavailable(self) -> bool:
+        """Return True for current reusable RDAP-unavailable cache rows."""
+        return self.is_reason_specific_rdap_unavailable()
+
+    def to_rdap_unavailable_info(self) -> RDAPUnavailableInfo | None:
+        """Reconstruct RDAP-unavailable metadata from a reason-specific cache row."""
+        reason = RDAP_UNAVAILABLE_REASON_BY_CACHE_CLASSIFICATION.get(
+            self.classification
+        )
+        if reason is None:
+            return None
+        http_status = RDAP_UNAVAILABLE_HTTP_STATUS_BY_REASON.get(reason)
+        return RDAPUnavailableInfo(
+            reason=reason,
+            message=f"cached RDAP unavailable state for {self.domain}: {reason}",
+            cache_classification=self.classification,
+            http_status=http_status,
+        )
 
 
 @dataclasses.dataclass

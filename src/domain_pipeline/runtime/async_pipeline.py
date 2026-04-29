@@ -28,11 +28,11 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
     CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
     CLASSIFICATION_MANUAL_FILTER_PASSED,
-    CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
     PRE_GEO_REVIEW_CLASSIFICATIONS,
-    ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
+    RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON,
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
@@ -42,6 +42,7 @@ from ..checking import (
     DomainChecker,
     IPGeoResult,
     RDAPResult,
+    RDAPUnavailableInfo,
     RDAPUnavailableError,
     build_geo_provider,
     evaluate_geo_policy,
@@ -63,6 +64,7 @@ from .contracts import (
     GeoCacheWriteRequest,
     GeoWorkItem,
     ParsedHostItem,
+    RDAPLookupOutcome,
     RootCacheWriteRequest,
 )
 from .geo_scheduler import GeoProviderScheduler
@@ -81,6 +83,7 @@ from .pure_helpers import (
     ROUTE_REVIEW,
     build_output_row,
     classify_host_from_results,
+    rdap_unavailable_dns_disabled_classification,
     route_for_row,
 )
 from .transports import (
@@ -213,6 +216,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.dns_transports: dict[str, AsyncDNSTransport] = {}
         self.geo_transports: dict[str, AsyncGeoTransport] = {}
         self.root_tasks: dict[str, asyncio.Task[RDAPResult]] = {}
+        self.prepared_unavailable_cache_written_roots: set[str] = set()
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
         self.budget_stop_context: BudgetStopContext | None = None
@@ -399,6 +403,17 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     else None
                 )
             ),
+            prepared_rdap_unavailable_reason=(
+                None
+                if root_payload is None
+                or str(root_payload.get("status", "")) != "unavailable"
+                else str(
+                    root_payload.get(
+                        "unavailable_reason",
+                        RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+                    )
+                )
+            ),
         )
 
     async def _emit_public_suffix_guard(self, parsed: ParsedHostItem) -> None:
@@ -451,6 +466,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self,
         parsed: ParsedHostItem,
         rdap_result: RDAPResult | None,
+        rdap_unavailable: RDAPUnavailableInfo | None = None,
     ) -> None:
         """Emit one manual-add host after RDAP, always skipping DNS and geo."""
         provenance_label = parsed.source_input_label_override or parsed.job.input_label
@@ -517,6 +533,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             "skipped",
             geo_policy_reason,
             None,
+            rdap_unavailable=rdap_unavailable,
             dns_status_override="skipped",
             source_id_override=parsed.source_id_override,
             source_input_label_override=parsed.source_input_label_override,
@@ -532,11 +549,15 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 row=row,
                 rdap_result=rdap_result,
                 dns_result=dns_result,
+                rdap_unavailable=rdap_unavailable,
             )
         )
 
     async def _emit_manual_filter_pass(
-        self, parsed: ParsedHostItem, rdap_result: RDAPResult | None
+        self,
+        parsed: ParsedHostItem,
+        rdap_result: RDAPResult | None,
+        rdap_unavailable: RDAPUnavailableInfo | None = None,
     ) -> None:
         """Emit one manually approved host, skipping unavailable downstream stages."""
         if parsed.entry.is_public_suffix_input:
@@ -585,6 +606,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             "skipped",
             "manual_filter_pass",
             None,
+            rdap_unavailable=rdap_unavailable,
             dns_status_override="skipped",
             source_ids_override=list(parsed.source_ids) or None,
             source_input_labels_override=list(parsed.source_input_labels) or None,
@@ -598,6 +620,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 row=row,
                 rdap_result=rdap_result,
                 dns_result=dns_result,
+                rdap_unavailable=rdap_unavailable,
             )
         )
 
@@ -841,7 +864,53 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             for _ in range(RDAP_STAGE_WORKERS):
                 await self.queue_bundle.parse_to_rdap.put(None)
 
-    async def _resolve_rdap_result(self, parsed: ParsedHostItem) -> RDAPResult | None:
+    def _prepared_rdap_unavailable_info(
+        self, parsed: ParsedHostItem
+    ) -> RDAPUnavailableInfo:
+        """Return unavailable metadata carried by prepared RDAP root metadata."""
+        reason = (
+            parsed.prepared_rdap_unavailable_reason
+            or RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP
+        )
+        return RDAPUnavailableInfo(
+            reason=reason,
+            message=(
+                "batch preparation marked RDAP unavailable for "
+                f"{parsed.entry.registrable_domain}: {reason}"
+            ),
+            cache_classification=RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON.get(
+                reason
+            ),
+        )
+
+    async def _queue_rdap_unavailable_cache_write_once(
+        self,
+        parsed: ParsedHostItem,
+        rdap_unavailable: RDAPUnavailableInfo,
+    ) -> None:
+        """Queue one reason-specific cache write for a prepared unavailable root."""
+        if rdap_unavailable.cache_classification is None:
+            return
+        root = parsed.entry.registrable_domain
+        if root in self.prepared_unavailable_cache_written_roots:
+            return
+        self.prepared_unavailable_cache_written_roots.add(root)
+        ttl_days = int(
+            self.config["cache"]["classification_ttl_days"]["rdap_lookup_unavailable"]
+        )
+        await self.cache_bundle.writers[0].queue.put(
+            RootCacheWriteRequest(
+                domain=root,
+                classification=rdap_unavailable.cache_classification,
+                statuses=[],
+                statuses_complete=False,
+                checked_at=self.now,
+                ttl_days=ttl_days,
+            )
+        )
+        self.cache_stats["cached_written"] += 1
+
+    async def _resolve_rdap_result(self, parsed: ParsedHostItem) -> RDAPLookupOutcome:
         root = parsed.entry.registrable_domain
         next_stage_message = (
             "continuing to DNS"
@@ -869,11 +938,13 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     root,
                     cached.classification,
                 )
-                return RDAPResult(False, [], from_cache=True)
-            if cached.is_cached_rdap_unavailable():
+                return RDAPLookupOutcome(RDAPResult(False, [], from_cache=True))
+            if cached.is_reason_specific_rdap_unavailable():
+                rdap_unavailable = cached.to_rdap_unavailable_info()
+                assert rdap_unavailable is not None
                 log.debug(
                     "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s with cached unavailable RDAP state; "
+                    "classification=%s with cached reason-specific unavailable RDAP state; "
                     "skipping live RDAP and %s",
                     parsed.job.source_id,
                     parsed.sequence,
@@ -884,8 +955,21 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     cached.classification,
                     next_stage_message,
                 )
-                return None
-            if cached.statuses_complete:
+                return RDAPLookupOutcome(None, rdap_unavailable)
+            if cached.is_legacy_rdap_unavailable():
+                log.debug(
+                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
+                    "classification=%s with legacy cached unavailable RDAP state; "
+                    "refreshing live RDAP",
+                    parsed.job.source_id,
+                    parsed.sequence,
+                    parsed.total,
+                    parsed.entry.host,
+                    cache_source,
+                    root,
+                    cached.classification,
+                )
+            elif cached.statuses_complete:
                 log.debug(
                     "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
                     "classification=%s; skipping live RDAP and %s",
@@ -898,19 +982,22 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     cached.classification,
                     next_stage_message,
                 )
-                return RDAPResult(True, list(cached.statuses), from_cache=True)
-            log.debug(
-                "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                "classification=%s but cached statuses are incomplete; "
-                "refreshing live RDAP",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                cache_source,
-                root,
-                cached.classification,
-            )
+                return RDAPLookupOutcome(
+                    RDAPResult(True, list(cached.statuses), from_cache=True)
+                )
+            else:
+                log.debug(
+                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
+                    "classification=%s but cached statuses are incomplete; "
+                    "refreshing live RDAP",
+                    parsed.job.source_id,
+                    parsed.sequence,
+                    parsed.total,
+                    parsed.entry.host,
+                    cache_source,
+                    root,
+                    cached.classification,
+                )
         else:
             self._record_cache_miss("rdap")
             log.debug(
@@ -946,7 +1033,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 parsed.entry.host,
                 root,
             )
-        return await task
+        return RDAPLookupOutcome(await task)
 
     async def _live_rdap_lookup(self, parsed: ParsedHostItem) -> RDAPResult:
         transport = self.rdap_transport_for(parsed.job.source_id, parsed.job.config)
@@ -965,32 +1052,36 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 parsed.entry.registrable_domain,
                 authoritative_base_url=parsed.prepared_authoritative_base_url,
             )
-        except CacheableRDAPUnavailableError:
+        except CacheableRDAPUnavailableError as exc:
             ttl_days = int(
                 self.config["cache"]["classification_ttl_days"][
                     "rdap_lookup_unavailable"
                 ]
             )
-            await self.cache_bundle.writers[0].queue.put(
-                RootCacheWriteRequest(
-                    domain=parsed.entry.registrable_domain,
-                    classification=ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
-                    statuses=[],
-                    statuses_complete=False,
-                    checked_at=self.now,
-                    ttl_days=ttl_days,
+            if exc.info.cache_classification is not None:
+                await self.cache_bundle.writers[0].queue.put(
+                    RootCacheWriteRequest(
+                        domain=parsed.entry.registrable_domain,
+                        classification=exc.info.cache_classification,
+                        statuses=[],
+                        statuses_complete=False,
+                        checked_at=self.now,
+                        ttl_days=ttl_days,
+                    )
                 )
-            )
-            self.cache_stats["cached_written"] += 1
-            log.debug(
-                "[%s %d/%d] %s queued RDAP unavailable cache write for root=%s ttl_days=%d",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                parsed.entry.registrable_domain,
-                ttl_days,
-            )
+                self.cache_stats["cached_written"] += 1
+                log.debug(
+                    "[%s %d/%d] %s queued RDAP unavailable cache write for "
+                    "root=%s classification=%s reason=%s ttl_days=%d",
+                    parsed.job.source_id,
+                    parsed.sequence,
+                    parsed.total,
+                    parsed.entry.host,
+                    parsed.entry.registrable_domain,
+                    exc.info.cache_classification,
+                    exc.info.reason,
+                    ttl_days,
+                )
             raise
         log.debug(
             "[%s %d/%d] %s live RDAP result for root=%s -> exists=%s statuses=%s",
@@ -1060,6 +1151,11 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     await self.queue_bundle.rdap_to_dns.put(None)
                     return
                 if parsed.prepared_rdap_status == "unavailable":
+                    rdap_unavailable = self._prepared_rdap_unavailable_info(parsed)
+                    await self._queue_rdap_unavailable_cache_write_once(
+                        parsed,
+                        rdap_unavailable,
+                    )
                     if parsed.job.config["dns"]["enabled"]:
                         log.debug(
                             "[%s %d/%d] %s bypassing RDAP for root=%s because "
@@ -1083,11 +1179,17 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             parsed.entry.host,
                             parsed.entry.registrable_domain,
                         )
-                    rdap_result = None
+                    rdap_outcome = RDAPLookupOutcome(None, rdap_unavailable)
                 else:
                     try:
-                        rdap_result = await self._resolve_rdap_result(parsed)
-                    except RDAPUnavailableError:
+                        resolved = await self._resolve_rdap_result(parsed)
+                        if isinstance(resolved, RDAPResult):
+                            rdap_outcome = RDAPLookupOutcome(resolved)
+                        elif resolved is None:
+                            rdap_outcome = RDAPLookupOutcome(None)
+                        else:
+                            rdap_outcome = resolved
+                    except RDAPUnavailableError as exc:
                         if parsed.job.config["dns"]["enabled"]:
                             log.debug(
                                 "[%s %d/%d] %s RDAP unavailable for root=%s; continuing to DNS",
@@ -1107,9 +1209,15 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                                 parsed.entry.host,
                                 parsed.entry.registrable_domain,
                             )
-                        rdap_result = None
+                        rdap_outcome = RDAPLookupOutcome(None, exc.info)
+                rdap_result = rdap_outcome.rdap_result
+                rdap_unavailable = rdap_outcome.rdap_unavailable
                 if parsed.manual_add:
-                    await self._emit_manual_add_result(parsed, rdap_result)
+                    await self._emit_manual_add_result(
+                        parsed,
+                        rdap_result,
+                        rdap_unavailable,
+                    )
                     continue
                 if rdap_result is not None and not rdap_result.exists:
                     log.debug(
@@ -1143,6 +1251,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "skipped",
                         "dead_root",
                         None,
+                        rdap_unavailable=rdap_unavailable,
                         dns_status_override="skipped",
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
@@ -1157,11 +1266,16 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             row=row,
                             rdap_result=rdap_result,
                             dns_result=dns_result,
+                            rdap_unavailable=rdap_unavailable,
                         )
                     )
                     continue
                 if parsed.manual_filter_pass:
-                    await self._emit_manual_filter_pass(parsed, rdap_result)
+                    await self._emit_manual_filter_pass(
+                        parsed,
+                        rdap_result,
+                        rdap_unavailable,
+                    )
                     continue
                 if not parsed.job.config["dns"]["enabled"]:
                     log.debug(
@@ -1187,7 +1301,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         (
                             CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
                             if rdap_result is not None
-                            else CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
+                            else rdap_unavailable_dns_disabled_classification(
+                                rdap_unavailable
+                            )
                         ),
                         rdap_result,
                         dns_result,
@@ -1197,6 +1313,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "skipped",
                         "dns_disabled",
                         None,
+                        rdap_unavailable=rdap_unavailable,
                         dns_status_override="skipped",
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
@@ -1209,7 +1326,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             classification=(
                                 CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
                                 if rdap_result is not None
-                                else CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
+                                else rdap_unavailable_dns_disabled_classification(
+                                    rdap_unavailable
+                                )
                             ),
                             route=(
                                 ROUTE_FILTERED
@@ -1219,11 +1338,16 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             row=row,
                             rdap_result=rdap_result,
                             dns_result=dns_result,
+                            rdap_unavailable=rdap_unavailable,
                         )
                     )
                     continue
                 await self.queue_bundle.rdap_to_dns.put(
-                    DNSWorkItem(parsed=parsed, rdap_result=rdap_result)
+                    DNSWorkItem(
+                        parsed=parsed,
+                        rdap_result=rdap_result,
+                        rdap_unavailable=rdap_unavailable,
+                    )
                 )
             finally:
                 self.queue_bundle.parse_to_rdap.task_done()
@@ -1359,6 +1483,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "skipped",
                         "no_resolved_ips",
                         None,
+                        rdap_unavailable=work_item.rdap_unavailable,
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
                         or None,
@@ -1374,6 +1499,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             row=row,
                             rdap_result=work_item.rdap_result,
                             dns_result=dns_result,
+                            rdap_unavailable=work_item.rdap_unavailable,
                         )
                     )
                     continue
@@ -1383,6 +1509,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         rdap_result=work_item.rdap_result,
                         dns_result=dns_result,
                         classification=classification,
+                        rdap_unavailable=work_item.rdap_unavailable,
                     )
                 )
             finally:
@@ -1689,6 +1816,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     geo_policy_status,
                     geo_policy_reason,
                     provider_used,
+                    rdap_unavailable=work_item.rdap_unavailable,
                     source_ids_override=list(work_item.parsed.source_ids) or None,
                     source_input_labels_override=list(
                         work_item.parsed.source_input_labels
@@ -1715,6 +1843,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         row=row,
                         rdap_result=work_item.rdap_result,
                         dns_result=work_item.dns_result,
+                        rdap_unavailable=work_item.rdap_unavailable,
                         geo_results=geo_results,
                         geo_attempts=geo_attempts,
                         geo_policy=decision,

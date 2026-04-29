@@ -26,11 +26,9 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
     CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-    CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
     PRE_GEO_REVIEW_CLASSIFICATIONS,
-    ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
@@ -43,6 +41,7 @@ from ..checking import (
     IPGeoProvider,
     IPGeoResult,
     RDAPResult,
+    RDAPUnavailableInfo,
     RDAPUnavailableError,
     build_geo_provider,
     evaluate_geo_policy,
@@ -59,6 +58,7 @@ from .pure_helpers import (
     ROUTE_FILTERED,
     ROUTE_REVIEW,
     build_output_row,
+    rdap_unavailable_dns_disabled_classification,
     route_for_row,
 )
 from ..settings.constants import (
@@ -66,6 +66,7 @@ from ..settings.constants import (
     GEO_PROVIDER_IPINFO_LITE,
 )
 from .history import PipelineCache
+from .contracts import RDAPLookupOutcome
 from .transports import resolve_geo_token
 
 log = logging.getLogger(__name__)
@@ -340,8 +341,33 @@ def cached_or_live_rdap_result(
     registrable_domain: str,
     now: datetime,
     rdap_lookup_unavailable_ttl_days: int,
-) -> RDAPResult | None:
+) -> RDAPLookupOutcome:
     """Return one root-level RDAP decision, using cache when available."""
+
+    def live_lookup() -> RDAPLookupOutcome:
+        try:
+            return RDAPLookupOutcome(checker.rdap_lookup(registrable_domain))
+        except CacheableRDAPUnavailableError as exc:
+            if exc.info.cache_classification is not None:
+                cache.upsert_root(
+                    registrable_domain,
+                    exc.info.cache_classification,
+                    [],
+                    False,
+                    now,
+                    rdap_lookup_unavailable_ttl_days,
+                )
+                log.debug(
+                    "RDAP unavailable cache stored at %s for root=%s "
+                    "classification=%s reason=%s ttl_days=%d",
+                    cache.path,
+                    registrable_domain,
+                    exc.info.cache_classification,
+                    exc.info.reason,
+                    rdap_lookup_unavailable_ttl_days,
+                )
+            return RDAPLookupOutcome(None, exc.info)
+
     cached_root = cache.get_fresh_root(registrable_domain, now)
     if cached_root is None:
         log.debug(
@@ -350,24 +376,7 @@ def cached_or_live_rdap_result(
             cache.path,
             registrable_domain,
         )
-        try:
-            return checker.rdap_lookup(registrable_domain)
-        except CacheableRDAPUnavailableError:
-            cache.upsert_root(
-                registrable_domain,
-                ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
-                [],
-                False,
-                now,
-                rdap_lookup_unavailable_ttl_days,
-            )
-            log.debug(
-                "RDAP unavailable cache stored at %s for root=%s ttl_days=%d",
-                cache.path,
-                registrable_domain,
-                rdap_lookup_unavailable_ttl_days,
-            )
-            return None
+        return live_lookup()
     if (
         cached_root.classification
         == ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED
@@ -378,16 +387,27 @@ def cached_or_live_rdap_result(
             registrable_domain,
             cached_root.classification,
         )
-        return RDAPResult(False, [], from_cache=True)
-    if cached_root.is_cached_rdap_unavailable():
+        return RDAPLookupOutcome(RDAPResult(False, [], from_cache=True))
+    if cached_root.is_reason_specific_rdap_unavailable():
+        rdap_unavailable = cached_root.to_rdap_unavailable_info()
+        assert rdap_unavailable is not None
         log.debug(
-            "RDAP root cache hit at %s for root=%s classification=%s with cached unavailable "
-            "bootstrap state; skipping live RDAP and continuing to DNS",
+            "RDAP root cache hit at %s for root=%s classification=%s with cached "
+            "reason-specific unavailable RDAP state; skipping live RDAP and continuing to DNS",
             cache.path,
             registrable_domain,
             cached_root.classification,
         )
-        return None
+        return RDAPLookupOutcome(None, rdap_unavailable)
+    if cached_root.is_legacy_rdap_unavailable():
+        log.debug(
+            "RDAP root cache hit at %s for root=%s classification=%s with legacy "
+            "cached unavailable RDAP state; refreshing live RDAP",
+            cache.path,
+            registrable_domain,
+            cached_root.classification,
+        )
+        return live_lookup()
     if not cached_root.statuses_complete:
         log.debug(
             "RDAP root cache hit at %s for root=%s classification=%s but cached statuses "
@@ -396,24 +416,7 @@ def cached_or_live_rdap_result(
             registrable_domain,
             cached_root.classification,
         )
-        try:
-            return checker.rdap_lookup(registrable_domain)
-        except CacheableRDAPUnavailableError:
-            cache.upsert_root(
-                registrable_domain,
-                ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
-                [],
-                False,
-                now,
-                rdap_lookup_unavailable_ttl_days,
-            )
-            log.debug(
-                "RDAP unavailable cache stored at %s for root=%s ttl_days=%d",
-                cache.path,
-                registrable_domain,
-                rdap_lookup_unavailable_ttl_days,
-            )
-            return None
+        return live_lookup()
     log.debug(
         "RDAP root cache hit at %s for root=%s classification=%s; "
         "skipping live RDAP and continuing to DNS",
@@ -421,7 +424,9 @@ def cached_or_live_rdap_result(
         registrable_domain,
         cached_root.classification,
     )
-    return RDAPResult(True, list(cached_root.statuses), from_cache=True)
+    return RDAPLookupOutcome(
+        RDAPResult(True, list(cached_root.statuses), from_cache=True)
+    )
 
 
 def effective_dns_nameservers(dns_config: dict[str, Any]) -> list[str]:
@@ -814,7 +819,7 @@ def classify_and_write_source(
     dead_rows: list[dict[str, Any]] = []
     audit_rows: list[dict[str, Any]] = []
     review_rows: list[dict[str, Any]] = []
-    rdap_cache: dict[str, RDAPResult | None] = {}
+    rdap_cache: dict[str, RDAPLookupOutcome] = {}
     persisted_root_cache_updates: set[str] = set()
     dns_enabled = bool(job.config["dns"].get("enabled", True))
     geo_enabled = bool(job.config["geo"]["enabled"])
@@ -824,6 +829,7 @@ def classify_and_write_source(
             host = entry.host
             root = entry.registrable_domain
             rdap_result: RDAPResult | None = None
+            rdap_unavailable: RDAPUnavailableInfo | None = None
             dns_result = DNSResult(
                 host=host,
                 a_exists=False,
@@ -867,7 +873,7 @@ def classify_and_write_source(
             else:
                 if root not in rdap_cache:
                     try:
-                        rdap_result = cached_or_live_rdap_result(
+                        rdap_outcome = cached_or_live_rdap_result(
                             checker,
                             cache,
                             root,
@@ -875,7 +881,7 @@ def classify_and_write_source(
                             rdap_lookup_unavailable_ttl_days,
                         )
                     except RDAPUnavailableError as exc:
-                        rdap_result = None
+                        rdap_outcome = RDAPLookupOutcome(None, exc.info)
                         if dns_enabled:
                             log.info(
                                 "[%s %d/%d] %s RDAP unavailable for root=%s; continuing to DNS: %s",
@@ -897,9 +903,11 @@ def classify_and_write_source(
                                 root,
                                 exc,
                             )
-                    rdap_cache[root] = rdap_result
+                    rdap_cache[root] = rdap_outcome
                 else:
-                    rdap_result = rdap_cache[root]
+                    rdap_outcome = rdap_cache[root]
+                rdap_result = rdap_outcome.rdap_result
+                rdap_unavailable = rdap_outcome.rdap_unavailable
                 if rdap_result is not None and not rdap_result.exists:
                     log.info(
                         "[%s %d/%d] %s filtered "
@@ -943,6 +951,7 @@ def classify_and_write_source(
                         "dead_root",
                         None,
                         dns_status_override="skipped",
+                        rdap_unavailable=rdap_unavailable,
                     )
                     dead_rows.append(dead_row)
                     audit_rows.append(_audit_row(dead_row, route=ROUTE_DEAD))
@@ -952,7 +961,9 @@ def classify_and_write_source(
                     classification = (
                         CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
                         if rdap_result is not None
-                        else CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
+                        else rdap_unavailable_dns_disabled_classification(
+                            rdap_unavailable
+                        )
                     )
                     counts["geo_skipped"] += 1
                     counts["geo_policy_skipped"] += 1
@@ -1158,6 +1169,7 @@ def classify_and_write_source(
                 geo_policy_reason,
                 geo_provider_for_row,
                 dns_status_override=dns_status_override,
+                rdap_unavailable=rdap_unavailable,
             )
             if (
                 classification

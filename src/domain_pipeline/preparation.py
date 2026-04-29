@@ -13,6 +13,7 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_MANUAL_FILTER_OUT,
     CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
 )
 from domain_pipeline.io.parser import (
     DomainListParser,
@@ -31,11 +32,16 @@ MANUAL_ADD_SOURCE_ID = "manual_add"
 
 @dataclass(frozen=True)
 class PreparedRootPlan:
-    """Preparation-time RDAP metadata for one registrable domain."""
+    """Preparation-time RDAP metadata for one registrable domain.
+
+    ``unavailable_reason`` is set only when preparation can identify a reusable
+    RDAP-unavailable condition that worker runtime may cache by root.
+    """
 
     registrable_domain: str
     status: str
     authoritative_base_url: str | None = None
+    unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,10 +116,7 @@ class PreparedInputSet:
             "prepared_source_ids": [job.source_id for job in self.jobs],
             "sources": ordered_sources,
             "rdap_roots": {
-                registrable_domain: {
-                    "status": plan.status,
-                    "authoritative_base_url": plan.authoritative_base_url,
-                }
+                registrable_domain: root_plan_runtime_payload(plan)
                 for registrable_domain, plan in sorted(self.root_plans.items())
             },
             "terminal_rows": [dict(row) for row in self.preparation_terminal_rows],
@@ -132,6 +135,17 @@ class PreparedInputSet:
                 continue
             eligible_root_entries[registrable_domain].append(prepared_entry)
         return eligible_root_entries, public_suffix_entries
+
+
+def root_plan_runtime_payload(plan: PreparedRootPlan) -> dict[str, str | None]:
+    """Serialize prepared RDAP root metadata for worker runtime."""
+    payload: dict[str, str | None] = {
+        "status": plan.status,
+        "authoritative_base_url": plan.authoritative_base_url,
+    }
+    if plan.unavailable_reason is not None:
+        payload["unavailable_reason"] = plan.unavailable_reason
+    return payload
 
 
 def _resolve_from_root(root: Path, path: Path) -> Path:
@@ -478,6 +492,7 @@ def _resolve_root_plan(  # pylint: disable=protected-access,broad-exception-caug
         return PreparedRootPlan(
             registrable_domain=registrable_domain,
             status="unavailable",
+            unavailable_reason=RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
         )
     return PreparedRootPlan(
         registrable_domain=registrable_domain,

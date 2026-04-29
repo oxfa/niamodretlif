@@ -145,8 +145,9 @@ cache:
     # Cache retention, in days, for registered ICANN registrable-domain RDAP
     # verdicts.
     rdap_registrable_domain_registered: 7
-    # Cache retention, in days, for reusable RDAP-unavailable ICANN
-    # registrable-domain states.
+    # Cache retention, in days, for reusable reason-specific RDAP-unavailable
+    # ICANN registrable-domain states. Legacy broad rdap_lookup_unavailable
+    # rows are read for compatibility but refreshed with live RDAP.
     rdap_lookup_unavailable: 7
   # Cache retention, in days, for DNS lookup results.
   dns_ttl_days: 1

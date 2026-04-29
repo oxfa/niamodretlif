@@ -25,6 +25,8 @@ cache:
   classification_ttl_days:
     rdap_registrable_domain_unregistered: 30
     rdap_registrable_domain_registered: 7
+    # Applies to reason-specific RDAP-unavailable root cache rows; legacy
+    # broad rdap_lookup_unavailable rows are refreshed.
     rdap_lookup_unavailable: 7
   dns_ttl_days: 7
 

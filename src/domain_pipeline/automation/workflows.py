@@ -47,6 +47,7 @@ from domain_pipeline.preparation import (
     PreparedInputSet,
     PreparedRootPlan,
     prepare_inputs,
+    root_plan_runtime_payload,
 )
 from domain_pipeline.runtime.app import run_prepared_pipeline
 from domain_pipeline.runtime.history import (
@@ -512,10 +513,7 @@ def _prepared_runtime_metadata_from_assignment(
         prepared_source_ids=sorted(sources_payload),
         sources=sources_payload,
         rdap_roots={
-            registrable_domain: {
-                "status": plan.status,
-                "authoritative_base_url": plan.authoritative_base_url,
-            }
+            registrable_domain: root_plan_runtime_payload(plan)
             for registrable_domain, plan in sorted(root_plans.items())
         },
         terminal_rows=[],

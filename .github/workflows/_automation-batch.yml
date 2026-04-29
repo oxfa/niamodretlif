@@ -164,7 +164,8 @@ jobs:
           pip install -r requirements.txt
       # Prefer the prior attempt from the same workflow run when a rerun needs
       # to resume cache progress, then fall back to the broader config-wide
-      # lineage.
+      # lineage. Legacy broad rdap_lookup_unavailable rows may be restored, but
+      # runtime refreshes them into reason-specific RDAP-unavailable cache rows.
       - name: Restore baseline cache
         id: restore_worker_baseline_cache
         uses: actions/cache/restore@v5
@@ -420,7 +421,8 @@ jobs:
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
       # Keep aggregate reruns on the same per-run cache lineage before falling
-      # back to any newer config-wide cache generation.
+      # back to any newer config-wide cache generation. Reason-specific
+      # RDAP-unavailable rows remain reusable; legacy broad rows are refreshed.
       - name: Restore aggregate baseline cache
         id: restore_aggregate_baseline_cache
         uses: actions/cache/restore@v5
