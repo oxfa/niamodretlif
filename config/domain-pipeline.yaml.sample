@@ -12,23 +12,23 @@ version: 2
 # The manual-pass file is only supported when all enabled sources in the config
 # have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
 # in workflow-owned runtime. Hosts listed there run through RDAP when they have
-# a registrable root, but bypass DNS and geo. RDAP-unregistered roots still
-# route to dead output; otherwise matched hosts are emitted to the filtered
-# output for that config.
+# an ICANN registrable root, but bypass DNS and geo. RDAP-unregistered roots
+# still route to dead output; otherwise matched hosts are emitted to the
+# filtered output for that config.
 # The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
 # and emits review rows only.
-# manual_filter_pass entries that are public suffix inputs have no registrable
-# root to query, so explicit approval sends them directly to filtered output with
-# RDAP/DNS/geo skipped.
+# manual_filter_pass entries that are ICANN public suffix inputs have no
+# registrable root to query, so explicit approval sends them directly to
+# filtered output with RDAP/DNS/geo skipped.
 # The manual-add file is config-scoped, always skips DNS/geo, and is validated
 # against the config's shared RDAP settings. RDAP-registered roots are emitted
 # to filtered output, while RDAP-unregistered or RDAP-unavailable roots emit
-# review rows instead of dead output. Public-suffix inputs such as "com" are
-# rejected because manual-add entries must still run through RDAP.
+# review rows instead of dead output. ICANN public-suffix inputs such as "com"
+# are rejected because manual-add entries must still run through RDAP.
 # Runtime rows use three terminal routes: filtered for positive output, review
 # for uncertain or operator-attention cases, and dead only for RDAP-unregistered
-# registrable domains. Public suffix inputs and RDAP-unavailable hosts with DNS
-# disabled route to review.
+# ICANN registrable domains. ICANN public suffix inputs and RDAP-unavailable
+# hosts with DNS disabled route to review.
 # A host must not appear in both manual filter files for the same config.
 # A host must not appear in manual_add and either manual_filter_pass or
 # manual_filter_out for the same config.
@@ -129,7 +129,7 @@ defaults:
     # Output directory for files written by the pipeline.
     # Equivalent paths such as output and ./output are treated as the same target.
     # Route outputs are filtered, review, and dead. Dead output is reserved for
-    # RDAP-unregistered registrable domains.
+    # RDAP-unregistered ICANN registrable domains.
     # For a config named config/domain-pipeline.yaml, the runtime writes:
     # - output/filtered/domain-pipeline.txt
     # - output/dead/domain-pipeline.txt
@@ -139,11 +139,14 @@ defaults:
 
 cache:
   classification_ttl_days:
-    # Cache retention, in days, for unregistered registrable-domain RDAP verdicts.
+    # Cache retention, in days, for unregistered ICANN registrable-domain RDAP
+    # verdicts.
     rdap_registrable_domain_unregistered: 30
-    # Cache retention, in days, for registered registrable-domain RDAP verdicts.
+    # Cache retention, in days, for registered ICANN registrable-domain RDAP
+    # verdicts.
     rdap_registrable_domain_registered: 7
-    # Cache retention, in days, for reusable RDAP-unavailable registrable-domain states.
+    # Cache retention, in days, for reusable RDAP-unavailable ICANN
+    # registrable-domain states.
     rdap_lookup_unavailable: 7
   # Cache retention, in days, for DNS lookup results.
   dns_ttl_days: 1
@@ -210,7 +213,7 @@ sources:
       # - output/review/domain-pipeline.csv
       #
       # The filtered/dead txt files and review file follow output.directory.
-      # Public suffix inputs and RDAP-unavailable DNS-disabled hosts write
-      # review rows instead of filtered or dead rows, except when a public
-      # suffix input is explicitly approved through manual_filter_pass.
+      # ICANN public suffix inputs and RDAP-unavailable DNS-disabled hosts write
+      # review rows instead of filtered or dead rows, except when an ICANN
+      # public suffix input is explicitly approved through manual_filter_pass.
       directory: output
