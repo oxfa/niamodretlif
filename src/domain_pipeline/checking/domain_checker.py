@@ -1,9 +1,9 @@
-"""Domain checking utilities for registrable-domain RDAP decisions and host DNS outcomes.
+"""Domain checking utilities for ICANN RDAP decisions and host DNS outcomes.
 
 This module defines a high-level ``DomainChecker`` class for two separate
 concerns:
 
-1. checking whether a registrable domain is registered in RDAP, and
+1. checking whether an ICANN registrable domain is registered in RDAP, and
 2. evaluating exact-host DNS outcomes once that registrable domain is not
    proven RDAP-unregistered.
 
@@ -13,9 +13,9 @@ checker with authoritative-RDAP defaults and performs all steps in one call.
 **Important:** raw input files should first be processed by
 ``DomainListParser`` (see ``domain_pipeline.io.parser``), which detects one
 predefined format per source, extracts hosts, normalizes them, validates
-syntax, derives registrable domains, and deduplicates exact hosts.
+syntax, derives ICANN registrable domains, and deduplicates exact hosts.
 ``DomainChecker`` expects pre-validated hostnames paired with the
-registrable domain that the root-level RDAP check should evaluate.
+ICANN registrable domain that the root-level RDAP check should evaluate.
 
 The design goal of this module is to provide transparent, easily testable
 interfaces. Each network interaction (RDAP lookup and DNS resolution) is
@@ -546,7 +546,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         *,
         authoritative_base_url: str | None = None,
     ) -> RDAPResult:
-        """Query RDAP for a registrable domain.
+        """Query RDAP for an ICANN registrable domain.
 
         This resolves the authoritative registry URL from the IANA bootstrap
         registry first. A successful lookup returns registration data as JSON,
@@ -557,7 +557,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         status codes.
 
         Args:
-            domain: Registrable domain (eTLD+1) to query.
+            domain: ICANN registrable domain (eTLD+1) to query.
 
         Returns:
             An ``RDAPResult`` object indicating registration status and
@@ -826,11 +826,11 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
     def classify_host_with_registrable_domain(
         self, host: str, registrable_domain: str
     ) -> Tuple[str, RDAPResult | None, DNSResult]:
-        """Classify a host using RDAP on the supplied registrable domain.
+        """Classify a host using RDAP on the supplied ICANN registrable domain.
 
         Exact hosts are evaluated by DNS, while RDAP remains scoped to the
-        registrable domain. A subdomain whose registered root exists but whose
-        exact host returns NXDOMAIN or NODATA is classified into an explicit
+        ICANN registrable domain. A subdomain whose registered root exists but
+        whose exact host returns NXDOMAIN or NODATA is classified into an explicit
         `dns_registered_subdomain_*` bucket.
         """
         try:
@@ -849,12 +849,12 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         return self._classify_host_with_rdap(host, registrable_domain, rdap_result)
 
     def classify_host(self, host: str) -> Tuple[str, RDAPResult | None, DNSResult]:
-        """Classify a single registrable-domain hostname.
+        """Classify a single ICANN registrable-domain hostname.
 
         The classification algorithm follows these rules:
 
-        1. Perform an RDAP lookup on the registrable domain.  If the domain
-           does not exist, classification is
+        1. Perform an RDAP lookup on the ICANN registrable domain.  If the
+           domain does not exist, classification is
            ``rdap_registrable_domain_unregistered``.
         2. Perform DNS lookups for the host.  If the result indicates
            ``timeout`` or ``servfail``, classification is
@@ -872,7 +872,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         6. Otherwise, classification is ``dns_resolves``.
 
         Args:
-            host: Pre-validated registrable domain (eTLD+1) from
+            host: Pre-validated ICANN registrable domain (eTLD+1) from
                 ``DomainListParser``.
 
         Returns:
@@ -890,7 +890,7 @@ def classify(host: str) -> Tuple[str, RDAPResult | None, DNSResult]:
     classification algorithm.
 
     Args:
-        host: Pre-validated registrable domain (eTLD+1) from
+        host: Pre-validated ICANN registrable domain (eTLD+1) from
             ``DomainListParser``.
 
     Returns:

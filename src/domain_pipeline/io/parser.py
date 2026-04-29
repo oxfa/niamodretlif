@@ -24,14 +24,14 @@ Processing steps applied to each file:
 4. Lowercase and remove trailing dots.
 5. Encode IDN labels to Punycode (IDNA).
 6. Validate structural syntax (RFC 1035 label limits).
-7. Extract the registrable domain (eTLD+1) via ``publicsuffix2``.
+7. Extract the RDAP registrable domain (ICANN eTLD+1) via ``publicsuffix2``.
 8. Deduplicate exact hosts while preserving their registrable domain.
 
 Files that are mixed-format or unrecognized are skipped.
 
 Dependencies:
-    - ``publicsuffix2`` (mandatory) for accurate registrable-domain
-      extraction, including complex suffixes like ``.eu.org``.
+    - ``publicsuffix2`` (mandatory) for accurate ICANN registrable-domain
+      extraction, including complex suffixes like ``.co.uk``.
 """
 
 from __future__ import annotations
@@ -42,11 +42,26 @@ import logging
 import re
 from collections.abc import MutableMapping
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
 from typing import Iterable, Iterator, Optional, Set
 
 import publicsuffix2  # type: ignore
 
 log = logging.getLogger(__name__)
+_PRIVATE_SUFFIX_SECTION_MARKER = "// ===BEGIN PRIVATE DOMAINS==="
+
+
+@lru_cache(maxsize=1)
+def _icann_public_suffix_list() -> publicsuffix2.PublicSuffixList:
+    """Return a cached PSL view excluding private delegated suffixes."""
+    suffix_list_path = Path(publicsuffix2.__file__).with_name("public_suffix_list.dat")
+    icann_lines: list[str] = []
+    for line in suffix_list_path.read_text(encoding="utf-8").splitlines():
+        if line.strip() == _PRIVATE_SUFFIX_SECTION_MARKER:
+            break
+        icann_lines.append(line)
+    return publicsuffix2.PublicSuffixList(icann_lines)
 
 
 # The parsed record intentionally keeps a stable, explicit shape for runtime
@@ -92,7 +107,8 @@ class DomainListParser:
     Each input source must match one predefined format before any host extraction
     runs. Supported formats are plain domain lists, classic hosts files, AdBlock
     network filters, and dnsmasq server rules. Extracted hosts are normalized,
-    validated, converted to registrable domains with publicsuffix2, and deduplicated.
+    validated, converted to ICANN registrable domains with publicsuffix2, and
+    deduplicated.
     """
 
     # Basic RFC 1035 labels (at least one dot required).
@@ -347,8 +363,9 @@ class DomainListParser:
                 continue
 
             try:
-                public_suffix = publicsuffix2.get_tld(normalized, strict=True)
-                root = publicsuffix2.get_sld(normalized, strict=True)
+                public_suffix_list = _icann_public_suffix_list()
+                public_suffix = public_suffix_list.get_tld(normalized, strict=True)
+                root = public_suffix_list.get_sld(normalized, strict=True)
             except (ValueError, TypeError) as exc:
                 log.debug("Skipped (publicsuffix2 error for %r): %s", normalized, exc)
                 continue
