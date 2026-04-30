@@ -34,6 +34,7 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_RDAP_STATUS_PENDING_RESTORE,
     CLASSIFICATION_RDAP_STATUS_REDEMPTION_PERIOD,
     CLASSIFICATION_RDAP_STATUS_SERVER_HOLD,
+    CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED,
     GEO_REVIEW_CLASSIFICATIONS,
     PUBLIC_REVIEW_CLASSIFICATIONS,
     RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON,
@@ -76,6 +77,7 @@ from ..checking import (
     IPGeoResult,
     RDAPResult,
     RDAPUnavailableInfo,
+    WhoisFallbackResult,
 )
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
@@ -254,6 +256,10 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED: (
             "RDAP lookup was unavailable and DNS is disabled"
         ),
+        CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED: (
+            "WHOIS fallback could not determine registration after RDAP was unavailable "
+            "and DNS is disabled"
+        ),
         CLASSIFICATION_DNS_LOOKUP_TIMEOUT: "DNS lookup returned timeout",
         CLASSIFICATION_DNS_LOOKUP_SERVFAIL: "DNS lookup returned servfail",
         CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
@@ -266,7 +272,7 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
             "manual filter-out host was not present in any configured source"
         ),
         CLASSIFICATION_MANUAL_ADD_UNREGISTERED: (
-            "manual-add host has an RDAP-unregistered registrable domain"
+            "manual-add host has an unregistered registrable domain"
         ),
         CLASSIFICATION_MANUAL_ADD_UNAVAILABLE: (
             "manual-add host could not get an RDAP registration verdict"
@@ -354,6 +360,7 @@ def review_classification_for_row(row: dict[str, Any]) -> str:
         return REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT
     if (
         classification == CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
+        or classification == CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED
         or classification in RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS
         or classification in RDAP_REVIEW_CLASSIFICATIONS
     ):
@@ -471,6 +478,7 @@ def build_output_row(
     provider: IPGeoProvider | None,
     *,
     rdap_unavailable: RDAPUnavailableInfo | None = None,
+    whois_result: WhoisFallbackResult | None = None,
     dns_status_override: str | None = None,
     source_id_override: str | None = None,
     source_input_label_override: str | None = None,
@@ -530,6 +538,14 @@ def build_output_row(
         row["rdap_unavailable_reason"] = rdap_unavailable.reason
         if rdap_unavailable.http_status is not None:
             row["rdap_unavailable_http_status"] = rdap_unavailable.http_status
+    if whois_result is not None:
+        row["whois_fallback_status"] = whois_result.status
+        row["whois_fallback_reason"] = whois_result.reason
+        row["whois_fallback_matched_pattern"] = whois_result.matched_pattern
+        if whois_result.exit_code is not None:
+            row["whois_fallback_exit_code"] = whois_result.exit_code
+        row["whois_fallback_command_mode"] = whois_result.command_mode
+        row["whois_fallback_from_cache"] = whois_result.from_cache
     return row
 
 

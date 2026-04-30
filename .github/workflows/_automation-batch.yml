@@ -167,6 +167,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Install WHOIS client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y whois
+          command -v whois
       # Prefer the prior attempt from the same workflow run when a rerun needs
       # to resume cache progress, then fall back to the broader config-wide
       # lineage. Legacy broad rdap_lookup_unavailable rows may be restored, but

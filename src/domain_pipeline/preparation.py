@@ -239,7 +239,7 @@ def _load_manual_add_records(
             raise ValueError(
                 "manual-add file "
                 f"{manual_add_path} does not support public suffix inputs such as "
-                f"{record.entry.host!r} because manual-add hosts must run through RDAP"
+                f"{record.entry.host!r} because manual-add hosts need a registrable root"
             )
         records_by_host.setdefault(record.entry.host, record)
     return manual_add_path, records_by_host
@@ -323,7 +323,7 @@ def _validate_manual_add_records(
         raise ValueError(
             "manual-add file "
             f"{manual_add_path} requires all enabled sources in one config "
-            "to share RDAP settings because manual-add behavior is config-scoped"
+            "to share registration settings because manual-add behavior is config-scoped"
         )
 
 
@@ -684,7 +684,7 @@ def prepare_inputs(
                     raise ValueError(
                         "duplicate host "
                         f"{host!r} appears in multiple enabled sources with different "
-                        "effective RDAP behavior while manual-add overrides it; "
+                        "effective registration behavior while manual-add overrides it; "
                         "conflicting sources are "
                         f"{first_source_id_by_host[host]!r} and {job.source_id!r}"
                     )

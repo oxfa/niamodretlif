@@ -1,4 +1,4 @@
-"""Persistent cache storage for root RDAP, host DNS, and IP geo data."""
+"""Persistent cache storage for root registration, host DNS, and IP geo data."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from domain_pipeline.classifications import (
     ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
 from domain_pipeline.checking import RDAPUnavailableInfo
 
@@ -66,7 +68,7 @@ def _normalize_root_classification(
 
 @dataclasses.dataclass
 class RootDomainClassificationRecord:
-    """A cached RDAP verdict for one registrable domain."""
+    """A cached registration verdict for one registrable domain."""
 
     domain: str
     classification: str
@@ -104,6 +106,34 @@ class RootDomainClassificationRecord:
     def is_reason_specific_rdap_unavailable(self) -> bool:
         """Return True when this root has a reusable reason-specific unavailable row."""
         return self.classification in RDAP_UNAVAILABLE_REASON_BY_CACHE_CLASSIFICATION
+
+    def is_whois_registered(self) -> bool:
+        """Return True when WHOIS proved this root registered."""
+        return (
+            self.classification
+            == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED
+        )
+
+    def is_whois_unregistered(self) -> bool:
+        """Return True when WHOIS proved this root unregistered."""
+        return (
+            self.classification
+            == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED
+        )
+
+    def is_registration_registered(self) -> bool:
+        """Return True when cached registration evidence says this root exists."""
+        return self.classification in {
+            ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
+            ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED,
+        }
+
+    def is_registration_unregistered(self) -> bool:
+        """Return True when cached registration evidence says this root does not exist."""
+        return self.classification in {
+            ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+            ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
+        }
 
     def is_cached_rdap_unavailable(self) -> bool:
         """Return True for current reusable RDAP-unavailable cache rows."""
@@ -197,7 +227,7 @@ class DNSHistoryRecord:
 
 
 class PipelineCache:
-    """Persistent SQLite-backed cache for root RDAP, DNS, and geo results."""
+    """Persistent SQLite-backed cache for root registration, DNS, and geo results."""
 
     def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
         self.path = path
@@ -338,7 +368,7 @@ class PipelineCache:
         logger.debug("Cache hit in %s at %s for %s", cache_name, self.path, cache_key)
 
     def get_root(self, domain: str) -> Optional[RootDomainClassificationRecord]:
-        """Return the cached RDAP verdict for a registrable domain if present."""
+        """Return the cached registration verdict for a registrable domain if present."""
         row = self._connection.execute(
             f"""
             SELECT domain, classification, statuses, statuses_complete, checked_at, expires_at
@@ -377,7 +407,7 @@ class PipelineCache:
         checked_at: datetime,
         ttl_days: int,
     ) -> None:
-        """Insert or update a cached RDAP verdict for a registrable domain."""
+        """Insert or update a cached registration verdict for a registrable domain."""
         classification = _normalize_root_classification(
             classification,
             statuses=statuses,

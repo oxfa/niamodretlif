@@ -15,6 +15,7 @@ from ..checking import (
     IPGeoResult,
     RDAPResult,
     RDAPUnavailableInfo,
+    WhoisFallbackResult,
 )
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
@@ -52,6 +53,7 @@ class RDAPLookupOutcome:
 
     rdap_result: RDAPResult | None
     rdap_unavailable: RDAPUnavailableInfo | None = None
+    whois_result: WhoisFallbackResult | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class DNSWorkItem:
     parsed: ParsedHostItem
     rdap_result: RDAPResult | None
     rdap_unavailable: RDAPUnavailableInfo | None = None
+    whois_result: WhoisFallbackResult | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class GeoWorkItem:
     dns_result: DNSResult
     classification: str
     rdap_unavailable: RDAPUnavailableInfo | None = None
+    whois_result: WhoisFallbackResult | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,7 @@ class CompletedHostResult:  # pylint: disable=too-many-instance-attributes
     rdap_result: RDAPResult | None
     dns_result: DNSResult
     rdap_unavailable: RDAPUnavailableInfo | None = None
+    whois_result: WhoisFallbackResult | None = None
     geo_results: list[IPGeoResult] = field(default_factory=list)
     geo_policy: GeoPolicyDecision | None = None
     geo_attempts: list[dict[str, Any]] = field(default_factory=list)

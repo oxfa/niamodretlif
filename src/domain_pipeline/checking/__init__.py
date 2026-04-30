@@ -26,6 +26,19 @@ from .ip_geo import (
     build_geo_provider,
     evaluate_geo_policy,
 )
+from .whois import (
+    WHOIS_COMMAND_MODE_IANA_REFERRAL,
+    WHOIS_STATUS_ERROR,
+    WHOIS_STATUS_MISSING_COMMAND,
+    WHOIS_STATUS_REGISTERED,
+    WHOIS_STATUS_TIMEOUT,
+    WHOIS_STATUS_UNKNOWN,
+    WHOIS_STATUS_UNREGISTERED,
+    WhoisFallbackResult,
+    parse_whois_stdout,
+    run_whois_lookup,
+    whois_result_from_cache,
+)
 
 __all__ = [
     "CacheableRDAPUnavailableError",
@@ -47,7 +60,18 @@ __all__ = [
     "RDAPResult",
     "RDAPUnavailableInfo",
     "RDAPUnavailableError",
+    "WHOIS_COMMAND_MODE_IANA_REFERRAL",
+    "WHOIS_STATUS_ERROR",
+    "WHOIS_STATUS_MISSING_COMMAND",
+    "WHOIS_STATUS_REGISTERED",
+    "WHOIS_STATUS_TIMEOUT",
+    "WHOIS_STATUS_UNKNOWN",
+    "WHOIS_STATUS_UNREGISTERED",
+    "WhoisFallbackResult",
     "build_geo_provider",
     "classify",
     "evaluate_geo_policy",
+    "parse_whois_stdout",
+    "run_whois_lookup",
+    "whois_result_from_cache",
 ]
