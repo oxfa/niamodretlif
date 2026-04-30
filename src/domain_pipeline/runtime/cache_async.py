@@ -172,13 +172,6 @@ class AsyncCacheReadFacade:
             self._get_fresh_geo_sync_with_source, provider, ip, now
         )
 
-    def _get_fresh_root_sync(
-        self, domain: str, now
-    ) -> RootDomainClassificationRecord | None:
-        """Synchronously load one fresh cached RDAP root record."""
-        record, _source = self._get_fresh_root_sync_with_source(domain, now)
-        return record
-
     def _get_fresh_root_sync_with_source(
         self, domain: str, now
     ) -> tuple[RootDomainClassificationRecord | None, CacheHitSource | None]:
@@ -243,13 +236,6 @@ class AsyncCacheReadFacade:
             return record, source
         self._log_cache_miss("root_domain_classification_history", cache_key)
         return None, None
-
-    def _get_fresh_dns_sync(
-        self, host: str, resolver_key: str, now
-    ) -> DNSHistoryRecord | None:
-        """Synchronously load one fresh cached DNS record."""
-        record, _source = self._get_fresh_dns_sync_with_source(host, resolver_key, now)
-        return record
 
     def _get_fresh_dns_sync_with_source(
         self, host: str, resolver_key: str, now
@@ -317,13 +303,6 @@ class AsyncCacheReadFacade:
             return record, source
         self._log_cache_miss("dns_history", cache_key)
         return None, None
-
-    def _get_fresh_geo_sync(
-        self, provider: str, ip: str, now
-    ) -> GeoHistoryRecord | None:
-        """Synchronously load one fresh cached geo record."""
-        record, _source = self._get_fresh_geo_sync_with_source(provider, ip, now)
-        return record
 
     def _get_fresh_geo_sync_with_source(
         self, provider: str, ip: str, now

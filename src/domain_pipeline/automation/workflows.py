@@ -469,7 +469,15 @@ def _build_worker_runtime_spec(
             cache=_relative(worker_paths["cache"]),
         ),
         debug_log_path=_relative(worker_paths["log"]),
+        rdap_global_policy=json.loads(json.dumps(config.get("rdap_global_policy", {}))),
         runtime_paths={
+            "rdap_rate_limit_debug_root": _relative(
+                debug_artifacts_root(Path("."))
+                / "workers"
+                / batch_id
+                / worker_id
+                / "rdap-rate-limit"
+            ),
             "incomplete_manifest_path": _relative(
                 worker_state_root(
                     Path("."),
@@ -907,11 +915,16 @@ def prepare_batch(
     *,
     source_root: Path,
     config_path: Path,
+    global_config_path: Path | None = None,
     worker_ids: list[str],
     batch_id: str,
 ) -> PreparedBatch:
     """Build one committed batch worth of worker bundles and aggregate partials."""
-    prepared_inputs = prepare_inputs(source_root=source_root, config_path=config_path)
+    prepared_inputs = prepare_inputs(
+        source_root=source_root,
+        config_path=config_path,
+        global_config_path=global_config_path,
+    )
     config_name = str(prepared_inputs.config["config_name"])
     planning_inputs = _planning_inputs_from_prepared(prepared_inputs)
     total_work_units = len(planning_inputs.root_plans) + len(

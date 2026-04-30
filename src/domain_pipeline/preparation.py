@@ -552,10 +552,19 @@ def prepare_inputs(
     *,
     source_root: Path,
     config_path: Path,
+    global_config_path: Path | None = None,
 ) -> PreparedInputSet:
     """Load shared prepared inputs for workflow preparation and worker runtime."""
     resolved_config_path = _resolve_from_root(source_root, config_path)
-    config = load_config(resolved_config_path)
+    resolved_global_config_path = (
+        None
+        if global_config_path is None
+        else _resolve_from_root(source_root, global_config_path)
+    )
+    config = load_config(
+        resolved_config_path,
+        global_config_path=resolved_global_config_path,
+    )
     jobs = build_source_jobs(config)
     if not jobs:
         raise ValueError(f"config {config_path} produced no runnable source jobs")

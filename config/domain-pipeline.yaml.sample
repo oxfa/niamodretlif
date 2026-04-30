@@ -78,11 +78,13 @@ defaults:
     # Fallback retry waits, in seconds, for RDAP HTTP 429 rate-limit responses
     # that do not include a usable Retry-After header. A valid Retry-After
     # response header takes precedence over this sequence. If retries exceed
-    # the sequence length, the final value is reused.
+    # the sequence length, the final value is reused. config/global.yaml uses
+    # the same key for trusted automation's shared default policy; this
+    # source-level field remains available when a config needs to override it.
     rate_limit_retry_fallback_seconds:
-      - 30.0
-      - 60.0
-      - 120.0
+      - 1.0
+      - 2.0
+      - 4.0
     # Optional per-reason routing policy for RDAP-unavailable hosts when DNS is
     # disabled. Omitted reasons route to review. Allowed route values are
     # review and filtered; dead is intentionally unsupported because dead output

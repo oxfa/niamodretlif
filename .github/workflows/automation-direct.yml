@@ -24,5 +24,6 @@ jobs:
     with:
       config_name: direct
       config_path: config/direct.yaml
+      global_config_path: config/global.yaml
       worker_count: 18
     secrets: inherit

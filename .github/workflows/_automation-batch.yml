@@ -9,6 +9,9 @@ on:
       config_path:
         required: true
         type: string
+      global_config_path:
+        required: true
+        type: string
       worker_count:
         required: true
         type: number
@@ -99,6 +102,7 @@ jobs:
               --source-root . \
               --state-root . \
               --config "${{ inputs.config_path }}" \
+              --global-config "${{ inputs.global_config_path }}" \
               --run-id "${GITHUB_RUN_ID}" \
               --run-attempt "${GITHUB_RUN_ATTEMPT}" \
               --worker-count "${{ inputs.worker_count }}" \
@@ -125,6 +129,7 @@ jobs:
           mkdir -p .debug_artifacts/prepare/batch/logs
           cp batch.json .debug_artifacts/prepare/batch/logs/batch.json
           cp prepare-batch.log .debug_artifacts/prepare/batch/logs/prepare-batch.log
+          cp "${{ inputs.global_config_path }}" .debug_artifacts/prepare/batch/logs/global.yaml
       - name: Upload prepared batch debug artifact
         uses: actions/upload-artifact@v7
         with:
@@ -361,6 +366,12 @@ jobs:
             cp \
               ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" \
               ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
+          fi
+          if [ -d ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/rdap-rate-limit" ]; then
+            mkdir -p ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}"
+            cp -R \
+              ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/rdap-rate-limit" \
+              ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/"
           fi
       - name: Upload worker debug artifact
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
@@ -617,6 +628,9 @@ jobs:
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/events"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/summaries"
+          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/recommendations"
           cp .tmp/downloads/validation-settings/logs/settings.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/settings.json"
           cp .tmp/downloads/validation-settings/logs/validate-settings.log \
@@ -625,6 +639,8 @@ jobs:
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/batch.json"
           cp .tmp/downloads/prepared-batch-debug/logs/prepare-batch.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/prepare-batch.log"
+          cp .tmp/downloads/prepared-batch-debug/logs/global.yaml \
+            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/global.yaml"
           cp \
             ".debug_artifacts/runtime/raw/${{ steps.config.outputs.config_name }}.jsonl" \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log/${{ steps.config.outputs.config_name }}.jsonl"
@@ -639,8 +655,19 @@ jobs:
             artifact_name="${worker_dir##*/}"
             worker_id="${artifact_name#worker-debug-}"
             worker_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/worker.log"
-            [ -f "${worker_log_path}" ] || continue
-            cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
+            if [ -f "${worker_log_path}" ]; then
+              cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
+            fi
+            rdap_debug_root="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/rdap-rate-limit"
+            if [ -f "${rdap_debug_root}/events.jsonl" ]; then
+              cp "${rdap_debug_root}/events.jsonl" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/events/${worker_id}.jsonl"
+            fi
+            if [ -f "${rdap_debug_root}/summary.json" ]; then
+              cp "${rdap_debug_root}/summary.json" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/summaries/${worker_id}.json"
+            fi
+            if [ -f "${rdap_debug_root}/recommendations.json" ]; then
+              cp "${rdap_debug_root}/recommendations.json" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/recommendations/${worker_id}.json"
+            fi
           done
           echo "=== Aggregate artifact staging complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Inspect aggregate cache bundle

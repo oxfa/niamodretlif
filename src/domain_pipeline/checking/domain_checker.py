@@ -88,7 +88,11 @@ from domain_pipeline.classifications import (
     RDAP_STATUS_CLASSIFICATION_ORDER,
     RDAP_STATUS_CLASSIFICATIONS,
 )
-from domain_pipeline.checking.http_requestor import HTTPRequester, HTTPRetryPolicy
+from domain_pipeline.checking.http_requestor import (
+    HTTPRequester,
+    HTTPRetryPolicy,
+    RetryObserver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +308,7 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
     RDAP_MODE_AUTHORITATIVE = "authoritative"
     MAX_RDAP_RETRY_ATTEMPTS = 4
     MAX_DNS_RETRY_ATTEMPTS = 3
+    # Compatibility fallback used when no global, source, or per-call policy is supplied.
     DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS = (30.0, 60.0, 120.0)
 
     #: EPP status codes which indicate a domain is registered but not
@@ -426,9 +431,30 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         """Create one retryable RDAP HTTP-status error."""
         return RetryableRDAPHTTPStatusError(response, log_name)
 
-    def _get_with_rdap_retry_policy(self, url: str, log_name: str) -> requests.Response:
+    def _get_with_rdap_retry_policy(
+        self,
+        url: str,
+        log_name: str,
+        *,
+        rdap_rate_limit_retry_fallback_seconds: tuple[float, ...] | None = None,
+        retry_observer: RetryObserver | None = None,
+    ) -> requests.Response:
         """GET a URL with tenacity-based retries for transient RDAP failures."""
-        return self._rdap_requestor.get(url, log_name=log_name)
+        retry_policy = None
+        if rdap_rate_limit_retry_fallback_seconds is not None:
+            retry_policy = dataclasses.replace(
+                self._rdap_requestor.retry_policy,
+                status_fallback_wait_seconds={
+                    **self._rdap_requestor.retry_policy.status_fallback_wait_seconds,
+                    429: tuple(rdap_rate_limit_retry_fallback_seconds),
+                },
+            )
+        return self._rdap_requestor.get(
+            url,
+            log_name=log_name,
+            retry_policy=retry_policy,
+            retry_observer=retry_observer,
+        )
 
     def _response_expires_at(self, response: requests.Response) -> Optional[float]:
         """Return a Unix timestamp when cached bootstrap data should expire."""
@@ -594,10 +620,24 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         )
         return f"{base_url}domain/{normalized_domain}"
 
-    def _perform_rdap_request(self, url: str, domain: str) -> RDAPResult:
+    def _perform_rdap_request(
+        self,
+        url: str,
+        domain: str,
+        *,
+        rdap_rate_limit_retry_fallback_seconds: tuple[float, ...] | None = None,
+        retry_observer: RetryObserver | None = None,
+    ) -> RDAPResult:
         """GET a fully resolved RDAP URL and return a semantic verdict."""
         try:
-            resp = self._get_with_rdap_retry_policy(url, f"RDAP query for {domain}")
+            resp = self._get_with_rdap_retry_policy(
+                url,
+                f"RDAP query for {domain}",
+                rdap_rate_limit_retry_fallback_seconds=(
+                    rdap_rate_limit_retry_fallback_seconds
+                ),
+                retry_observer=retry_observer,
+            )
         except RetryableRDAPHTTPStatusError as exc:
             # Cache retry-exhausted lookup failures only after we know the final
             # per-root RDAP query URL. Bootstrap/setup failures stay non-cacheable.
@@ -710,6 +750,8 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
         domain: str,
         *,
         authoritative_base_url: str | None = None,
+        rdap_rate_limit_retry_fallback_seconds: tuple[float, ...] | None = None,
+        retry_observer: RetryObserver | None = None,
     ) -> RDAPResult:
         """Query RDAP for an ICANN registrable domain.
 
@@ -761,7 +803,14 @@ class DomainChecker:  # pylint: disable=too-many-instance-attributes
                     message=str(exc),
                 )
             ) from exc
-        return self._perform_rdap_request(url, self._normalize_lookup_domain(domain))
+        return self._perform_rdap_request(
+            url,
+            self._normalize_lookup_domain(domain),
+            rdap_rate_limit_retry_fallback_seconds=(
+                rdap_rate_limit_retry_fallback_seconds
+            ),
+            retry_observer=retry_observer,
+        )
 
     # ------------------------------------------------------------------
     # DNS lookup

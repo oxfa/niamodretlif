@@ -12,6 +12,9 @@ defaults:
     request_timeout: 30.0
 
   rdap:
+    # Trusted automation receives shared RDAP 429 fallback policy from
+    # config/global.yaml. Source-level fallback overrides remain possible but
+    # are not used by default here.
     timeout: 10.0
     unavailable_dns_disabled_routes:
       rdap_no_authoritative_bootstrap: filtered
