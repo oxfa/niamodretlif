@@ -31,11 +31,17 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_MANUAL_FILTER_PASSED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+    CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED,
+    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
+    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
     PRE_GEO_REVIEW_CLASSIFICATIONS,
     RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON,
     RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
 from ..checking import (
     CacheableRDAPUnavailableError,
@@ -45,8 +51,13 @@ from ..checking import (
     RDAPResult,
     RDAPUnavailableInfo,
     RDAPUnavailableError,
+    WHOIS_STATUS_REGISTERED,
+    WHOIS_STATUS_UNREGISTERED,
+    WhoisFallbackResult,
     build_geo_provider,
     evaluate_geo_policy,
+    run_whois_lookup,
+    whois_result_from_cache,
 )
 from ..checking.http_requestor import HTTPRetryEvent
 from ..io.parser import ParsedDomainEntry
@@ -98,6 +109,12 @@ from .transports import (
 from .writer import IncompleteRunWriteResult, ResultCollectorWriter, WriterResult
 
 log = logging.getLogger(__name__)
+WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS = frozenset(
+    {
+        RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+        RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -219,6 +236,8 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.dns_transports: dict[str, AsyncDNSTransport] = {}
         self.geo_transports: dict[str, AsyncGeoTransport] = {}
         self.root_tasks: dict[str, asyncio.Task[RDAPResult]] = {}
+        self.whois_tasks: dict[str, asyncio.Task[WhoisFallbackResult]] = {}
+        self.whois_semaphore = asyncio.Semaphore(self._whois_max_concurrency(config))
         self.rdap_server_locks: dict[str, asyncio.Lock] = {}
         self.rdap_rate_limit_events: list[dict[str, Any]] = []
         self.rdap_rate_limit_stats: dict[str, dict[str, Any]] = {}
@@ -227,6 +246,24 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
         self.budget_stop_context: BudgetStopContext | None = None
+
+    @staticmethod
+    def _whois_max_concurrency(config: dict[str, Any]) -> int:
+        """Return the max WHOIS fallback concurrency across enabled sources."""
+        values: list[int] = []
+        for source in config.get("sources", []):
+            if not isinstance(source, dict) or not bool(source.get("enabled", True)):
+                continue
+            rdap_config = source.get("rdap", {})
+            if not isinstance(rdap_config, dict):
+                continue
+            whois_config = rdap_config.get("whois_fallback", {})
+            if not isinstance(whois_config, dict) or not bool(
+                whois_config.get("enabled", True)
+            ):
+                continue
+            values.append(int(whois_config.get("max_concurrency", 2)))
+        return max(values or [2])
 
     def _runtime_override_path(self, key: str) -> Path | None:
         """Return one optional runtime-only path override."""
@@ -474,31 +511,36 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         parsed: ParsedHostItem,
         rdap_result: RDAPResult | None,
         rdap_unavailable: RDAPUnavailableInfo | None = None,
+        whois_result: WhoisFallbackResult | None = None,
     ) -> None:
         """Emit one manual-add host after RDAP, always skipping DNS and geo."""
         provenance_label = parsed.source_input_label_override or parsed.job.input_label
-        if rdap_result is not None and rdap_result.exists:
+        if (rdap_result is not None and rdap_result.exists) or (
+            whois_result is not None and whois_result.is_registered()
+        ):
             classification = CLASSIFICATION_MANUAL_ADD_REGISTERED
             route = ROUTE_FILTERED
             geo_reason = "manual_add_registered"
             geo_policy_reason = "manual_add_registered"
             log.info(
                 "[%s %d/%d] %s bypassed DNS/geo via manual-add file %s "
-                "(rdap=registered)",
+                "(registration=registered)",
                 parsed.job.source_id,
                 parsed.sequence,
                 parsed.total,
                 parsed.entry.host,
                 provenance_label,
             )
-        elif rdap_result is not None:
+        elif (rdap_result is not None) or (
+            whois_result is not None and whois_result.is_unregistered()
+        ):
             classification = CLASSIFICATION_MANUAL_ADD_UNREGISTERED
             route = ROUTE_REVIEW
             geo_reason = "manual_add_unregistered"
             geo_policy_reason = "manual_add_unregistered"
             log.info(
                 "[%s %d/%d] %s routed to review via manual-add file %s "
-                "(rdap=unregistered)",
+                "(registration=unregistered)",
                 parsed.job.source_id,
                 parsed.sequence,
                 parsed.total,
@@ -512,7 +554,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             geo_policy_reason = "manual_add_unavailable"
             log.info(
                 "[%s %d/%d] %s routed to review via manual-add file %s "
-                "(rdap=unavailable)",
+                "(registration=unavailable)",
                 parsed.job.source_id,
                 parsed.sequence,
                 parsed.total,
@@ -541,6 +583,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
             geo_policy_reason,
             None,
             rdap_unavailable=rdap_unavailable,
+            whois_result=whois_result,
             dns_status_override="skipped",
             source_id_override=parsed.source_id_override,
             source_input_label_override=parsed.source_input_label_override,
@@ -557,6 +600,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 rdap_result=rdap_result,
                 dns_result=dns_result,
                 rdap_unavailable=rdap_unavailable,
+                whois_result=whois_result,
             )
         )
 
@@ -1250,6 +1294,106 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         )
         self.cache_stats["cached_written"] += 1
 
+    @staticmethod
+    def _whois_result_from_root_cache(
+        root: str,
+        cached: Any,
+    ) -> WhoisFallbackResult | None:
+        """Return cached WHOIS evidence from a root cache row when present."""
+        classification = str(getattr(cached, "classification", ""))
+        if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED:
+            return whois_result_from_cache(root, WHOIS_STATUS_REGISTERED)
+        if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED:
+            return whois_result_from_cache(root, WHOIS_STATUS_UNREGISTERED)
+        return None
+
+    @staticmethod
+    def _whois_fallback_enabled(
+        rdap_config: dict[str, Any],
+        rdap_unavailable: RDAPUnavailableInfo | None,
+    ) -> bool:
+        """Return whether this RDAP-unavailable state should use WHOIS fallback."""
+        whois_config = rdap_config.get("whois_fallback", {})
+        if not bool(whois_config.get("enabled", True)):
+            return False
+        if rdap_unavailable is None:
+            return False
+        return rdap_unavailable.reason in WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS
+
+    async def _queue_whois_registration_cache_write(
+        self,
+        root: str,
+        whois_result: WhoisFallbackResult,
+    ) -> None:
+        """Queue cache writes for cacheable WHOIS registered/unregistered evidence."""
+        if whois_result.from_cache:
+            return
+        if whois_result.is_registered():
+            classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED
+            ttl_key = "rdap_registrable_domain_registered"
+        elif whois_result.is_unregistered():
+            classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED
+            ttl_key = "rdap_registrable_domain_unregistered"
+        else:
+            return
+        await self.cache_bundle.writers[0].queue.put(
+            RootCacheWriteRequest(
+                domain=root,
+                classification=classification,
+                statuses=[],
+                statuses_complete=False,
+                checked_at=self.now,
+                ttl_days=int(self.config["cache"]["classification_ttl_days"][ttl_key]),
+            )
+        )
+        self.cache_stats["cached_written"] += 1
+
+    async def _run_whois_fallback_task(
+        self,
+        parsed: ParsedHostItem,
+    ) -> WhoisFallbackResult:
+        """Run one WHOIS fallback task under the configured semaphore."""
+        whois_config = parsed.job.config.get("rdap", {}).get("whois_fallback", {})
+        async with self.whois_semaphore:
+            return await asyncio.to_thread(
+                run_whois_lookup,
+                parsed.entry.registrable_domain,
+                command=str(whois_config.get("command", "whois")),
+                timeout=float(whois_config.get("timeout", 20.0)),
+            )
+
+    async def _resolve_whois_fallback(
+        self,
+        parsed: ParsedHostItem,
+        rdap_unavailable: RDAPUnavailableInfo | None,
+    ) -> WhoisFallbackResult | None:
+        """Resolve selected RDAP-unavailable roots through a deduped WHOIS task."""
+        if not self._whois_fallback_enabled(
+            parsed.job.config.get("rdap", {}),
+            rdap_unavailable,
+        ):
+            return None
+        root = parsed.entry.registrable_domain
+        cached, cache_source = (
+            await self.cache_bundle.reader.get_fresh_root_with_source(root, self.now)
+        )
+        if cached is not None:
+            cached_whois_result = self._whois_result_from_root_cache(root, cached)
+            if cached_whois_result is not None:
+                assert cache_source is not None
+                self._record_cache_hit("rdap", cache_source)
+                return cached_whois_result
+        task = self.whois_tasks.get(root)
+        if task is None:
+            task = asyncio.create_task(
+                self._run_whois_fallback_task(parsed),
+                name=f"whois_{root}",
+            )
+            self.whois_tasks[root] = task
+        whois_result = await task
+        await self._queue_whois_registration_cache_write(root, whois_result)
+        return whois_result
+
     async def _resolve_rdap_result(self, parsed: ParsedHostItem) -> RDAPLookupOutcome:
         root = parsed.entry.registrable_domain
         next_stage_message = (
@@ -1263,6 +1407,35 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         if cached is not None:
             assert cache_source is not None
             self._record_cache_hit("rdap", cache_source)
+            cached_whois_result = self._whois_result_from_root_cache(root, cached)
+            if cached_whois_result is not None:
+                if (
+                    cached_whois_result.is_unregistered()
+                    or not parsed.job.config["dns"]["enabled"]
+                ):
+                    log.debug(
+                        "[%s %d/%d] %s root %s cache hit for root=%s "
+                        "classification=%s; using cached WHOIS registration evidence",
+                        parsed.job.source_id,
+                        parsed.sequence,
+                        parsed.total,
+                        parsed.entry.host,
+                        cache_source,
+                        root,
+                        cached.classification,
+                    )
+                    return RDAPLookupOutcome(None, None, cached_whois_result)
+                log.debug(
+                    "[%s %d/%d] %s root %s cache hit for root=%s "
+                    "classification=%s from WHOIS registered evidence; refreshing live RDAP",
+                    parsed.job.source_id,
+                    parsed.sequence,
+                    parsed.total,
+                    parsed.entry.host,
+                    cache_source,
+                    root,
+                    cached.classification,
+                )
             if (
                 cached.classification
                 == ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED
@@ -1536,7 +1709,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         )
         return rdap_result
 
-    async def _rdap_stage(self) -> None:
+    async def _rdap_stage(self) -> None:  # pylint: disable=too-many-statements
         while True:
             parsed = await self.queue_bundle.parse_to_rdap.get()
             try:
@@ -1605,16 +1778,28 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         rdap_outcome = RDAPLookupOutcome(None, exc.info)
                 rdap_result = rdap_outcome.rdap_result
                 rdap_unavailable = rdap_outcome.rdap_unavailable
+                whois_result = rdap_outcome.whois_result
+                if (
+                    rdap_result is None
+                    and whois_result is None
+                    and rdap_unavailable is not None
+                    and (parsed.manual_add or not parsed.job.config["dns"]["enabled"])
+                ):
+                    whois_result = await self._resolve_whois_fallback(
+                        parsed,
+                        rdap_unavailable,
+                    )
                 if parsed.manual_add:
                     await self._emit_manual_add_result(
                         parsed,
                         rdap_result,
                         rdap_unavailable,
+                        whois_result,
                     )
                     continue
                 if rdap_result is not None and not rdap_result.exists:
                     log.debug(
-                        "[%s %d/%d] %s filtered before DNS because registrable_domain=%s "
+                        "[%s %d/%d] %s dead before DNS because registrable_domain=%s "
                         "is RDAP-unregistered (rdap_source=%s)",
                         parsed.job.source_id,
                         parsed.sequence,
@@ -1645,6 +1830,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "dead_root",
                         None,
                         rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
                         dns_status_override="skipped",
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
@@ -1660,6 +1846,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             rdap_result=rdap_result,
                             dns_result=dns_result,
                             rdap_unavailable=rdap_unavailable,
+                            whois_result=whois_result,
                         )
                     )
                     continue
@@ -1668,6 +1855,59 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         parsed,
                         rdap_result,
                         rdap_unavailable,
+                    )
+                    continue
+                if whois_result is not None and whois_result.is_unregistered():
+                    log.debug(
+                        "[%s %d/%d] %s dead before DNS because registrable_domain=%s "
+                        "is WHOIS-unregistered (whois_source=%s)",
+                        parsed.job.source_id,
+                        parsed.sequence,
+                        parsed.total,
+                        parsed.entry.host,
+                        parsed.entry.registrable_domain,
+                        "cache" if whois_result.from_cache else "live",
+                    )
+                    dns_result = DNSResult(
+                        host=parsed.entry.host,
+                        a_exists=False,
+                        a_nodata=False,
+                        a_nxdomain=True,
+                        a_timeout=False,
+                        a_servfail=False,
+                        canonical_name=None,
+                    )
+                    row = build_output_row(
+                        parsed.job,
+                        parsed.entry,
+                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
+                        rdap_result,
+                        dns_result,
+                        [],
+                        "skipped",
+                        "dead_root",
+                        "skipped",
+                        "dead_root",
+                        None,
+                        rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
+                        dns_status_override="skipped",
+                        source_ids_override=list(parsed.source_ids) or None,
+                        source_input_labels_override=list(parsed.source_input_labels)
+                        or None,
+                    )
+                    await self.queue_bundle.result_queue.put(
+                        CompletedHostResult(
+                            job=parsed.job,
+                            entry=parsed.entry,
+                            classification=CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
+                            route=ROUTE_DEAD,
+                            row=row,
+                            rdap_result=rdap_result,
+                            dns_result=dns_result,
+                            rdap_unavailable=rdap_unavailable,
+                            whois_result=whois_result,
+                        )
                     )
                     continue
                 if not parsed.job.config["dns"]["enabled"]:
@@ -1688,16 +1928,28 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         a_servfail=False,
                         canonical_name=None,
                     )
+                    rdap_registered_dns_disabled = (
+                        CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
+                    )
+                    whois_registered_dns_disabled = (
+                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
+                    )
+                    if rdap_result is not None:
+                        classification = rdap_registered_dns_disabled
+                    elif whois_result is not None and whois_result.is_registered():
+                        classification = whois_registered_dns_disabled
+                    elif whois_result is not None:
+                        classification = (
+                            CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED
+                        )
+                    else:
+                        classification = rdap_unavailable_dns_disabled_classification(
+                            rdap_unavailable
+                        )
                     row = build_output_row(
                         parsed.job,
                         parsed.entry,
-                        (
-                            CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
-                            if rdap_result is not None
-                            else rdap_unavailable_dns_disabled_classification(
-                                rdap_unavailable
-                            )
-                        ),
+                        classification,
                         rdap_result,
                         dns_result,
                         [],
@@ -1707,31 +1959,33 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "dns_disabled",
                         None,
                         rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
                         dns_status_override="skipped",
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
                         or None,
                     )
+                    if whois_result is not None and whois_result.is_registered():
+                        route = ROUTE_FILTERED
+                    elif whois_result is not None:
+                        route = ROUTE_REVIEW
+                    else:
+                        route = route_for_rdap_dns_disabled(
+                            rdap_config=parsed.job.config.get("rdap", {}),
+                            rdap_result=rdap_result,
+                            rdap_unavailable=rdap_unavailable,
+                        )
                     await self.queue_bundle.result_queue.put(
                         CompletedHostResult(
                             job=parsed.job,
                             entry=parsed.entry,
-                            classification=(
-                                CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
-                                if rdap_result is not None
-                                else rdap_unavailable_dns_disabled_classification(
-                                    rdap_unavailable
-                                )
-                            ),
-                            route=route_for_rdap_dns_disabled(
-                                rdap_config=parsed.job.config.get("rdap", {}),
-                                rdap_result=rdap_result,
-                                rdap_unavailable=rdap_unavailable,
-                            ),
+                            classification=classification,
+                            route=route,
                             row=row,
                             rdap_result=rdap_result,
                             dns_result=dns_result,
                             rdap_unavailable=rdap_unavailable,
+                            whois_result=whois_result,
                         )
                     )
                     continue
@@ -1740,6 +1994,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         parsed=parsed,
                         rdap_result=rdap_result,
                         rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
                     )
                 )
             finally:
@@ -1877,6 +2132,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         "no_resolved_ips",
                         None,
                         rdap_unavailable=work_item.rdap_unavailable,
+                        whois_result=work_item.whois_result,
                         source_ids_override=list(parsed.source_ids) or None,
                         source_input_labels_override=list(parsed.source_input_labels)
                         or None,
@@ -1893,6 +2149,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                             rdap_result=work_item.rdap_result,
                             dns_result=dns_result,
                             rdap_unavailable=work_item.rdap_unavailable,
+                            whois_result=work_item.whois_result,
                         )
                     )
                     continue
@@ -1903,6 +2160,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         dns_result=dns_result,
                         classification=classification,
                         rdap_unavailable=work_item.rdap_unavailable,
+                        whois_result=work_item.whois_result,
                     )
                 )
             finally:
@@ -2210,6 +2468,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     geo_policy_reason,
                     provider_used,
                     rdap_unavailable=work_item.rdap_unavailable,
+                    whois_result=work_item.whois_result,
                     source_ids_override=list(work_item.parsed.source_ids) or None,
                     source_input_labels_override=list(
                         work_item.parsed.source_input_labels
@@ -2237,6 +2496,7 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                         rdap_result=work_item.rdap_result,
                         dns_result=work_item.dns_result,
                         rdap_unavailable=work_item.rdap_unavailable,
+                        whois_result=work_item.whois_result,
                         geo_results=geo_results,
                         geo_attempts=geo_attempts,
                         geo_policy=decision,
@@ -2289,7 +2549,7 @@ def _log_run_summary(
     log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
     log.info("  Hosts routed to review: %d", review_hosts)
     log.info(
-        "  Hosts written to output/dead after RDAP-unregistered verdict: %d",
+        "  Hosts written to output/dead after unregistered registrable-domain verdict: %d",
         dead_hosts,
     )
     log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))

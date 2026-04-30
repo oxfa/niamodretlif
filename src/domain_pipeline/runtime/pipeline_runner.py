@@ -1,4 +1,4 @@
-"""Source expansion, RDAP-unregistered-root filtering, host DNS checks, and output writing."""
+"""Source expansion, root registration checks, host DNS checks, and output writing."""
 
 from __future__ import annotations
 
@@ -28,9 +28,16 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
     CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+    CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED,
+    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
+    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
     PRE_GEO_REVIEW_CLASSIFICATIONS,
+    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
     ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED,
+    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
 )
 from ..checking import (
     CacheableRDAPUnavailableError,
@@ -43,8 +50,13 @@ from ..checking import (
     RDAPResult,
     RDAPUnavailableInfo,
     RDAPUnavailableError,
+    WHOIS_STATUS_REGISTERED,
+    WHOIS_STATUS_UNREGISTERED,
+    WhoisFallbackResult,
     build_geo_provider,
     evaluate_geo_policy,
+    run_whois_lookup,
+    whois_result_from_cache,
 )
 from ..io.output_manager import (
     dead_output_path_for_job,
@@ -87,6 +99,12 @@ DEFAULT_ECS_FALLBACK_NAMESERVERS = GOOGLE_PUBLIC_DNS_NAMESERVERS
 ECS_CAPABLE_PUBLIC_DNS_NAMESERVERS = frozenset(
     str(ipaddress.ip_address(address))
     for address in [*GOOGLE_PUBLIC_DNS_NAMESERVERS, *QUAD9_ECS_NAMESERVERS]
+)
+WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS = frozenset(
+    {
+        RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
+        RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
+    }
 )
 
 
@@ -336,12 +354,27 @@ def schedule_rdap_entries(
     return scheduled_entries
 
 
+def _whois_result_from_root_cache(
+    registrable_domain: str,
+    cached_root: Any,
+) -> WhoisFallbackResult | None:
+    """Return WHOIS registration evidence reconstructed from a root cache row."""
+    classification = str(getattr(cached_root, "classification", ""))
+    if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED:
+        return whois_result_from_cache(registrable_domain, WHOIS_STATUS_REGISTERED)
+    if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED:
+        return whois_result_from_cache(registrable_domain, WHOIS_STATUS_UNREGISTERED)
+    return None
+
+
 def cached_or_live_rdap_result(
     checker: DomainChecker,
     cache: PipelineCache,
     registrable_domain: str,
     now: datetime,
     rdap_lookup_unavailable_ttl_days: int,
+    *,
+    dns_enabled: bool,
 ) -> RDAPLookupOutcome:
     """Return one root-level RDAP decision, using cache when available."""
 
@@ -376,6 +409,28 @@ def cached_or_live_rdap_result(
             "performing live RDAP registrable-domain lookup",
             cache.path,
             registrable_domain,
+        )
+        return live_lookup()
+    cached_whois_result = _whois_result_from_root_cache(
+        registrable_domain,
+        cached_root,
+    )
+    if cached_whois_result is not None:
+        if cached_whois_result.is_unregistered() or not dns_enabled:
+            log.debug(
+                "Root cache hit at %s for root=%s classification=%s; using cached "
+                "WHOIS registration evidence",
+                cache.path,
+                registrable_domain,
+                cached_root.classification,
+            )
+            return RDAPLookupOutcome(None, None, cached_whois_result)
+        log.debug(
+            "Root cache hit at %s for root=%s classification=%s from WHOIS registered "
+            "evidence; refreshing live RDAP because DNS is enabled",
+            cache.path,
+            registrable_domain,
+            cached_root.classification,
         )
         return live_lookup()
     if (
@@ -795,6 +850,82 @@ def _update_root_history(
         cache_stats["cached_refreshed"] += 1
 
 
+def _whois_fallback_enabled(
+    rdap_config: dict[str, Any],
+    rdap_unavailable: RDAPUnavailableInfo | None,
+) -> bool:
+    """Return whether this RDAP-unavailable state should use WHOIS fallback."""
+    whois_config = rdap_config.get("whois_fallback", {})
+    if not bool(whois_config.get("enabled", True)):
+        return False
+    if rdap_unavailable is None:
+        return False
+    return rdap_unavailable.reason in WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS
+
+
+def _store_whois_registration_cache(
+    cache: PipelineCache,
+    cache_stats: Counter,
+    root: str,
+    whois_result: WhoisFallbackResult,
+    now: datetime,
+    rdap_registrable_domain_unregistered_ttl_days: int,
+    rdap_registrable_domain_registered_ttl_days: int,
+) -> None:
+    """Store cacheable WHOIS registered/unregistered evidence."""
+    if whois_result.from_cache:
+        return
+    if whois_result.is_registered():
+        classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED
+        ttl_days = rdap_registrable_domain_registered_ttl_days
+    elif whois_result.is_unregistered():
+        classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED
+        ttl_days = rdap_registrable_domain_unregistered_ttl_days
+    else:
+        return
+    existing_record = cache.get_root(root)
+    cache.upsert_root(root, classification, [], False, now, ttl_days)
+    cache_stats["cached_written"] += 1
+    if existing_record is not None:
+        cache_stats["cached_refreshed"] += 1
+
+
+def _resolve_whois_fallback(
+    cache: PipelineCache,
+    cache_stats: Counter,
+    root: str,
+    rdap_config: dict[str, Any],
+    rdap_unavailable: RDAPUnavailableInfo | None,
+    now: datetime,
+    rdap_registrable_domain_unregistered_ttl_days: int,
+    rdap_registrable_domain_registered_ttl_days: int,
+) -> WhoisFallbackResult | None:
+    """Resolve selected RDAP-unavailable roots through WHOIS fallback."""
+    if not _whois_fallback_enabled(rdap_config, rdap_unavailable):
+        return None
+    cached_root = cache.get_fresh_root(root, now)
+    if cached_root is not None:
+        cached_whois_result = _whois_result_from_root_cache(root, cached_root)
+        if cached_whois_result is not None:
+            return cached_whois_result
+    whois_config = rdap_config.get("whois_fallback", {})
+    whois_result = run_whois_lookup(
+        root,
+        command=str(whois_config.get("command", "whois")),
+        timeout=float(whois_config.get("timeout", 20.0)),
+    )
+    _store_whois_registration_cache(
+        cache,
+        cache_stats,
+        root,
+        whois_result,
+        now,
+        rdap_registrable_domain_unregistered_ttl_days,
+        rdap_registrable_domain_registered_ttl_days,
+    )
+    return whois_result
+
+
 # pylint: disable=too-many-statements
 def classify_and_write_source(
     checker: DomainChecker,
@@ -831,6 +962,7 @@ def classify_and_write_source(
             root = entry.registrable_domain
             rdap_result: RDAPResult | None = None
             rdap_unavailable: RDAPUnavailableInfo | None = None
+            whois_result: WhoisFallbackResult | None = None
             dns_result = DNSResult(
                 host=host,
                 a_exists=False,
@@ -880,6 +1012,7 @@ def classify_and_write_source(
                             root,
                             now,
                             rdap_lookup_unavailable_ttl_days,
+                            dns_enabled=dns_enabled,
                         )
                     except RDAPUnavailableError as exc:
                         rdap_outcome = RDAPLookupOutcome(None, exc.info)
@@ -909,6 +1042,28 @@ def classify_and_write_source(
                     rdap_outcome = rdap_cache[root]
                 rdap_result = rdap_outcome.rdap_result
                 rdap_unavailable = rdap_outcome.rdap_unavailable
+                whois_result = rdap_outcome.whois_result
+                if (
+                    rdap_result is None
+                    and whois_result is None
+                    and not dns_enabled
+                    and rdap_unavailable is not None
+                ):
+                    whois_result = _resolve_whois_fallback(
+                        cache,
+                        cache_stats,
+                        root,
+                        job.config.get("rdap", {}),
+                        rdap_unavailable,
+                        now,
+                        rdap_registrable_domain_unregistered_ttl_days,
+                        rdap_registrable_domain_registered_ttl_days,
+                    )
+                    rdap_cache[root] = RDAPLookupOutcome(
+                        rdap_result,
+                        rdap_unavailable,
+                        whois_result,
+                    )
                 if rdap_result is not None and not rdap_result.exists:
                     log.info(
                         "[%s %d/%d] %s filtered "
@@ -953,19 +1108,74 @@ def classify_and_write_source(
                         None,
                         dns_status_override="skipped",
                         rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
+                    )
+                    dead_rows.append(dead_row)
+                    audit_rows.append(_audit_row(dead_row, route=ROUTE_DEAD))
+                    counts["routed_dead"] += 1
+                    continue
+                if whois_result is not None and whois_result.is_unregistered():
+                    log.info(
+                        "[%s %d/%d] %s dead "
+                        "(whois_unregistered_registrable_domain=%s, whois_source=%s)",
+                        job.source_id,
+                        idx,
+                        total,
+                        host,
+                        root,
+                        "cache" if whois_result.from_cache else "live_whois",
+                    )
+                    classification = (
+                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED
+                    )
+                    counts[classification] += 1
+                    dead_row = build_output_row(
+                        job,
+                        entry,
+                        classification,
+                        rdap_result,
+                        DNSResult(
+                            host=host,
+                            a_exists=False,
+                            a_nodata=False,
+                            a_nxdomain=True,
+                            a_timeout=False,
+                            a_servfail=False,
+                            canonical_name=None,
+                        ),
+                        [],
+                        "skipped",
+                        "dead_root",
+                        "skipped",
+                        "dead_root",
+                        None,
+                        dns_status_override="skipped",
+                        rdap_unavailable=rdap_unavailable,
+                        whois_result=whois_result,
                     )
                     dead_rows.append(dead_row)
                     audit_rows.append(_audit_row(dead_row, route=ROUTE_DEAD))
                     counts["routed_dead"] += 1
                     continue
                 if not dns_enabled:
-                    classification = (
+                    rdap_registered_dns_disabled = (
                         CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
-                        if rdap_result is not None
-                        else rdap_unavailable_dns_disabled_classification(
+                    )
+                    whois_registered_dns_disabled = (
+                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
+                    )
+                    if rdap_result is not None:
+                        classification = rdap_registered_dns_disabled
+                    elif whois_result is not None and whois_result.is_registered():
+                        classification = whois_registered_dns_disabled
+                    elif whois_result is not None:
+                        classification = (
+                            CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED
+                        )
+                    else:
+                        classification = rdap_unavailable_dns_disabled_classification(
                             rdap_unavailable
                         )
-                    )
                     counts["geo_skipped"] += 1
                     counts["geo_policy_skipped"] += 1
                     dns_status_override = "skipped"
@@ -987,11 +1197,16 @@ def classify_and_write_source(
                             else "(none)"
                         ),
                     )
-                    route = route_for_rdap_dns_disabled(
-                        rdap_config=job.config.get("rdap", {}),
-                        rdap_result=rdap_result,
-                        rdap_unavailable=rdap_unavailable,
-                    )
+                    if whois_result is not None and whois_result.is_registered():
+                        route = ROUTE_FILTERED
+                    elif whois_result is not None:
+                        route = ROUTE_REVIEW
+                    else:
+                        route = route_for_rdap_dns_disabled(
+                            rdap_config=job.config.get("rdap", {}),
+                            rdap_result=rdap_result,
+                            rdap_unavailable=rdap_unavailable,
+                        )
                 else:
                     classification, rdap_result, dns_result, dns_stats = (
                         classify_host_with_cached_dns(
@@ -1181,6 +1396,7 @@ def classify_and_write_source(
                 geo_provider_for_row,
                 dns_status_override=dns_status_override,
                 rdap_unavailable=rdap_unavailable,
+                whois_result=whois_result,
             )
             if (
                 classification

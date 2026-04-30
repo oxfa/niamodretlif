@@ -16,8 +16,11 @@ defaults:
     # config/global.yaml. Source-level fallback overrides remain possible but
     # are not used by default here.
     timeout: 10.0
-    unavailable_dns_disabled_routes:
-      rdap_no_authoritative_bootstrap: filtered
+    whois_fallback:
+      enabled: true
+      command: whois
+      timeout: 20.0
+      max_concurrency: 2
 
   output:
     directory: output

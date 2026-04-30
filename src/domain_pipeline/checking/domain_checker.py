@@ -5,7 +5,7 @@ concerns:
 
 1. checking whether an ICANN registrable domain is registered in RDAP, and
 2. evaluating exact-host DNS outcomes once that registrable domain is not
-   proven RDAP-unregistered.
+   proven RDAP-unregistered by this checker.
 
 It also exposes a convenience ``classify`` function that instantiates a
 checker with authoritative-RDAP defaults and performs all steps in one call.

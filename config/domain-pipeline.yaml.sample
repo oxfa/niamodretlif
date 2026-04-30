@@ -12,25 +12,27 @@ version: 2
 # The manual-pass file is only supported when all enabled sources in the config
 # have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
 # in workflow-owned runtime. Hosts listed there run through RDAP when they have
-# an ICANN registrable root, but bypass DNS and geo. RDAP-unregistered roots
-# still route to dead output; otherwise matched hosts are emitted to the
-# filtered output for that config.
+# an ICANN registrable root, but bypass DNS and geo. Unregistered roots still
+# route to dead output; otherwise matched hosts are emitted to the filtered
+# output for that config.
 # The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
 # and emits review rows only.
 # manual_filter_pass entries that are ICANN public suffix inputs have no
 # registrable root to query, so explicit approval sends them directly to
 # filtered output with RDAP/DNS/geo skipped.
 # The manual-add file is config-scoped, always skips DNS/geo, and is validated
-# against the config's shared RDAP settings. RDAP-registered roots are emitted
-# to filtered output, while RDAP-unregistered or RDAP-unavailable roots emit
-# review rows instead of dead output. ICANN public-suffix inputs such as "com"
-# are rejected because manual-add entries must still run through RDAP.
+# against the config's shared registration settings. RDAP/WHOIS-registered
+# roots are emitted to filtered output, while unregistered or unavailable roots
+# emit review rows instead of dead output. ICANN public-suffix inputs such as
+# "com" are rejected because manual-add entries must still run through a
+# registration check.
 # Runtime rows use three terminal routes: filtered for positive output, review
-# for uncertain or operator-attention cases, and dead only for RDAP-unregistered
-# ICANN registrable domains. ICANN public suffix inputs route to review unless
-# explicitly approved through manual_filter_pass. RDAP-unavailable hosts with
-# DNS disabled route to review unless rdap.unavailable_dns_disabled_routes maps
-# the specific unavailable reason to filtered.
+# for uncertain or operator-attention cases, and dead only for unregistered
+# ICANN registrable domains proven by RDAP or WHOIS fallback. ICANN public
+# suffix inputs route to review unless explicitly approved through
+# manual_filter_pass. RDAP-unavailable hosts with DNS disabled route to review
+# unless a selected reason is resolved by WHOIS fallback or
+# rdap.unavailable_dns_disabled_routes maps another reason to filtered.
 # A host must not appear in both manual filter files for the same config.
 # A host must not appear in manual_add and either manual_filter_pass or
 # manual_filter_out for the same config.
@@ -88,11 +90,22 @@ defaults:
     # Optional per-reason routing policy for RDAP-unavailable hosts when DNS is
     # disabled. Omitted reasons route to review. Allowed route values are
     # review and filtered; dead is intentionally unsupported because dead output
-    # is reserved for RDAP-unregistered ICANN registrable domains.
+    # is reserved for unregistered ICANN registrable domains.
     unavailable_dns_disabled_routes: {}
-    # Example for RDAP-only block-style configs:
-    # unavailable_dns_disabled_routes:
-    #   rdap_no_authoritative_bootstrap: filtered
+    # WHOIS fallback is secondary registration evidence for DNS-disabled rows
+    # after RDAP cannot produce an authoritative verdict for selected reasons:
+    # rdap_query_http_429_retry_exhausted and rdap_no_authoritative_bootstrap.
+    # The command is invoked without a shell as:
+    # <command> -I <normalized_registrable_domain>
+    # Registered/unregistered WHOIS verdicts reuse the root registration cache.
+    # Unknown/error/timeout/missing-command results are not cached and route
+    # DNS-disabled rows to review. Review CSV columns are unchanged; WHOIS
+    # metadata is written only to raw/terminal JSONL audit rows.
+    whois_fallback:
+      enabled: true
+      command: whois
+      timeout: 20.0
+      max_concurrency: 2
     # Source-level mappings merge with defaults. To override an inherited
     # reason, set the same reason to review or filtered.
 
@@ -151,7 +164,7 @@ defaults:
     # Output directory for files written by the pipeline.
     # Equivalent paths such as output and ./output are treated as the same target.
     # Route outputs are filtered, review, and dead. Dead output is reserved for
-    # RDAP-unregistered ICANN registrable domains.
+    # unregistered ICANN registrable domains proven by RDAP or WHOIS fallback.
     # For a config named config/domain-pipeline.yaml, the runtime writes:
     # - output/filtered/domain-pipeline.txt
     # - output/dead/domain-pipeline.txt
@@ -162,10 +175,10 @@ defaults:
 cache:
   classification_ttl_days:
     # Cache retention, in days, for unregistered ICANN registrable-domain RDAP
-    # verdicts.
+    # verdicts and WHOIS fallback verdicts.
     rdap_registrable_domain_unregistered: 30
     # Cache retention, in days, for registered ICANN registrable-domain RDAP
-    # verdicts.
+    # verdicts and WHOIS fallback verdicts.
     rdap_registrable_domain_registered: 7
     # Cache retention, in days, for reusable reason-specific RDAP-unavailable
     # ICANN registrable-domain states. Legacy broad rdap_lookup_unavailable
@@ -206,6 +219,11 @@ sources:
     rdap:
       # Override RDAP behavior for this source only.
       timeout: 10.0
+      whois_fallback:
+        enabled: true
+        command: whois
+        timeout: 20.0
+        max_concurrency: 2
       # Optional per-source route overrides. Omit this key to inherit the
       # default mapping above.
       # unavailable_dns_disabled_routes:
@@ -242,6 +260,7 @@ sources:
       # The filtered/dead txt files and review file follow output.directory.
       # ICANN public suffix inputs write review rows instead of filtered or dead
       # rows, except when explicitly approved through manual_filter_pass.
-      # RDAP-unavailable DNS-disabled hosts write review rows unless the
-      # specific RDAP-unavailable reason is mapped to filtered under rdap.
+      # RDAP-unavailable DNS-disabled hosts write review rows unless WHOIS
+      # fallback resolves a selected reason or the specific unavailable reason
+      # is mapped to filtered under rdap.
       directory: output

@@ -159,6 +159,46 @@ class DNSConfig(StrictModel):
         return normalized
 
 
+class WhoisFallbackConfig(StrictModel):
+    """WHOIS command fallback settings for selected RDAP-unavailable cases."""
+
+    enabled: bool = True
+    command: str = "whois"
+    timeout: float = 20.0
+    max_concurrency: int = 2
+
+    @field_validator("command", mode="after")
+    @classmethod
+    def _validate_command(cls, value: str) -> str:
+        command = value.strip()
+        if not command:
+            raise ValueError("rdap.whois_fallback.command must be non-empty")
+        if any(character.isspace() for character in command):
+            raise ValueError(
+                "rdap.whois_fallback.command must be an executable name or path, "
+                "not shell text"
+            )
+        if re.search(r"[;&|<>`$]", command):
+            raise ValueError(
+                "rdap.whois_fallback.command must not contain shell metacharacters"
+            )
+        return command
+
+    @field_validator("timeout", mode="after")
+    @classmethod
+    def _validate_timeout(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("rdap.whois_fallback.timeout must be finite and positive")
+        return float(value)
+
+    @field_validator("max_concurrency", mode="after")
+    @classmethod
+    def _validate_max_concurrency(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("rdap.whois_fallback.max_concurrency must be >= 1")
+        return value
+
+
 class RDAPConfig(StrictModel):
     """RDAP lookup settings."""
 
@@ -171,6 +211,7 @@ class RDAPConfig(StrictModel):
     unavailable_dns_disabled_routes: dict[str, Literal["filtered", "review"]] = Field(
         default_factory=dict
     )
+    whois_fallback: WhoisFallbackConfig = Field(default_factory=WhoisFallbackConfig)
 
     @field_validator("rate_limit_retry_fallback_seconds", mode="after")
     @classmethod

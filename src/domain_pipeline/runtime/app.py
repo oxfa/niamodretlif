@@ -67,7 +67,7 @@ def _log_run_summary(
     log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
     log.info("  Hosts routed to review: %d", review_hosts)
     log.info(
-        "  Hosts written to output/dead after RDAP-unregistered verdict: %d",
+        "  Hosts written to output/dead after unregistered registrable-domain verdict: %d",
         dead_hosts,
     )
     log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))
