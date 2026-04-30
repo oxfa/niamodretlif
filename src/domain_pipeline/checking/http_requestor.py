@@ -1,4 +1,4 @@
-"""Shared HTTP GET retry logic for RDAP and geo providers."""
+"""Shared HTTP GET retry logic for geo providers."""
 
 from __future__ import annotations
 

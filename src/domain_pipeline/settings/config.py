@@ -1,4 +1,4 @@
-"""Configuration loading and normalization for the domain pipeline."""
+"""Configuration loading and normalization for the DNS actionability pipeline."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -19,23 +19,23 @@ from pydantic import (
     model_validator,
 )
 
-from domain_pipeline.classifications import (
-    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON,
-    RDAP_UNAVAILABLE_REASON_UNKNOWN,
-    ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE,
-    ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
-    ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-)
+from .constants import GEO_PROVIDER_GEOJS, GEO_PROVIDER_IPINFO_LITE
 
 try:
     import yaml as YAML_MODULE
 except ModuleNotFoundError:  # pragma: no cover
     YAML_MODULE = None
 
-from .constants import GEO_PROVIDER_GEOJS, GEO_PROVIDER_IPINFO_LITE
-
 CONFIG_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ISO_REGION_RULE_PATTERN = re.compile(r"^[A-Z]{2}-[A-Z0-9]{1,3}$")
+LEGACY_TOP_LEVEL_KEYS = {"rdap", "rdap_global_policy", "whois_fallback"}
+LEGACY_CACHE_TTL_KEYS = {
+    "rdap_registrable_domain_unregistered",
+    "rdap_registrable_domain_registered",
+    "rdap_lookup_unavailable",
+    "dead",
+    "alive",
+}
 
 
 class StrictModel(BaseModel):
@@ -95,10 +95,27 @@ class FetchConfig(StrictModel):
     request_timeout: float = 30.0
 
 
-class DNSConfig(StrictModel):
-    """DNS lookup settings."""
+class DNSStageConfig(StrictModel):
+    """Retry settings for one DNS stage."""
 
-    enabled: bool = True
+    retry_attempts: int = 3
+
+    @field_validator("retry_attempts", mode="after")
+    @classmethod
+    def _validate_retry_attempts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("dns stage retry_attempts must be >= 1")
+        return value
+
+
+class DNSHostResolutionConfig(DNSStageConfig):
+    """Optional host-resolution stage settings."""
+
+    enabled: bool | None = None
+
+
+class DNSConfig(StrictModel):
+    """Shared DNS resolver settings and DNS stages."""
 
     class ECSConfig(StrictModel):
         """EDNS Client Subnet settings."""
@@ -121,16 +138,12 @@ class DNSConfig(StrictModel):
 
         @model_validator(mode="after")
         def _validate_ecs(self) -> "DNSConfig.ECSConfig":
-            subnet = self.subnet
             if not self.enabled:
                 return self
-            if not subnet:
+            if not self.subnet:
                 raise ValueError("dns.ecs.enabled=true requires dns.ecs.subnet")
-            network = ipaddress.ip_network(subnet, strict=False)
-            if (
-                self.scope_prefix_length < 0
-                or self.scope_prefix_length > network.max_prefixlen
-            ):
+            network = ipaddress.ip_network(self.subnet, strict=False)
+            if not 0 <= self.scope_prefix_length <= network.max_prefixlen:
                 raise ValueError(
                     "dns.ecs.scope_prefix_length must be within the subnet address family range"
                 )
@@ -139,6 +152,17 @@ class DNSConfig(StrictModel):
     nameservers: list[str] = Field(default_factory=list)
     timeout: float = 5.0
     ecs: ECSConfig = Field(default_factory=ECSConfig)
+    delegation: DNSStageConfig = Field(default_factory=DNSStageConfig)
+    host_resolution: DNSHostResolutionConfig = Field(
+        default_factory=DNSHostResolutionConfig
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_enabled(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "enabled" in value:
+            raise ValueError("dns.enabled is unsupported; dns.delegation is mandatory")
+        return value
 
     @field_validator("nameservers", mode="after")
     @classmethod
@@ -154,175 +178,17 @@ class DNSConfig(StrictModel):
                 normalized.append(str(ipaddress.ip_address(stripped)))
             except ValueError as exc:
                 raise ValueError(
-                    f"dns.nameservers entries must be valid IPv4 or IPv6 addresses (got {value!r})"
+                    "dns.nameservers entries must be valid IPv4 or IPv6 addresses "
+                    f"(got {value!r})"
                 ) from exc
         return normalized
-
-
-class WhoisFallbackConfig(StrictModel):
-    """WHOIS command fallback settings for selected RDAP-unavailable cases."""
-
-    enabled: bool = True
-    command: str = "whois"
-    timeout: float = 20.0
-    max_concurrency: int = 2
-
-    @field_validator("command", mode="after")
-    @classmethod
-    def _validate_command(cls, value: str) -> str:
-        command = value.strip()
-        if not command:
-            raise ValueError("rdap.whois_fallback.command must be non-empty")
-        if any(character.isspace() for character in command):
-            raise ValueError(
-                "rdap.whois_fallback.command must be an executable name or path, "
-                "not shell text"
-            )
-        if re.search(r"[;&|<>`$]", command):
-            raise ValueError(
-                "rdap.whois_fallback.command must not contain shell metacharacters"
-            )
-        return command
 
     @field_validator("timeout", mode="after")
     @classmethod
     def _validate_timeout(cls, value: float) -> float:
         if not math.isfinite(value) or value <= 0:
-            raise ValueError("rdap.whois_fallback.timeout must be finite and positive")
+            raise ValueError("dns.timeout must be finite and positive")
         return float(value)
-
-    @field_validator("max_concurrency", mode="after")
-    @classmethod
-    def _validate_max_concurrency(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("rdap.whois_fallback.max_concurrency must be >= 1")
-        return value
-
-
-class RDAPConfig(StrictModel):
-    """RDAP lookup settings."""
-
-    timeout: float = 10.0
-    rate_limit_retry_fallback_seconds: tuple[float, ...] = (
-        30.0,
-        60.0,
-        120.0,
-    )
-    unavailable_dns_disabled_routes: dict[str, Literal["filtered", "review"]] = Field(
-        default_factory=dict
-    )
-    whois_fallback: WhoisFallbackConfig = Field(default_factory=WhoisFallbackConfig)
-
-    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
-    @classmethod
-    def _validate_rate_limit_retry_fallback_seconds(
-        cls, value: tuple[float, ...]
-    ) -> tuple[float, ...]:
-        if not value:
-            raise ValueError("rdap.rate_limit_retry_fallback_seconds must be non-empty")
-        for seconds in value:
-            if not math.isfinite(seconds) or seconds < 0:
-                raise ValueError(
-                    "rdap.rate_limit_retry_fallback_seconds entries must be "
-                    "finite non-negative numbers"
-                )
-        return tuple(float(seconds) for seconds in value)
-
-    @field_validator("unavailable_dns_disabled_routes", mode="after")
-    @classmethod
-    def _validate_unavailable_dns_disabled_routes(
-        cls,
-        value: dict[str, Literal["filtered", "review"]],
-    ) -> dict[str, Literal["filtered", "review"]]:
-        valid_reasons = set(RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON)
-        valid_reasons.discard(RDAP_UNAVAILABLE_REASON_UNKNOWN)
-        invalid_reasons = sorted(set(value) - valid_reasons)
-        if invalid_reasons:
-            raise ValueError(
-                "rdap.unavailable_dns_disabled_routes keys must be known "
-                "RDAP-unavailable DNS-disabled reasons, excluding "
-                f"{RDAP_UNAVAILABLE_REASON_UNKNOWN!r} "
-                f"(invalid: {', '.join(invalid_reasons)})"
-            )
-        return dict(value)
-
-
-def _validate_fallback_seconds_sequence(
-    value: tuple[float, ...] | list[float],
-    *,
-    field_name: str,
-) -> tuple[float, ...]:
-    """Validate one RDAP rate-limit fallback sequence."""
-    if not value:
-        raise ValueError(f"{field_name} must be non-empty")
-    normalized: list[float] = []
-    for seconds in value:
-        if not math.isfinite(seconds) or seconds < 0:
-            raise ValueError(
-                f"{field_name} entries must be finite non-negative numbers"
-            )
-        normalized.append(float(seconds))
-    return tuple(normalized)
-
-
-class RDAPAuthoritativeServerPolicyConfig(StrictModel):
-    """Per-authoritative-RDAP-server retry fallback policy."""
-
-    rate_limit_retry_fallback_seconds: tuple[float, ...]
-
-    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
-    @classmethod
-    def _validate_rate_limit_retry_fallback_seconds(
-        cls, value: tuple[float, ...]
-    ) -> tuple[float, ...]:
-        return _validate_fallback_seconds_sequence(
-            value,
-            field_name=(
-                "rdap.authoritative_servers[].rate_limit_retry_fallback_seconds"
-            ),
-        )
-
-
-class RDAPGlobalPolicyConfig(StrictModel):
-    """RDAP section of the non-runnable global policy config."""
-
-    rate_limit_retry_fallback_seconds: tuple[float, ...]
-    authoritative_servers: dict[str, RDAPAuthoritativeServerPolicyConfig] = Field(
-        default_factory=dict
-    )
-
-    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
-    @classmethod
-    def _validate_rate_limit_retry_fallback_seconds(
-        cls, value: tuple[float, ...]
-    ) -> tuple[float, ...]:
-        return _validate_fallback_seconds_sequence(
-            value,
-            field_name="rdap.rate_limit_retry_fallback_seconds",
-        )
-
-    @field_validator("authoritative_servers", mode="after")
-    @classmethod
-    def _validate_authoritative_servers(
-        cls,
-        value: dict[str, RDAPAuthoritativeServerPolicyConfig],
-    ) -> dict[str, RDAPAuthoritativeServerPolicyConfig]:
-        for server_url in value:
-            if not server_url.strip():
-                raise ValueError(
-                    "rdap.authoritative_servers keys must be non-empty strings"
-                )
-            if not server_url.endswith("/"):
-                raise ValueError("rdap.authoritative_servers keys must end in '/'")
-        return dict(value)
-
-
-class GlobalPolicyConfig(StrictModel):
-    """Non-runnable checked-in policy shared by trusted automation configs."""
-
-    version: Literal[1]
-    kind: Literal["rdap_global_policy"]
-    rdap: RDAPGlobalPolicyConfig
 
 
 class OutputConfig(StrictModel):
@@ -365,34 +231,22 @@ class InputConfig(StrictModel):
 
 
 class ClassificationTTLConfig(StrictModel):
-    """Classification cache TTLs."""
+    """DNS actionability cache TTLs."""
 
-    rdap_registrable_domain_unregistered: int = 7
-    rdap_registrable_domain_registered: int = 7
-    rdap_lookup_unavailable: int = 7
+    dns_delegation_actionable: int = 7
+    dns_delegation_unactionable: int = 1
 
     @model_validator(mode="before")
     @classmethod
-    def _upgrade_legacy_keys(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        upgraded = dict(value)
-        if "dead" in upgraded and (
-            ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED not in upgraded
-        ):
-            upgraded[ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED] = (
-                upgraded["dead"]
-            )
-        if "alive" in upgraded:
-            if ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED not in upgraded:
-                upgraded[ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED] = (
-                    upgraded["alive"]
+    def _reject_legacy_keys(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            legacy_keys = sorted(set(value) & LEGACY_CACHE_TTL_KEYS)
+            if legacy_keys:
+                raise ValueError(
+                    "RDAP/WHOIS cache TTL keys are unsupported: "
+                    + ", ".join(legacy_keys)
                 )
-            if ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE not in upgraded:
-                upgraded[ROOT_CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE] = upgraded[
-                    "alive"
-                ]
-        return upgraded
+        return value
 
 
 class CacheConfig(StrictModel):
@@ -409,7 +263,6 @@ class DefaultsConfig(StrictModel):
 
     fetch: FetchConfig = Field(default_factory=FetchConfig)
     dns: DNSConfig = Field(default_factory=DNSConfig)
-    rdap: RDAPConfig = Field(default_factory=RDAPConfig)
     geo: GeoConfig = Field(default_factory=GeoConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
@@ -422,7 +275,6 @@ class SourceOverrideConfig(StrictModel):
     input: InputConfig
     fetch: FetchConfig | None = None
     dns: DNSConfig | None = None
-    rdap: RDAPConfig | None = None
     geo: GeoConfig | None = None
     output: OutputConfig | None = None
 
@@ -443,7 +295,6 @@ class EffectiveSourceConfig(StrictModel):
     input: InputConfig
     fetch: FetchConfig = Field(default_factory=FetchConfig)
     dns: DNSConfig = Field(default_factory=DNSConfig)
-    rdap: RDAPConfig = Field(default_factory=RDAPConfig)
     geo: GeoConfig = Field(default_factory=GeoConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
@@ -455,6 +306,17 @@ class RawPipelineConfig(StrictModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     sources: list[SourceOverrideConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_top_level_keys(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            legacy_keys = sorted(set(value) & LEGACY_TOP_LEVEL_KEYS)
+            if legacy_keys:
+                raise ValueError(
+                    "RDAP/WHOIS config keys are unsupported: " + ", ".join(legacy_keys)
+                )
+        return value
 
     @model_validator(mode="after")
     def _validate_sources(self) -> "RawPipelineConfig":
@@ -481,7 +343,6 @@ class NormalizedPipelineConfig(StrictModel):
 
 
 def _explicit_model_dump(model: BaseModel) -> dict[str, Any]:
-    """Return only fields that were explicitly set on a Pydantic model."""
     payload: dict[str, Any] = {}
     for field_name in model.model_fields_set:
         value = getattr(model, field_name)
@@ -528,27 +389,23 @@ def merge_nested(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
 
 
 def _normalized_output_directory(directory: str) -> Path:
-    """Return a stable comparison key for one configured output directory."""
     return Path(directory).expanduser().resolve()
 
 
 def _geo_requires_region_lookup(geo_payload: dict[str, Any]) -> bool:
-    """Return whether one normalized geo policy needs region-capable lookup."""
-    policy = cast(dict[str, Any], geo_payload.get("policy", {}))
-    include = cast(dict[str, Any], policy.get("include", {}))
-    exclude = cast(dict[str, Any], policy.get("exclude", {}))
+    policy = geo_payload.get("policy", {})
+    include = policy.get("include", {})
+    exclude = policy.get("exclude", {})
     return bool(include.get("regions", []) or exclude.get("regions", []))
 
 
 def _effective_geo_provider_name(geo_payload: dict[str, Any]) -> str:
-    """Return the runtime-selected provider for one normalized geo config."""
     if _geo_requires_region_lookup(geo_payload):
         return GEO_PROVIDER_GEOJS
     return GEO_PROVIDER_IPINFO_LITE
 
 
 def _inject_effective_geo_fields(geo_payload: dict[str, Any]) -> None:
-    """Add runtime-only geo capability fields after config validation succeeds."""
     geo_payload["requires_region_lookup"] = _geo_requires_region_lookup(geo_payload)
     geo_payload["effective_provider"] = _effective_geo_provider_name(geo_payload)
 
@@ -556,7 +413,6 @@ def _inject_effective_geo_fields(geo_payload: dict[str, Any]) -> None:
 def _validate_geo_provider_credentials(
     geo_payload: dict[str, Any], *, source_label: str
 ) -> None:
-    """Reject enabled sources whose effective geo provider lacks required credentials."""
     if not bool(geo_payload.get("enabled")):
         return
     if str(geo_payload.get("effective_provider", "")) != GEO_PROVIDER_IPINFO_LITE:
@@ -574,14 +430,13 @@ def _validate_geo_provider_credentials(
 def _validate_geojs_region_rules(
     geo_payload: dict[str, Any], *, source_label: str
 ) -> None:
-    """Reject ISO-style region rules for the GeoJS-backed region-aware path."""
     if str(geo_payload.get("effective_provider", "")) != GEO_PROVIDER_GEOJS:
         return
-    policy = cast(dict[str, Any], geo_payload.get("policy", {}))
+    policy = geo_payload.get("policy", {})
     for bucket_name in ("include", "exclude"):
-        bucket = cast(dict[str, Any], policy.get(bucket_name, {}))
-        for value in cast(list[str], bucket.get("regions", [])):
-            candidate = value.strip()
+        bucket = policy.get(bucket_name, {})
+        for value in bucket.get("regions", []):
+            candidate = str(value).strip()
             if ISO_REGION_RULE_PATTERN.fullmatch(candidate.upper()):
                 raise ValueError(
                     f"{source_label} geo.policy.{bucket_name}.regions contains "
@@ -590,16 +445,12 @@ def _validate_geojs_region_rules(
                 )
 
 
-def _validate_source_stage_dependencies(source_payload: dict[str, Any]) -> None:
-    """Reject invalid stage combinations for one normalized source config."""
-    if not bool(source_payload.get("enabled")):
-        return
-    dns_payload = cast(dict[str, Any], source_payload.get("dns", {}))
-    geo_payload = cast(dict[str, Any], source_payload.get("geo", {}))
-    if bool(geo_payload.get("enabled")) and not bool(dns_payload.get("enabled", True)):
-        raise ValueError(
-            f"sources[{source_payload['id']!r}] geo.enabled=true requires dns.enabled=true"
-        )
+def _finalize_dns_stage_defaults(source_payload: dict[str, Any]) -> None:
+    """Apply derived host-resolution defaults after source/default merging."""
+    dns_payload = source_payload["dns"]
+    host_resolution = dns_payload["host_resolution"]
+    if host_resolution.get("enabled") is None:
+        host_resolution["enabled"] = bool(source_payload["geo"]["enabled"])
 
 
 def _load_yaml_payload(path: Path) -> dict[str, Any]:
@@ -607,10 +458,8 @@ def _load_yaml_payload(path: Path) -> dict[str, Any]:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(f"unable to read config file {path}: {exc}") from exc
-
     if YAML_MODULE is None:
         raise ValueError("PyYAML is required to load version 2 config files")
-
     try:
         payload = YAML_MODULE.safe_load(raw_text)
     except Exception as exc:  # pragma: no cover
@@ -628,85 +477,27 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 
 def load_global_policy(path: Path) -> dict[str, Any]:
-    """Load and validate the non-runnable global RDAP policy config."""
-    payload = _load_yaml_payload(path)
-    try:
-        global_config = GlobalPolicyConfig.model_validate(payload)
-    except ValidationError as exc:
-        raise ValueError(_format_validation_error(exc)) from exc
-    return global_config.model_dump()
+    """Reject the removed global RDAP policy entrypoint."""
+    raise ValueError(f"global RDAP policy files are unsupported: {path}")
 
 
-def _default_has_explicit_rdap_fallback(raw_config: RawPipelineConfig) -> bool:
-    """Return whether defaults.rdap explicitly sets the source fallback."""
-    if "rdap" not in raw_config.defaults.model_fields_set:
-        return False
-    return (
-        "rate_limit_retry_fallback_seconds" in raw_config.defaults.rdap.model_fields_set
-    )
-
-
-def _source_has_explicit_rdap_fallback(source: SourceOverrideConfig) -> bool:
-    """Return whether one source explicitly sets the source fallback."""
-    if source.rdap is None:
-        return False
-    return "rate_limit_retry_fallback_seconds" in source.rdap.model_fields_set
-
-
-def _rdap_fallback_source_marker(
-    *,
-    source: SourceOverrideConfig,
-    raw_config: RawPipelineConfig,
-    global_policy: dict[str, Any] | None,
-) -> str:
-    """Return the normalized source's RDAP fallback provenance marker."""
-    if _source_has_explicit_rdap_fallback(source):
-        return "source_override"
-    if global_policy is not None and not _default_has_explicit_rdap_fallback(
-        raw_config
-    ):
-        return "global_default"
-    if _default_has_explicit_rdap_fallback(raw_config):
-        return "source_override"
-    return "builtin_default"
-
-
-def _load_config(
-    path: Path,
-    *,
-    validate_runtime_credentials: bool,
-    global_config_path: Path | None = None,
-) -> dict[str, Any]:
+def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str, Any]:
     """Load and validate one version 2 YAML configuration file."""
     config_namespace = config_namespace_from_path(path)
-    global_policy = (
-        load_global_policy(global_config_path)
-        if global_config_path is not None
-        else None
-    )
     payload = _load_yaml_payload(path)
     if payload.get("version") != 2:
         raise ValueError(
             "config must declare version: 2 and use top-level keys defaults, cache, and sources"
         )
-
     try:
         raw_config = RawPipelineConfig.model_validate(payload)
     except ValidationError as exc:
         raise ValueError(_format_validation_error(exc)) from exc
 
     defaults_payload = raw_config.defaults.model_dump()
-    if global_policy is not None and not _default_has_explicit_rdap_fallback(
-        raw_config
-    ):
-        defaults_payload["rdap"]["rate_limit_retry_fallback_seconds"] = list(
-            global_policy["rdap"]["rate_limit_retry_fallback_seconds"]
-        )
     normalized_sources: list[dict[str, Any]] = []
     seen_source_ids: set[str] = set()
     for source in raw_config.sources:
-        # Keep only fields that were explicitly set in the source YAML so
-        # omitted nested values continue to inherit from defaults.
         source_payload = _explicit_model_dump(source)
         merged_source = merge_nested(defaults_payload, source_payload)
         merged_source["id"] = source.id
@@ -718,7 +509,9 @@ def _load_config(
         if normalized_source.id in seen_source_ids:
             raise ValueError(f"duplicate source id {normalized_source.id!r}")
         seen_source_ids.add(normalized_source.id)
-        normalized_sources.append(normalized_source.model_dump())
+        source_dict = normalized_source.model_dump()
+        _finalize_dns_stage_defaults(source_dict)
+        normalized_sources.append(source_dict)
 
     try:
         normalized_config = NormalizedPipelineConfig.model_validate(
@@ -746,21 +539,8 @@ def _load_config(
         )
 
     normalized_payload = normalized_config.model_dump()
-    if global_policy is not None:
-        normalized_payload["rdap_global_policy"] = global_policy["rdap"]
-    source_by_id = {source.id: source for source in raw_config.sources}
-    for source_payload in normalized_payload["sources"]:
-        source = source_by_id[str(source_payload["id"])]
-        source_payload["rdap"]["rate_limit_retry_fallback_seconds_source"] = (
-            _rdap_fallback_source_marker(
-                source=source,
-                raw_config=raw_config,
-                global_policy=global_policy,
-            )
-        )
     _inject_effective_geo_fields(normalized_payload["defaults"]["geo"])
     for source in normalized_payload["sources"]:
-        _validate_source_stage_dependencies(source)
         _inject_effective_geo_fields(source["geo"])
         _validate_geojs_region_rules(
             source["geo"], source_label=f"sources[{source['id']!r}]"
@@ -773,13 +553,14 @@ def _load_config(
 
 
 def load_config(
-    path: Path,
-    *,
-    global_config_path: Path | None = None,
+    path: Path, *, global_config_path: Path | None = None
 ) -> dict[str, Any]:
     """Load a runtime-ready version 2 YAML configuration file."""
-    return _load_config(
-        path,
-        validate_runtime_credentials=True,
-        global_config_path=global_config_path,
-    )
+    if global_config_path is not None:
+        raise ValueError("global_config_path is unsupported after RDAP/WHOIS removal")
+    return _load_config(path, validate_runtime_credentials=True)
+
+
+def load_config_without_runtime_credentials(path: Path) -> dict[str, Any]:
+    """Load config while skipping runtime credential checks for preparation/tests."""
+    return _load_config(path, validate_runtime_credentials=False)

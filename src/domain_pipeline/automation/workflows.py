@@ -33,7 +33,6 @@ from domain_pipeline.path_layout import (
     workflow_state_root,
     worker_bundle_path as layout_worker_bundle_path,
     worker_cache_path,
-    worker_dead_path,
     worker_filtered_path,
     worker_log_path,
     worker_publish_output_root,
@@ -41,6 +40,7 @@ from domain_pipeline.path_layout import (
     worker_state_root,
     worker_status_path as layout_worker_status_path,
     worker_terminal_rows_path,
+    worker_unactionable_path,
 )
 from domain_pipeline.preparation import (
     PreparedHostEntry,
@@ -51,8 +51,10 @@ from domain_pipeline.preparation import (
 )
 from domain_pipeline.runtime.app import run_prepared_pipeline
 from domain_pipeline.runtime.history import (
+    DELEGATION_TABLE,
+    DNS_TABLE,
+    GEO_TABLE,
     PipelineCache,
-    ROOT_CLASSIFICATION_TABLE,
 )
 from domain_pipeline.runtime.pure_helpers import REVIEW_OUTPUT_COLUMNS, ReviewOutputRow
 from domain_pipeline.automation.manifests import (
@@ -269,7 +271,7 @@ def _worker_output_paths(
             worker_id=worker_id,
             config_name=config_name,
         ).relative_to(Path(".")),
-        "dead": worker_dead_path(
+        "unactionable": worker_unactionable_path(
             Path("."),
             batch_id=batch_id,
             worker_id=worker_id,
@@ -413,7 +415,9 @@ def _aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutpu
     config_name = str(config["config_name"])
     return AggregateOutputSpec(
         filtered=_relative(output_directory / "filtered" / f"{config_name}.txt"),
-        dead=_relative(output_directory / "dead" / f"{config_name}.txt"),
+        unactionable=_relative(
+            output_directory / "unactionable" / f"{config_name}.txt"
+        ),
         review=_relative(output_directory / "review" / f"{config_name}.csv"),
         audit=_relative(runtime_raw_audit_path(Path("."), config_name=config_name)),
         log=_relative(runtime_log_path(Path("."), config_name=config_name)),
@@ -463,21 +467,13 @@ def _build_worker_runtime_spec(
         output_spec=WorkerOutputSpec(
             result_root=_relative(worker_paths["result_root"]),
             filtered=_relative(worker_paths["filtered"]),
-            dead=_relative(worker_paths["dead"]),
+            unactionable=_relative(worker_paths["unactionable"]),
             review=_relative(worker_paths["review"]),
             terminal_rows=_relative(worker_paths["terminal_rows"]),
             cache=_relative(worker_paths["cache"]),
         ),
         debug_log_path=_relative(worker_paths["log"]),
-        rdap_global_policy=json.loads(json.dumps(config.get("rdap_global_policy", {}))),
         runtime_paths={
-            "rdap_rate_limit_debug_root": _relative(
-                debug_artifacts_root(Path("."))
-                / "workers"
-                / batch_id
-                / worker_id
-                / "rdap-rate-limit"
-            ),
             "incomplete_manifest_path": _relative(
                 worker_state_root(
                     Path("."),
@@ -517,7 +513,7 @@ def _prepared_runtime_metadata_from_assignment(
     return PreparedRuntimeMetadata(
         prepared_source_ids=sorted(sources_payload),
         sources=sources_payload,
-        rdap_roots={
+        delegation_roots={
             registrable_domain: root_plan_runtime_payload(plan)
             for registrable_domain, plan in sorted(root_plans.items())
         },
@@ -568,65 +564,24 @@ def _log_prepared_assignment_summary(
     worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
     worker_entry_counts: Counter,
-    worker_root_counts: Counter,
-    worker_server_entry_counts: dict[str, Counter],
-    worker_server_root_counts: dict[str, Counter],
-    roots_by_server: dict[str, list[str]],
 ) -> None:
-    """Emit one compact debug summary of host-weighted RDAP worker assignment."""
-    worker_summaries: list[dict[str, Any]] = []
-    for worker_id in worker_ids:
-        root_plans = worker_root_plans[worker_id]
-        public_suffix_count = sum(
-            1
-            for source_entries in worker_source_entries[worker_id].values()
-            for prepared_entry in source_entries
-            if prepared_entry.entry.is_public_suffix_input
-            or not prepared_entry.entry.registrable_domain
-        )
-        worker_summaries.append(
-            {
-                "worker_id": worker_id,
-                "entry_count": worker_entry_counts[worker_id],
-                "rdap_root_count": worker_root_counts[worker_id],
-                "resolved_root_count": sum(
-                    1 for plan in root_plans.values() if plan.status == "resolved"
-                ),
-                "unavailable_root_count": sum(
-                    1 for plan in root_plans.values() if plan.status == "unavailable"
-                ),
-                "unknown_root_count": sum(
-                    1 for plan in root_plans.values() if plan.status == "unknown"
-                ),
-                "public_suffix_entry_count": public_suffix_count,
-            }
-        )
+    """Emit one compact debug summary of worker assignment."""
+    worker_summaries = [
+        {
+            "worker_id": worker_id,
+            "entry_count": worker_entry_counts[worker_id],
+            "delegation_root_count": len(worker_root_plans[worker_id]),
+            "public_suffix_entry_count": sum(
+                1
+                for source_entries in worker_source_entries[worker_id].values()
+                for prepared_entry in source_entries
+                if prepared_entry.entry.is_public_suffix_input
+                or not prepared_entry.entry.registrable_domain
+            ),
+        }
+        for worker_id in worker_ids
+    ]
     logger.debug("Batch preparation worker totals=%s", worker_summaries)
-
-    server_summaries: list[dict[str, Any]] = []
-    for authoritative_base_url in sorted(roots_by_server):
-        entry_counts = {
-            worker_id: worker_server_entry_counts[worker_id][authoritative_base_url]
-            for worker_id in worker_ids
-            if worker_server_entry_counts[worker_id][authoritative_base_url] > 0
-        }
-        root_counts = {
-            worker_id: worker_server_root_counts[worker_id][authoritative_base_url]
-            for worker_id in worker_ids
-            if worker_server_root_counts[worker_id][authoritative_base_url] > 0
-        }
-        if entry_counts or root_counts:
-            server_summaries.append(
-                {
-                    "authoritative_server": authoritative_base_url,
-                    "worker_entry_counts": entry_counts,
-                    "worker_root_counts": root_counts,
-                }
-            )
-    if server_summaries:
-        logger.debug(
-            "Batch preparation authoritative server spread=%s", server_summaries
-        )
 
 
 def _planning_inputs_from_prepared(
@@ -660,74 +615,6 @@ def _ordered_entries_for_root(
     )
 
 
-def _round_robin_resolved_roots_by_server(
-    *,
-    root_plans: dict[str, PreparedRootPlan],
-) -> list[str]:
-    """Return assigned resolved roots interleaved by authoritative RDAP server."""
-    server_to_roots: dict[str, list[str]] = defaultdict(list)
-    for registrable_domain, plan in sorted(root_plans.items()):
-        if plan.status != "resolved" or plan.authoritative_base_url is None:
-            continue
-        server_to_roots[plan.authoritative_base_url].append(registrable_domain)
-
-    ordered_servers = sorted(server_to_roots)
-    server_queues = {
-        server: list(reversed(sorted(roots)))
-        for server, roots in server_to_roots.items()
-        if roots
-    }
-    ordered_roots: list[str] = []
-    while server_queues:
-        exhausted_servers: list[str] = []
-        for server in ordered_servers:
-            roots = server_queues.get(server)
-            if roots is None:
-                continue
-            ordered_roots.append(roots.pop())
-            if not roots:
-                exhausted_servers.append(server)
-        for server in exhausted_servers:
-            server_queues.pop(server, None)
-    return ordered_roots
-
-
-def _reorder_worker_entries_by_rdap_server(
-    *,
-    planning_inputs: PreparedBatchPlanningInputs,
-    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
-    worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
-) -> None:
-    """Interleave each worker's live-RDAP roots by authoritative server."""
-    entry_ids_by_source: dict[str, set[int]] = defaultdict(set)
-    for entries_by_source in worker_source_entries.values():
-        for source_id, entries in entries_by_source.items():
-            entry_ids_by_source[source_id].update(id(entry) for entry in entries)
-
-    for worker_id, root_plans in worker_root_plans.items():
-        ordered_live_entries: dict[str, list[PreparedHostEntry]] = defaultdict(list)
-        ordered_live_entry_ids: dict[str, set[int]] = defaultdict(set)
-        for registrable_domain in _round_robin_resolved_roots_by_server(
-            root_plans=root_plans
-        ):
-            for entry in _ordered_entries_for_root(planning_inputs, registrable_domain):
-                if id(entry) not in entry_ids_by_source[entry.source_id]:
-                    continue
-                ordered_live_entries[entry.source_id].append(entry)
-                ordered_live_entry_ids[entry.source_id].add(id(entry))
-
-        for source_id, entries in list(worker_source_entries[worker_id].items()):
-            live_entries = ordered_live_entries.get(source_id, [])
-            live_entry_ids = ordered_live_entry_ids.get(source_id, set())
-            fallback_entries = [
-                entry for entry in entries if id(entry) not in live_entry_ids
-            ]
-            worker_source_entries[worker_id][source_id] = [
-                *live_entries,
-                *fallback_entries,
-            ]
-
-
 def _assign_prepared_entries_to_workers(
     *,
     planning_inputs: PreparedBatchPlanningInputs,
@@ -737,13 +624,7 @@ def _assign_prepared_entries_to_workers(
     dict[str, dict[str, PreparedRootPlan]],
     Counter,
 ]:
-    """Assign RDAP-aware prepared entries across workers deterministically.
-
-    Resolved roots are spread within each authoritative RDAP server bucket by
-    host count rather than by a global root quota. Unknown and unavailable
-    roots still stay atomic per registrable domain and fall back to total host
-    load balancing.
-    """
+    """Assign prepared entries across workers while keeping each root atomic."""
     worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]] = {
         worker_id: defaultdict(list) for worker_id in worker_ids
     }
@@ -752,12 +633,6 @@ def _assign_prepared_entries_to_workers(
     }
     worker_entry_counts: Counter = Counter()
     worker_root_counts: Counter = Counter()
-    worker_server_entry_counts: dict[str, Counter] = {
-        worker_id: Counter() for worker_id in worker_ids
-    }
-    worker_server_root_counts: dict[str, Counter] = {
-        worker_id: Counter() for worker_id in worker_ids
-    }
     root_entry_counts = {
         registrable_domain: len(entries)
         for registrable_domain, entries in planning_inputs.eligible_root_entries.items()
@@ -777,52 +652,17 @@ def _assign_prepared_entries_to_workers(
         worker_root_counts[worker_id] += 1
         plan = planning_inputs.root_plans[registrable_domain]
         logger.debug(
-            "Batch preparation assigned root=%s status=%s authoritative_server=%s "
-            "worker=%s entry_count=%d",
+            "Batch preparation assigned root=%s status=%s worker=%s entry_count=%d",
             registrable_domain,
             plan.status,
-            plan.authoritative_base_url or "(none)",
             worker_id,
             root_entry_counts[registrable_domain],
         )
 
-    roots_by_server: dict[str, list[str]] = defaultdict(list)
-    unknown_roots: list[str] = []
-    unavailable_roots: list[str] = []
-    for registrable_domain, plan in sorted(planning_inputs.root_plans.items()):
-        if plan.status == "resolved":
-            assert plan.authoritative_base_url is not None
-            roots_by_server[plan.authoritative_base_url].append(registrable_domain)
-        elif plan.status == "unavailable":
-            unavailable_roots.append(registrable_domain)
-        else:
-            unknown_roots.append(registrable_domain)
-
-    for authoritative_base_url in sorted(roots_by_server):
-        current_roots = sorted(
-            roots_by_server[authoritative_base_url],
-            key=lambda registrable_domain: (
-                -root_entry_counts[registrable_domain],
-                registrable_domain,
-            ),
-        )
-        for registrable_domain in current_roots:
-            worker_id = min(
-                worker_ids,
-                key=lambda current_worker_id, authoritative_server=authoritative_base_url: (
-                    worker_server_entry_counts[current_worker_id][authoritative_server],
-                    worker_entry_counts[current_worker_id],
-                    worker_root_counts[current_worker_id],
-                    current_worker_id,
-                ),
-            )
-            assign_root(worker_id, registrable_domain)
-            worker_server_entry_counts[worker_id][
-                authoritative_base_url
-            ] += root_entry_counts[registrable_domain]
-            worker_server_root_counts[worker_id][authoritative_base_url] += 1
-
-    for registrable_domain in sorted(unknown_roots):
+    for registrable_domain in sorted(
+        planning_inputs.root_plans,
+        key=lambda root: (-root_entry_counts[root], root),
+    ):
         worker_id = min(
             worker_ids,
             key=lambda current_worker_id: (
@@ -830,13 +670,6 @@ def _assign_prepared_entries_to_workers(
                 worker_root_counts[current_worker_id],
                 current_worker_id,
             ),
-        )
-        assign_root(worker_id, registrable_domain)
-
-    for registrable_domain in sorted(unavailable_roots):
-        worker_id = _choose_balanced_worker(
-            worker_ids=worker_ids,
-            entry_counts=worker_entry_counts,
         )
         assign_root(worker_id, registrable_domain)
 
@@ -857,20 +690,11 @@ def _assign_prepared_entries_to_workers(
             prepared_entry.entry.host,
             worker_id,
         )
-    _reorder_worker_entries_by_rdap_server(
-        planning_inputs=planning_inputs,
-        worker_source_entries=worker_source_entries,
-        worker_root_plans=worker_root_plans,
-    )
     _log_prepared_assignment_summary(
         worker_ids=worker_ids,
         worker_source_entries=worker_source_entries,
         worker_root_plans=worker_root_plans,
         worker_entry_counts=worker_entry_counts,
-        worker_root_counts=worker_root_counts,
-        worker_server_entry_counts=worker_server_entry_counts,
-        worker_server_root_counts=worker_server_root_counts,
-        roots_by_server=roots_by_server,
     )
     return worker_source_entries, worker_root_plans, worker_entry_counts
 
@@ -915,7 +739,6 @@ def prepare_batch(
     *,
     source_root: Path,
     config_path: Path,
-    global_config_path: Path | None = None,
     worker_ids: list[str],
     batch_id: str,
 ) -> PreparedBatch:
@@ -923,7 +746,6 @@ def prepare_batch(
     prepared_inputs = prepare_inputs(
         source_root=source_root,
         config_path=config_path,
-        global_config_path=global_config_path,
     )
     config_name = str(prepared_inputs.config["config_name"])
     planning_inputs = _planning_inputs_from_prepared(prepared_inputs)
@@ -1572,32 +1394,32 @@ def merge_cache_files(
     target_cache = PipelineCache.load(target_path)
     target_connection = target_cache._connection  # pylint: disable=protected-access
     rows_by_key: dict[str, dict[tuple[str, ...], sqlite3.Row]] = {
-        ROOT_CLASSIFICATION_TABLE: {},
-        "dns_history": {},
-        "geo_history": {},
+        DELEGATION_TABLE: {},
+        DNS_TABLE: {},
+        GEO_TABLE: {},
     }
-    target_root_rows = _merge_cache_table(
-        rows_by_key=rows_by_key[ROOT_CLASSIFICATION_TABLE],
+    target_delegation_rows = _merge_cache_table(
+        rows_by_key=rows_by_key[DELEGATION_TABLE],
         cache_path=target_path,
-        table_name=ROOT_CLASSIFICATION_TABLE,
-        key_columns=("domain",),
+        table_name=DELEGATION_TABLE,
+        key_columns=("domain", "resolver_key"),
     )
     target_dns_rows = _merge_cache_table(
-        rows_by_key=rows_by_key["dns_history"],
+        rows_by_key=rows_by_key[DNS_TABLE],
         cache_path=target_path,
-        table_name="dns_history",
+        table_name=DNS_TABLE,
         key_columns=("host", "resolver_key"),
     )
     target_geo_rows = _merge_cache_table(
-        rows_by_key=rows_by_key["geo_history"],
+        rows_by_key=rows_by_key[GEO_TABLE],
         cache_path=target_path,
-        table_name="geo_history",
+        table_name=GEO_TABLE,
         key_columns=("provider", "ip"),
     )
     logger.debug(
-        "Seeded cache merge target %s with root_rows=%d dns_rows=%d geo_rows=%d",
+        "Seeded cache merge target %s with delegation_rows=%d dns_rows=%d geo_rows=%d",
         target_path,
-        target_root_rows,
+        target_delegation_rows,
         target_dns_rows,
         target_geo_rows,
     )
@@ -1611,22 +1433,22 @@ def merge_cache_files(
                 logger.debug("Skipping missing worker cache %s", cache_path)
                 continue
             try:
-                source_root_rows = _merge_cache_table(
-                    rows_by_key=rows_by_key[ROOT_CLASSIFICATION_TABLE],
+                source_delegation_rows = _merge_cache_table(
+                    rows_by_key=rows_by_key[DELEGATION_TABLE],
                     cache_path=cache_path,
-                    table_name=ROOT_CLASSIFICATION_TABLE,
-                    key_columns=("domain",),
+                    table_name=DELEGATION_TABLE,
+                    key_columns=("domain", "resolver_key"),
                 )
                 source_dns_rows = _merge_cache_table(
-                    rows_by_key=rows_by_key["dns_history"],
+                    rows_by_key=rows_by_key[DNS_TABLE],
                     cache_path=cache_path,
-                    table_name="dns_history",
+                    table_name=DNS_TABLE,
                     key_columns=("host", "resolver_key"),
                 )
                 source_geo_rows = _merge_cache_table(
-                    rows_by_key=rows_by_key["geo_history"],
+                    rows_by_key=rows_by_key[GEO_TABLE],
                     cache_path=cache_path,
-                    table_name="geo_history",
+                    table_name=GEO_TABLE,
                     key_columns=("provider", "ip"),
                 )
             except sqlite3.DatabaseError as exc:
@@ -1635,25 +1457,26 @@ def merge_cache_files(
                 continue
             merged_cache_count += 1
             logger.debug(
-                "Merged worker cache %s with root_rows=%d dns_rows=%d geo_rows=%d",
+                "Merged worker cache %s with delegation_rows=%d dns_rows=%d geo_rows=%d",
                 cache_path,
-                source_root_rows,
+                source_delegation_rows,
                 source_dns_rows,
                 source_geo_rows,
             )
-        target_connection.execute(f"DELETE FROM {ROOT_CLASSIFICATION_TABLE}")
-        target_connection.execute("DELETE FROM dns_history")
-        target_connection.execute("DELETE FROM geo_history")
-        for row in rows_by_key[ROOT_CLASSIFICATION_TABLE].values():
+        target_connection.execute(f"DELETE FROM {DELEGATION_TABLE}")
+        target_connection.execute(f"DELETE FROM {DNS_TABLE}")
+        target_connection.execute(f"DELETE FROM {GEO_TABLE}")
+        for row in rows_by_key[DELEGATION_TABLE].values():
             target_connection.execute(
                 f"""
-                INSERT OR REPLACE INTO {ROOT_CLASSIFICATION_TABLE} (
-                    domain, classification, statuses, statuses_complete, checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO {DELEGATION_TABLE} (
+                    domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
+                    ns_servfail, no_nameservers, nameservers, checked_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(row[column] for column in row.keys()),
             )
-        for row in rows_by_key["dns_history"].values():
+        for row in rows_by_key[DNS_TABLE].values():
             target_connection.execute(
                 """
                 INSERT OR REPLACE INTO dns_history (
@@ -1664,7 +1487,7 @@ def merge_cache_files(
                 """,
                 tuple(row[column] for column in row.keys()),
             )
-        for row in rows_by_key["geo_history"].values():
+        for row in rows_by_key[GEO_TABLE].values():
             target_connection.execute(
                 """
                 INSERT OR REPLACE INTO geo_history (
@@ -1675,12 +1498,12 @@ def merge_cache_files(
             )
         target_connection.commit()
         logger.debug(
-            "Finished cache merge into %s with root_rows=%d dns_rows=%d geo_rows=%d "
+            "Finished cache merge into %s with delegation_rows=%d dns_rows=%d geo_rows=%d "
             "merged_cache_count=%d missing_cache_count=%d invalid_cache_count=%d",
             target_path,
-            len(rows_by_key[ROOT_CLASSIFICATION_TABLE]),
-            len(rows_by_key["dns_history"]),
-            len(rows_by_key["geo_history"]),
+            len(rows_by_key[DELEGATION_TABLE]),
+            len(rows_by_key[DNS_TABLE]),
+            len(rows_by_key[GEO_TABLE]),
             merged_cache_count,
             missing_cache_count,
             invalid_cache_count,
@@ -1810,13 +1633,13 @@ def aggregate_batch(
             )["filtered"]
             for worker_id in worker_ids
         ],
-        "dead": [
+        "unactionable": [
             state_root
             / _worker_output_paths(
                 batch_id=batch_id,
                 worker_id=worker_id,
                 config_name=config_name,
-            )["dead"]
+            )["unactionable"]
             for worker_id in worker_ids
         ],
         "terminal_rows": [
@@ -1862,8 +1685,8 @@ def aggregate_batch(
                 "final_filtered_path": _relative(
                     Path(batch_manifest.aggregate_output_spec.filtered)
                 ),
-                "final_dead_path": _relative(
-                    Path(batch_manifest.aggregate_output_spec.dead)
+                "final_unactionable_path": _relative(
+                    Path(batch_manifest.aggregate_output_spec.unactionable)
                 ),
                 "final_review_path": _relative(
                     Path(batch_manifest.aggregate_output_spec.review)
@@ -1941,7 +1764,9 @@ def aggregate_batch(
         _merge_host_txt_files(
             worker_output_paths["filtered"], final_output_paths["filtered"]
         )
-        _merge_host_txt_files(worker_output_paths["dead"], final_output_paths["dead"])
+        _merge_host_txt_files(
+            worker_output_paths["unactionable"], final_output_paths["unactionable"]
+        )
         _merge_audit_files(
             [*worker_output_paths["terminal_rows"], preparation_terminal_rows_path],
             final_output_paths["audit"],
@@ -2045,7 +1870,9 @@ def aggregate_batch(
         json.dumps(
             {
                 "final_filtered": _path_debug_summary(final_output_paths["filtered"]),
-                "final_dead": _path_debug_summary(final_output_paths["dead"]),
+                "final_unactionable": _path_debug_summary(
+                    final_output_paths["unactionable"]
+                ),
                 "final_review": _path_debug_summary(final_output_paths["review"]),
                 "final_audit": _path_debug_summary(final_output_paths["audit"]),
                 "final_log": final_log_summary,
@@ -2071,7 +1898,7 @@ def aggregate_batch(
         "batch_id": batch_id,
         "target_ref": target_ref,
         "final_filtered_path": batch_manifest.aggregate_output_spec.filtered,
-        "final_dead_path": batch_manifest.aggregate_output_spec.dead,
+        "final_unactionable_path": batch_manifest.aggregate_output_spec.unactionable,
         "final_review_path": batch_manifest.aggregate_output_spec.review,
         "final_audit_path": batch_manifest.aggregate_output_spec.audit,
         "updated_at": _utc_now(),
@@ -2096,7 +1923,7 @@ def aggregate_batch(
         "cache_merge_summary": cache_merge_summary,
         "final_output_paths": {
             "filtered": batch_manifest.aggregate_output_spec.filtered,
-            "dead": batch_manifest.aggregate_output_spec.dead,
+            "unactionable": batch_manifest.aggregate_output_spec.unactionable,
             "review": batch_manifest.aggregate_output_spec.review,
         },
         "final_state_paths": {

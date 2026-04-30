@@ -1,6 +1,6 @@
-"""Explicit async runtime contracts and payload types."""
+"""Explicit runtime contracts and payload types."""
 
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,too-many-instance-attributes
 
 from __future__ import annotations
 
@@ -10,26 +10,20 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..checking import (
-    DNSResult,
+    DelegationResult,
     GeoPolicyDecision,
+    HostResolutionResult,
     IPGeoResult,
-    RDAPResult,
-    RDAPUnavailableInfo,
-    WhoisFallbackResult,
 )
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
 
-CacheTableName = Literal[
-    "root_domain_classification_history",
-    "dns_history",
-    "geo_history",
-]
-ResultRoute = Literal["filtered", "review", "dead"]
+CacheTableName = Literal["delegation_history", "dns_history", "geo_history"]
+ResultRoute = Literal["filtered", "review", "unactionable"]
 
 
 @dataclass(frozen=True)
-class ParsedHostItem:  # pylint: disable=too-many-instance-attributes
+class ParsedHostItem:
     """Normalized parsed host with run-time context and output provenance overrides."""
 
     job: SourceJob
@@ -42,44 +36,33 @@ class ParsedHostItem:  # pylint: disable=too-many-instance-attributes
     source_input_label_override: str | None = None
     source_ids: tuple[str, ...] = ()
     source_input_labels: tuple[str, ...] = ()
-    prepared_rdap_status: str | None = None
-    prepared_authoritative_base_url: str | None = None
-    prepared_rdap_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)
-class RDAPLookupOutcome:
-    """RDAP stage outcome plus unavailable metadata when no verdict exists."""
-
-    rdap_result: RDAPResult | None
-    rdap_unavailable: RDAPUnavailableInfo | None = None
-    whois_result: WhoisFallbackResult | None = None
-
-
-@dataclass(frozen=True)
-class DNSWorkItem:
-    """Item emitted by RDAP for DNS processing."""
+class HostResolutionWorkItem:
+    """Item emitted by delegation for optional host-resolution processing."""
 
     parsed: ParsedHostItem
-    rdap_result: RDAPResult | None
-    rdap_unavailable: RDAPUnavailableInfo | None = None
-    whois_result: WhoisFallbackResult | None = None
+    delegation_result: DelegationResult
 
 
 @dataclass(frozen=True)
 class GeoWorkItem:
-    """Item emitted by DNS for geo processing."""
+    """Item emitted by host resolution for geo processing."""
 
     parsed: ParsedHostItem
-    rdap_result: RDAPResult | None
-    dns_result: DNSResult
+    delegation_result: DelegationResult
+    host_resolution_result: HostResolutionResult
     classification: str
-    rdap_unavailable: RDAPUnavailableInfo | None = None
-    whois_result: WhoisFallbackResult | None = None
+
+    @property
+    def dns_result(self) -> HostResolutionResult:
+        """Compatibility alias for the host-resolution result."""
+        return self.host_resolution_result
 
 
 @dataclass(frozen=True)
-class CompletedHostResult:  # pylint: disable=too-many-instance-attributes
+class CompletedHostResult:
     """Terminal result emitted to the writer boundary."""
 
     job: SourceJob
@@ -87,48 +70,41 @@ class CompletedHostResult:  # pylint: disable=too-many-instance-attributes
     classification: str
     route: ResultRoute
     row: dict[str, Any]
-    rdap_result: RDAPResult | None
-    dns_result: DNSResult
-    rdap_unavailable: RDAPUnavailableInfo | None = None
-    whois_result: WhoisFallbackResult | None = None
+    delegation_result: DelegationResult | None = None
+    host_resolution_result: HostResolutionResult | None = None
+    dns_result: HostResolutionResult | None = None
     geo_results: list[IPGeoResult] = field(default_factory=list)
     geo_policy: GeoPolicyDecision | None = None
     geo_attempts: list[dict[str, Any]] = field(default_factory=list)
 
-
-@dataclass(frozen=True)
-class CacheReadRequest:
-    """Read request routed through the explicit async cache facade."""
-
-    table: CacheTableName
-    key: tuple[str, ...]
-    now: datetime
+    def __post_init__(self) -> None:
+        """Keep legacy dns_result and explicit host_resolution_result synchronized."""
+        if self.host_resolution_result is None and self.dns_result is not None:
+            object.__setattr__(self, "host_resolution_result", self.dns_result)
+        elif self.dns_result is None and self.host_resolution_result is not None:
+            object.__setattr__(self, "dns_result", self.host_resolution_result)
 
 
 @dataclass(frozen=True)
-class CacheReadResponse:
-    """Response from the async cache facade."""
-
-    table: CacheTableName
-    key: tuple[str, ...]
-    record: object | None
-
-
-@dataclass(frozen=True)
-class RootCacheWriteRequest:
-    """Write request for the root cache table."""
+class DelegationCacheWriteRequest:
+    """Write request for the delegation cache table."""
 
     domain: str
-    classification: str
-    statuses: list[str]
-    statuses_complete: bool
+    resolver_key: str
+    ns_exists: bool
+    ns_nodata: bool
+    ns_nxdomain: bool
+    ns_timeout: bool
+    ns_servfail: bool
+    no_nameservers: bool
+    nameservers: list[str]
     checked_at: datetime
     ttl_days: int
 
 
 @dataclass(frozen=True)
-class DNSCacheWriteRequest:  # pylint: disable=too-many-instance-attributes
-    """Write request for the DNS cache table."""
+class DNSCacheWriteRequest:
+    """Write request for the physical dns_history host-resolution cache table."""
 
     host: str
     resolver_key: str
@@ -142,6 +118,10 @@ class DNSCacheWriteRequest:  # pylint: disable=too-many-instance-attributes
     ipv6_addresses: list[str]
     checked_at: datetime
     ttl_days: int
+
+
+HostResolutionCacheWriteRequest = DNSCacheWriteRequest
+"""Explicit name for host-resolution cache writes stored in dns_history."""
 
 
 @dataclass(frozen=True)

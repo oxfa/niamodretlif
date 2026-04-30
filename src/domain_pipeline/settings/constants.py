@@ -1,7 +1,5 @@
 """Configuration-owned string constants."""
 
-RDAP_MODE_AUTHORITATIVE = "authoritative"
-
 GEO_PROVIDER_IPWHOIS = "ipwhois"
 GEO_PROVIDER_IP_API = "ip_api"
 GEO_PROVIDER_IPINFO_LITE = "ipinfo_lite"

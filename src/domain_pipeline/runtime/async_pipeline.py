@@ -1,2738 +1,494 @@
-"""Async staged runtime implementation."""
+"""Workflow-owned DNS actionability runtime."""
 
 from __future__ import annotations
 
-# pylint: disable=duplicate-code,too-many-lines
-
 import asyncio
-import json
 import logging
-import sys
-import threading
-import time
 from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-import shutil
 from typing import Any
 
-from domain_pipeline.classifications import (
-    CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES,
-    CLASSIFICATION_DNS_RESOLVES,
-    CLASSIFICATION_GEO_LOOKUP_FAILED,
-    CLASSIFICATION_GEO_POLICY_REJECTED,
-    CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
-    CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-    CLASSIFICATION_MANUAL_ADD_REGISTERED,
-    CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
-    CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
-    CLASSIFICATION_MANUAL_FILTER_PASSED,
-    CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
-    CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-    CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED,
-    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED,
-    CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
-    PRE_GEO_REVIEW_CLASSIFICATIONS,
-    RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON,
-    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
-    ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED,
-    ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED,
-    ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
-)
-from ..checking import (
-    CacheableRDAPUnavailableError,
-    DNSResult,
-    DomainChecker,
+from domain_pipeline.checking import (
+    DelegationResult,
+    GEO_STATUS_CACHE_HIT,
+    HostResolutionResult,
     IPGeoResult,
-    RDAPResult,
-    RDAPUnavailableInfo,
-    RDAPUnavailableError,
-    WHOIS_STATUS_REGISTERED,
-    WHOIS_STATUS_UNREGISTERED,
-    WhoisFallbackResult,
     build_geo_provider,
     evaluate_geo_policy,
-    run_whois_lookup,
-    whois_result_from_cache,
 )
-from ..checking.http_requestor import HTTPRetryEvent
-from ..io.parser import ParsedDomainEntry
-from ..io.output_manager import output_paths_for_job, review_output_path_for_job
-from ..path_layout import (
-    incomplete_run_debug_root,
-    incomplete_run_manifest_path,
-    incomplete_run_publish_snapshot_root,
+from domain_pipeline.classifications import (
+    CLASSIFICATION_GEO_LOOKUP_FAILED,
+    CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+    CLASSIFICATION_MANUAL_ADD_ACTIONABLE,
+    CLASSIFICATION_MANUAL_FILTER_PASSED,
 )
-from .async_constants import DNS_STAGE_WORKERS, GEO_STAGE_WORKERS, RDAP_STAGE_WORKERS
-from .bootstrap_async import AsyncBootstrapCache
-from .cache_async import start_writer_tasks, stop_writer_tasks
-from .contracts import (
-    CompletedHostResult,
-    DNSCacheWriteRequest,
-    DNSWorkItem,
-    GeoCacheWriteRequest,
-    GeoWorkItem,
-    ParsedHostItem,
-    RDAPLookupOutcome,
-    RootCacheWriteRequest,
+from domain_pipeline.io.parser import DomainListParser, ParsedDomainEntry
+from domain_pipeline.runtime.cache_async import CacheHitSource, AsyncCacheReadFacade
+from domain_pipeline.runtime.contracts import CompletedHostResult
+from domain_pipeline.runtime.history import PipelineCache, utc_now
+from domain_pipeline.runtime.pipeline_runner import build_checker, build_source_jobs
+from domain_pipeline.runtime.pure_helpers import (
+    build_base_row,
+    classify_delegation,
+    classify_host_resolution,
+    geo_policy_classification,
+    host_resolution_skipped_classification,
+    route_for_classification,
 )
-from .geo_scheduler import GeoProviderScheduler
-from .logging_async import RuntimeLogTransport
-from .orchestrator import build_cache_bundle, build_queue_bundle
-from .pipeline_runner import (
-    build_checker,
-    build_source_jobs,
-    dns_resolver_key,
-    parse_source_entries,
-    schedule_rdap_entries,
-)
-from .pure_helpers import (
-    ROUTE_DEAD,
-    ROUTE_FILTERED,
-    ROUTE_REVIEW,
-    build_output_row,
-    classify_host_from_results,
-    rdap_unavailable_dns_disabled_classification,
-    route_for_rdap_dns_disabled,
-    route_for_row,
-)
-from .transports import (
-    AsyncDNSTransport,
-    AsyncGeoTransport,
-    AsyncRDAPTransport,
-    resolve_geo_token,
-)
-from .writer import IncompleteRunWriteResult, ResultCollectorWriter, WriterResult
+from domain_pipeline.runtime.writer import ResultCollectorWriter
+from domain_pipeline.shared import SourceJob
 
-log = logging.getLogger(__name__)
-WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS = frozenset(
-    {
-        RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
-        RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
-    }
-)
+logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class RuntimeBudget:
-    """Optional soft runtime budget for one pipeline run."""
-
-    max_runtime_seconds: float
-
-
-@dataclass(frozen=True)
-class BudgetStopContext:
-    """Host-level context captured when the soft runtime budget stops a run."""
-
-    source_id: str
-    sequence: int
-    total: int
-    host: str
+def _entry_from_payload(payload: dict[str, Any]) -> ParsedDomainEntry:
+    return ParsedDomainEntry(
+        host=str(payload["host"]),
+        registrable_domain=str(payload.get("registrable_domain", "")),
+        input_name=str(payload.get("input_name", payload["host"])),
+        public_suffix=str(payload.get("public_suffix", "")),
+        is_public_suffix_input=bool(payload.get("is_public_suffix_input", False)),
+        input_kind=str(payload.get("input_kind", "exact_host")),
+        apex_scope=str(payload.get("apex_scope", "exact_only")),
+        source_format=str(payload.get("source_format", "plain")),
+    )
 
 
-@dataclass(frozen=True)
-class RuntimeIdentity:
-    """Stable config identity used for logging and incomplete-run state."""
-
-    config_path: Path
-    config_file_name: str
-    config_name: str
-
-
-def _collect_output_paths(jobs: list) -> list[Path]:
-    output_paths: list[Path] = []
-    seen_paths: set[Path] = set()
-    for job in jobs:
-        for path in [
-            *output_paths_for_job(job).values(),
-            review_output_path_for_job(job),
-        ]:
-            if path in seen_paths:
-                continue
-            seen_paths.add(path)
-            output_paths.append(path)
-    return output_paths
+def _prepared_entries(
+    job: SourceJob, prepared_metadata: dict[str, Any] | None
+) -> list[tuple[ParsedDomainEntry, dict[str, Any]]]:
+    if not prepared_metadata:
+        return []
+    source_payload = prepared_metadata.get("sources", {}).get(job.source_id)
+    if not isinstance(source_payload, dict):
+        return []
+    entries = source_payload.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    result: list[tuple[ParsedDomainEntry, dict[str, Any]]] = []
+    for item in entries:
+        if isinstance(item, dict):
+            result.append((_entry_from_payload(item), item))
+    return result
 
 
-def _clear_existing_output_paths(output_paths: list[Path]) -> None:
-    """Remove previously published output artifacts before publishing a full run."""
-    for path in output_paths:
-        if path.is_file():
-            path.unlink()
+class AsyncPipelineRuntime:
+    """Small sequential runtime with an async-compatible public entrypoint."""
 
-
-class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
-    """One staged async runtime instance for one workflow-owned runtime payload."""
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        runtime_identity: dict[str, str] | None = None,
+        prepared_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.config = config
+        self.runtime_identity = runtime_identity or {}
+        self.prepared_metadata = prepared_metadata or {}
+        self.writer = ResultCollectorWriter()
+        cache_payload = config.get("cache", {})
+        cache_file = str(cache_payload.get("cache_file", "")).strip()
+        cache_path = Path(cache_file) if cache_file else Path(".cache.sqlite3")
+        baseline_cache_file = str(cache_payload.get("baseline_cache_file", "")).strip()
+        baseline_cache_path = Path(baseline_cache_file) if baseline_cache_file else None
+        self.cache = PipelineCache.load(cache_path)
+        self.cache_reader = AsyncCacheReadFacade(
+            cache_path,
+            baseline_path=baseline_cache_path,
+        )
+        self.cache_stats: Counter[str] = Counter()
 
     @classmethod
     def from_runtime_payload(
         cls,
         runtime_config: dict[str, Any],
         *,
-        runtime_identity: RuntimeIdentity,
-        runtime_budget: RuntimeBudget | None = None,
+        runtime_identity: dict[str, str] | None = None,
         prepared_metadata: dict[str, Any] | None = None,
-        time_source: Callable[[], float] = time.monotonic,
     ) -> "AsyncPipelineRuntime":
-        """Build one runtime from a prepared automation payload."""
-        runtime = cls.__new__(cls)
-        runtime._initialize(
-            config=runtime_config,
+        """Build a runtime from a manifest-owned payload."""
+        return cls(
+            runtime_config,
             runtime_identity=runtime_identity,
-            runtime_budget=runtime_budget,
-            prepared_metadata_path=None,
-            prepared_metadata=prepared_metadata,
-            time_source=time_source,
-        )
-        return runtime
-
-    def _initialize(
-        self,
-        *,
-        config: dict[str, Any],
-        runtime_identity: RuntimeIdentity,
-        runtime_budget: RuntimeBudget | None,
-        prepared_metadata_path: Path | None,
-        prepared_metadata: dict[str, Any] | None,
-        time_source: Callable[[], float],
-    ) -> None:
-        """Initialize one runtime from either a config path or prepared payload."""
-        self.runtime_identity = runtime_identity
-        self.config_path = runtime_identity.config_path
-        self.config = config
-        self.prepared_metadata_path = prepared_metadata_path
-        self.prepared_metadata = self._load_prepared_metadata(
-            prepared_metadata_path,
             prepared_metadata=prepared_metadata,
         )
-        runtime_paths = self.config.get("runtime_paths", {})
-        self.runtime_paths = (
-            dict(runtime_paths) if isinstance(runtime_paths, dict) else {}
-        )
-        self.cache_path = Path(str(self.config["cache"]["cache_file"]).strip())
-        baseline_cache_file = str(
-            self.config["cache"].get("baseline_cache_file", "")
-        ).strip()
-        self.baseline_cache_path = (
-            Path(baseline_cache_file) if baseline_cache_file else None
-        )
-        self.runtime_budget = runtime_budget
-        self.time_source = time_source
-        self.start_time = self.time_source()
-        self.now = datetime.now(timezone.utc)
-        self.queue_bundle = build_queue_bundle()
-        self.cache_bundle = build_cache_bundle(
-            self.cache_path,
-            baseline_cache_path=self.baseline_cache_path,
-        )
-        self.writer = ResultCollectorWriter()
-        self.geo_scheduler = GeoProviderScheduler()
-        self.checkers: dict[str, DomainChecker] = {}
-        self.rdap_transports: dict[str, AsyncRDAPTransport] = {}
-        self.dns_transports: dict[str, AsyncDNSTransport] = {}
-        self.geo_transports: dict[str, AsyncGeoTransport] = {}
-        self.root_tasks: dict[str, asyncio.Task[RDAPResult]] = {}
-        self.whois_tasks: dict[str, asyncio.Task[WhoisFallbackResult]] = {}
-        self.whois_semaphore = asyncio.Semaphore(self._whois_max_concurrency(config))
-        self.rdap_server_locks: dict[str, asyncio.Lock] = {}
-        self.rdap_rate_limit_events: list[dict[str, Any]] = []
-        self.rdap_rate_limit_stats: dict[str, dict[str, Any]] = {}
-        self.rdap_rate_limit_lock = threading.Lock()
-        self.prepared_unavailable_cache_written_roots: set[str] = set()
-        self.cache_stats: Counter = Counter()
-        self.stopped_early = False
-        self.budget_stop_context: BudgetStopContext | None = None
 
-    @staticmethod
-    def _whois_max_concurrency(config: dict[str, Any]) -> int:
-        """Return the max WHOIS fallback concurrency across enabled sources."""
-        values: list[int] = []
-        for source in config.get("sources", []):
-            if not isinstance(source, dict) or not bool(source.get("enabled", True)):
-                continue
-            rdap_config = source.get("rdap", {})
-            if not isinstance(rdap_config, dict):
-                continue
-            whois_config = rdap_config.get("whois_fallback", {})
-            if not isinstance(whois_config, dict) or not bool(
-                whois_config.get("enabled", True)
-            ):
-                continue
-            values.append(int(whois_config.get("max_concurrency", 2)))
-        return max(values or [2])
+    def close(self) -> None:
+        """Close runtime resources."""
+        self.cache.close()
 
-    def _runtime_override_path(self, key: str) -> Path | None:
-        """Return one optional runtime-only path override."""
-        raw_value = str(self.runtime_paths.get(key, "")).strip()
-        if not raw_value:
-            return None
-        return Path(raw_value)
-
-    def incomplete_manifest_path(self) -> Path:
-        """Return the incomplete-run manifest path for this runtime."""
-        return self._runtime_override_path(
-            "incomplete_manifest_path"
-        ) or incomplete_run_manifest_path(
-            Path.cwd(),
-            config_name=self.runtime_identity.config_name,
+    def _delegation_from_cache_record(self, record: Any) -> DelegationResult:
+        return DelegationResult(
+            domain=record.domain,
+            ns_exists=record.ns_exists,
+            ns_nodata=record.ns_nodata,
+            ns_nxdomain=record.ns_nxdomain,
+            ns_timeout=record.ns_timeout,
+            ns_servfail=record.ns_servfail,
+            no_nameservers=record.no_nameservers,
+            nameservers=record.nameservers,
+            from_cache=True,
         )
 
-    def incomplete_publish_snapshot_root(self) -> Path:
-        """Return the incomplete-run publish-snapshot root for this runtime."""
-        return self._runtime_override_path(
-            "incomplete_publish_snapshot_root"
-        ) or incomplete_run_publish_snapshot_root(
-            Path.cwd(),
-            config_name=self.runtime_identity.config_name,
+    def _host_resolution_from_cache_record(self, record: Any) -> HostResolutionResult:
+        """Build a host-resolution result from the physical dns_history table."""
+        return HostResolutionResult(
+            host=record.host,
+            a_exists=record.a_exists,
+            a_nodata=record.a_nodata,
+            a_nxdomain=record.a_nxdomain,
+            a_timeout=record.a_timeout,
+            a_servfail=record.a_servfail,
+            canonical_name=record.canonical_name or None,
+            ipv4_addresses=record.ipv4_addresses,
+            ipv6_addresses=record.ipv6_addresses,
+            from_cache=True,
         )
 
-    def incomplete_debug_root(self) -> Path:
-        """Return the incomplete-run debug root for this runtime."""
-        return self._runtime_override_path(
-            "incomplete_debug_root"
-        ) or incomplete_run_debug_root(
-            Path.cwd(),
-            config_name=self.runtime_identity.config_name,
+    def _geo_from_cache_record(self, record: Any) -> IPGeoResult:
+        return IPGeoResult(
+            ip=record.ip,
+            provider=record.provider,
+            country_code=record.country_code,
+            region_code=record.region_code,
+            region_name=record.region_name,
+            status=GEO_STATUS_CACHE_HIT,
         )
 
-    @staticmethod
-    def _load_prepared_metadata(
-        path: Path | None,
-        *,
-        prepared_metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Return worker-local prepared metadata when automation supplied it."""
-        if prepared_metadata is not None:
-            payload = prepared_metadata
-        elif path is None or not path.is_file():
-            return {"sources": {}, "rdap_roots": {}, "terminal_rows": []}
-        else:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("prepared metadata must be a JSON object")
-        sources = payload.get("sources", {})
-        rdap_roots = payload.get("rdap_roots", {})
-        terminal_rows = payload.get("terminal_rows", [])
-        prepared_source_ids = payload.get("prepared_source_ids", None)
-        if (
-            not isinstance(sources, dict)
-            or not isinstance(rdap_roots, dict)
-            or not isinstance(terminal_rows, list)
-            or (
-                prepared_source_ids is not None
-                and not isinstance(prepared_source_ids, list)
-            )
-        ):
-            raise ValueError(
-                "prepared metadata must contain JSON object sources, JSON object "
-                "rdap_roots, JSON array terminal_rows, and optional JSON array "
-                "prepared_source_ids"
-            )
-        log.debug(
-            "Loaded prepared metadata with %d sources, %d RDAP roots, and %d terminal rows",
-            len(sources),
-            len(rdap_roots),
-            len(terminal_rows),
-        )
-        return payload
+    def _record_cache_hit(self, prefix: str, source: CacheHitSource | None) -> None:
+        """Record cache hit counters, including overlay/baseline source."""
+        self.cache_stats[f"{prefix}_cache_hits"] += 1
+        if source is not None:
+            self.cache_stats[f"{prefix}_{source}_cache_hits"] += 1
+        if prefix == "host_resolution":
+            self.cache_stats["dns_cache_hits"] += 1
+            if source is not None:
+                self.cache_stats[f"dns_{source}_cache_hits"] += 1
 
-    def _prepared_source_entries(self, source_id: str) -> list[dict[str, Any]] | None:
-        """Return prepared entries for one source when automation supplied them."""
-        source_payload = self.prepared_metadata.get("sources", {}).get(source_id)
-        if source_payload is None:
-            return None
-        if not isinstance(source_payload, dict):
-            raise ValueError(
-                f"prepared metadata for source {source_id} must be a JSON object"
-            )
-        entries = source_payload.get("entries", [])
-        if not isinstance(entries, list):
-            raise ValueError(
-                f"prepared metadata entries for source {source_id} must be a JSON array"
-            )
-        return entries
+    def _record_cache_miss(self, prefix: str) -> None:
+        """Record cache misses with legacy dns_* aliases for host resolution."""
+        self.cache_stats[f"{prefix}_cache_misses"] += 1
+        if prefix == "host_resolution":
+            self.cache_stats["dns_cache_misses"] += 1
 
-    def _prepared_root_payload(self, registrable_domain: str) -> dict[str, Any] | None:
-        """Return prepared RDAP metadata for one registrable domain."""
-        if not registrable_domain:
-            return None
-        payload = self.prepared_metadata.get("rdap_roots", {}).get(registrable_domain)
-        if payload is None:
-            return None
-        if not isinstance(payload, dict):
-            raise ValueError(
-                f"prepared RDAP metadata for root {registrable_domain} must be a JSON object"
-            )
-        return payload
-
-    def _prepared_terminal_rows(self) -> list[dict[str, Any]]:
-        """Return preparation-owned terminal rows when shared preparation supplied them."""
-        payload = self.prepared_metadata.get("terminal_rows", [])
-        if not isinstance(payload, list):
-            raise ValueError("prepared metadata terminal_rows must be a JSON array")
-        return payload
-
-    def _prepared_source_ids(self) -> set[str]:
-        """Return all source ids whose raw inputs should be skipped by runtime parse."""
-        payload = self.prepared_metadata.get("prepared_source_ids")
-        if payload is None:
-            return set(self.prepared_metadata.get("sources", {}))
-        if not isinstance(payload, list):
-            raise ValueError(
-                "prepared metadata prepared_source_ids must be a JSON array"
-            )
-        return {str(item) for item in payload}
-
-    def _parsed_host_from_prepared_entry(
-        self,
-        *,
-        job,
-        payload: dict[str, Any],
-        sequence: int,
-        total: int,
-    ) -> ParsedHostItem:
-        """Build one runtime parsed item from batch-prepared metadata."""
-        entry = ParsedDomainEntry(
-            host=str(payload["host"]),
-            registrable_domain=str(payload["registrable_domain"]),
-            input_name=str(payload.get("input_name", "")),
-            public_suffix=str(payload.get("public_suffix", "")),
-            is_public_suffix_input=bool(payload.get("is_public_suffix_input", False)),
-            input_kind=str(payload.get("input_kind", "exact_host")),
-            apex_scope=str(payload.get("apex_scope", "exact_only")),
-            source_format=str(payload.get("source_format", "")),
-        )
-        root_payload = self._prepared_root_payload(entry.registrable_domain)
-        return ParsedHostItem(
-            job=job,
-            entry=entry,
-            sequence=sequence,
-            total=total,
-            manual_filter_pass=bool(payload.get("manual_filter_pass", False)),
-            manual_add=bool(payload.get("manual_add", False)),
-            source_id_override=(
-                None
-                if payload.get("source_id_override") is None
-                else str(payload.get("source_id_override"))
-            ),
-            source_input_label_override=(
-                None
-                if payload.get("source_input_label_override") is None
-                else str(payload.get("source_input_label_override"))
-            ),
-            source_ids=tuple(
-                str(item) for item in payload.get("source_ids", [job.source_id])
-            ),
-            source_input_labels=tuple(
-                str(item)
-                for item in payload.get(
-                    "source_input_labels",
-                    [job.input_label],
-                )
-            ),
-            prepared_rdap_status=(
-                None if root_payload is None else str(root_payload.get("status", ""))
-            )
-            or None,
-            prepared_authoritative_base_url=(
-                None
-                if root_payload is None
-                else (
-                    str(root_payload.get("authoritative_base_url"))
-                    if root_payload.get("authoritative_base_url") is not None
-                    else None
-                )
-            ),
-            prepared_rdap_unavailable_reason=(
-                None
-                if root_payload is None
-                or str(root_payload.get("status", "")) != "unavailable"
-                else str(
-                    root_payload.get(
-                        "unavailable_reason",
-                        RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
-                    )
-                )
-            ),
-        )
-
-    async def _emit_public_suffix_guard(self, parsed: ParsedHostItem) -> None:
-        """Emit one public-suffix input directly from parse stage."""
-        log.debug(
-            "[%s %d/%d] %s bypassed RDAP/DNS and emitted via public suffix guard",
-            parsed.job.source_id,
-            parsed.sequence,
-            parsed.total,
-            parsed.entry.host,
-        )
-        dns_result = DNSResult(
-            host=parsed.entry.host,
-            a_exists=False,
-            a_nodata=False,
-            a_nxdomain=False,
-            a_timeout=False,
-            a_servfail=False,
-            canonical_name=None,
-        )
-        row = build_output_row(
-            parsed.job,
-            parsed.entry,
-            CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-            None,
-            dns_result,
-            [],
-            "skipped",
-            "public_suffix_guard",
-            "skipped",
-            "public_suffix_guard",
-            None,
-            dns_status_override="skipped",
-            source_ids_override=list(parsed.source_ids) or None,
-            source_input_labels_override=list(parsed.source_input_labels) or None,
-        )
-        await self.queue_bundle.result_queue.put(
-            CompletedHostResult(
-                job=parsed.job,
-                entry=parsed.entry,
-                classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-                route=ROUTE_REVIEW,
-                row=row,
-                rdap_result=None,
-                dns_result=dns_result,
-            )
-        )
-
-    async def _emit_manual_add_result(
-        self,
-        parsed: ParsedHostItem,
-        rdap_result: RDAPResult | None,
-        rdap_unavailable: RDAPUnavailableInfo | None = None,
-        whois_result: WhoisFallbackResult | None = None,
-    ) -> None:
-        """Emit one manual-add host after RDAP, always skipping DNS and geo."""
-        provenance_label = parsed.source_input_label_override or parsed.job.input_label
-        if (rdap_result is not None and rdap_result.exists) or (
-            whois_result is not None and whois_result.is_registered()
-        ):
-            classification = CLASSIFICATION_MANUAL_ADD_REGISTERED
-            route = ROUTE_FILTERED
-            geo_reason = "manual_add_registered"
-            geo_policy_reason = "manual_add_registered"
-            log.info(
-                "[%s %d/%d] %s bypassed DNS/geo via manual-add file %s "
-                "(registration=registered)",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                provenance_label,
-            )
-        elif (rdap_result is not None) or (
-            whois_result is not None and whois_result.is_unregistered()
-        ):
-            classification = CLASSIFICATION_MANUAL_ADD_UNREGISTERED
-            route = ROUTE_REVIEW
-            geo_reason = "manual_add_unregistered"
-            geo_policy_reason = "manual_add_unregistered"
-            log.info(
-                "[%s %d/%d] %s routed to review via manual-add file %s "
-                "(registration=unregistered)",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                provenance_label,
-            )
-        else:
-            classification = CLASSIFICATION_MANUAL_ADD_UNAVAILABLE
-            route = ROUTE_REVIEW
-            geo_reason = "manual_add_unavailable"
-            geo_policy_reason = "manual_add_unavailable"
-            log.info(
-                "[%s %d/%d] %s routed to review via manual-add file %s "
-                "(registration=unavailable)",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                provenance_label,
-            )
-        dns_result = DNSResult(
-            host=parsed.entry.host,
-            a_exists=False,
-            a_nodata=False,
-            a_nxdomain=False,
-            a_timeout=False,
-            a_servfail=False,
-            canonical_name=None,
-        )
-        row = build_output_row(
-            parsed.job,
-            parsed.entry,
-            classification,
-            rdap_result,
-            dns_result,
-            [],
-            "skipped",
-            geo_reason,
-            "skipped",
-            geo_policy_reason,
-            None,
-            rdap_unavailable=rdap_unavailable,
-            whois_result=whois_result,
-            dns_status_override="skipped",
-            source_id_override=parsed.source_id_override,
-            source_input_label_override=parsed.source_input_label_override,
-            source_ids_override=list(parsed.source_ids) or None,
-            source_input_labels_override=list(parsed.source_input_labels) or None,
-        )
-        await self.queue_bundle.result_queue.put(
-            CompletedHostResult(
-                job=parsed.job,
-                entry=parsed.entry,
-                classification=classification,
-                route=route,
-                row=row,
-                rdap_result=rdap_result,
-                dns_result=dns_result,
-                rdap_unavailable=rdap_unavailable,
-                whois_result=whois_result,
-            )
-        )
-
-    async def _emit_manual_filter_pass(
-        self,
-        parsed: ParsedHostItem,
-        rdap_result: RDAPResult | None,
-        rdap_unavailable: RDAPUnavailableInfo | None = None,
-    ) -> None:
-        """Emit one manually approved host, skipping unavailable downstream stages."""
-        if parsed.entry.is_public_suffix_input:
-            log.info(
-                "[%s %d/%d] %s bypassed RDAP/DNS/geo via manual filter-pass file %s "
-                "because input is a public suffix with no registrable root",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                parsed.job.input_label,
-            )
-        else:
-            log.info(
-                "[%s %d/%d] %s bypassed DNS/geo via manual filter-pass file %s "
-                "(rdap=%s)",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                parsed.job.input_label,
-                (
-                    "registered"
-                    if rdap_result is not None and rdap_result.exists
-                    else "unavailable"
-                ),
-            )
-        dns_result = DNSResult(
-            host=parsed.entry.host,
-            a_exists=False,
-            a_nodata=False,
-            a_nxdomain=False,
-            a_timeout=False,
-            a_servfail=False,
-            canonical_name=None,
-        )
-        row = build_output_row(
-            parsed.job,
-            parsed.entry,
-            CLASSIFICATION_MANUAL_FILTER_PASSED,
-            rdap_result,
-            dns_result,
-            [],
-            "skipped",
-            "manual_filter_pass",
-            "skipped",
-            "manual_filter_pass",
-            None,
-            rdap_unavailable=rdap_unavailable,
-            dns_status_override="skipped",
-            source_ids_override=list(parsed.source_ids) or None,
-            source_input_labels_override=list(parsed.source_input_labels) or None,
-        )
-        await self.queue_bundle.result_queue.put(
-            CompletedHostResult(
-                job=parsed.job,
-                entry=parsed.entry,
-                classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
-                route=ROUTE_FILTERED,
-                row=row,
-                rdap_result=rdap_result,
-                dns_result=dns_result,
-                rdap_unavailable=rdap_unavailable,
-            )
-        )
-
-    def _record_cache_hit(self, cache_name: str, source: str | None) -> None:
-        """Increment total and source-specific cache hit counters."""
-        if source is None:
-            return
-        self.cache_stats[f"{cache_name}_cache_hits"] += 1
-        self.cache_stats[f"{cache_name}_{source}_cache_hits"] += 1
-
-    def _record_cache_miss(self, cache_name: str) -> None:
-        """Increment the cache miss counter after both layers miss."""
-        self.cache_stats[f"{cache_name}_cache_misses"] += 1
-
-    def rdap_fallback_seconds_for(
-        self,
-        *,
-        source_config: dict[str, Any],
-        authoritative_base_url: str | None,
-    ) -> tuple[tuple[float, ...], str]:
-        """Return RDAP 429 fallback seconds and selected policy source.
-
-        Selection order is authoritative server profile, source config,
-        global default, then the DomainChecker compatibility fallback.
-        """
-        global_policy = self.config.get("rdap_global_policy", {})
-        if not isinstance(global_policy, dict):
-            global_policy = {}
-        server_policies = global_policy.get("authoritative_servers", {})
-        if (
-            authoritative_base_url is not None
-            and isinstance(server_policies, dict)
-            and authoritative_base_url in server_policies
-        ):
-            server_policy = server_policies[authoritative_base_url]
-            if isinstance(server_policy, dict):
-                fallback_seconds = server_policy.get(
-                    "rate_limit_retry_fallback_seconds"
-                )
-                if fallback_seconds:
-                    return tuple(float(value) for value in fallback_seconds), (
-                        "authoritative_server_profile"
-                    )
-
-        rdap_config = source_config.get("rdap", {})
-        if isinstance(rdap_config, dict):
-            source_marker = str(
-                rdap_config.get("rate_limit_retry_fallback_seconds_source", "")
-            )
-            source_fallback = rdap_config.get("rate_limit_retry_fallback_seconds")
-            if source_fallback and source_marker in {"source_override", ""}:
-                policy_source = source_marker or "source_override"
-                return tuple(float(value) for value in source_fallback), policy_source
-
-        default_fallback = global_policy.get("rate_limit_retry_fallback_seconds")
-        if default_fallback:
-            return tuple(float(value) for value in default_fallback), "global_default"
-
-        if isinstance(rdap_config, dict):
-            source_fallback = rdap_config.get("rate_limit_retry_fallback_seconds")
-            if source_fallback:
-                source_marker = str(
-                    rdap_config.get(
-                        "rate_limit_retry_fallback_seconds_source",
-                        "source_override",
-                    )
-                )
-                return tuple(float(value) for value in source_fallback), source_marker
-
-        return (
-            tuple(DomainChecker.DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS),
-            "builtin_default",
-        )
-
-    def _rdap_rate_limit_debug_root(self) -> Path | None:
-        """Return the worker-local RDAP rate-limit debug root, when configured."""
-        return self._runtime_override_path("rdap_rate_limit_debug_root")
-
-    def _rdap_rate_limit_identity(self) -> tuple[str, str]:
-        """Return batch and worker ids inferred from the configured debug path."""
-        debug_root = self._rdap_rate_limit_debug_root()
-        if debug_root is None:
-            return "", ""
-        parts = debug_root.parts
-        if "workers" not in parts:
-            return "", ""
-        workers_index = parts.index("workers")
-        if len(parts) <= workers_index + 2:
-            return "", ""
-        return parts[workers_index + 1], parts[workers_index + 2]
-
-    def _server_stats(
-        self,
-        authoritative_base_url: str | None,
-        *,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> dict[str, Any]:
-        """Return mutable summary counters for one authoritative RDAP server."""
-        server_key = authoritative_base_url or "(bootstrap)"
-        stats = self.rdap_rate_limit_stats.setdefault(
-            server_key,
-            {
-                "policy_source": policy_source,
-                "fallback_seconds": list(fallback_seconds),
-                "lookup_count": 0,
-                "retry_decision_count": 0,
-                "http_429_retry_count": 0,
-                "missing_retry_after_429_count": 0,
-                "retry_after_retry_count": 0,
-                "retry_exhausted_count": 0,
-                "success_after_retry_count": 0,
-                "total_wait_seconds": 0.0,
-            },
-        )
-        stats["policy_source"] = policy_source
-        stats["fallback_seconds"] = list(fallback_seconds)
-        return stats
-
-    def _append_rdap_rate_limit_event(
-        self,
-        event: dict[str, Any],
-        *,
-        authoritative_base_url: str | None,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> None:
-        """Record one worker-local RDAP rate-limit debug event."""
-        with self.rdap_rate_limit_lock:
-            self.rdap_rate_limit_events.append(event)
-            stats = self._server_stats(
-                authoritative_base_url,
-                policy_source=policy_source,
-                fallback_seconds=fallback_seconds,
-            )
-            event_name = str(event.get("event", ""))
-            if event_name == "rdap_rate_limit_policy_selected":
-                stats["lookup_count"] += 1
-            elif event_name == "rdap_retry_decision":
-                stats["retry_decision_count"] += 1
-                stats["total_wait_seconds"] += float(event.get("wait_seconds", 0.0))
-                if event.get("status_code") == 429:
-                    stats["http_429_retry_count"] += 1
-                    if event.get("wait_source") == "retry_after_header":
-                        stats["retry_after_retry_count"] += 1
-                    else:
-                        stats["missing_retry_after_429_count"] += 1
-            elif event_name == "rdap_retry_exhausted":
-                stats["retry_exhausted_count"] += 1
-            elif event_name == "rdap_success_after_retry":
-                stats["success_after_retry_count"] += 1
-
-    def _record_rdap_policy_selected(
-        self,
-        parsed: ParsedHostItem,
-        *,
-        authoritative_base_url: str | None,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> None:
-        """Record the selected RDAP rate-limit policy for one live lookup."""
-        batch_id, worker_id = self._rdap_rate_limit_identity()
-        self._append_rdap_rate_limit_event(
-            {
-                "event": "rdap_rate_limit_policy_selected",
-                "source_id": parsed.job.source_id,
-                "host": parsed.entry.host,
-                "registrable_domain": parsed.entry.registrable_domain,
-                "authoritative_base_url": authoritative_base_url,
-                "policy_source": policy_source,
-                "fallback_seconds": list(fallback_seconds),
-                "config_name": self.runtime_identity.config_name,
-                "worker_id": worker_id,
-                "batch_id": batch_id,
-            },
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
-        )
-
-    def _record_rdap_retry_decision(
-        self,
-        parsed: ParsedHostItem,
-        retry_event: HTTPRetryEvent,
-        *,
-        authoritative_base_url: str | None,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> None:
-        """Record one pending RDAP retry wait decision."""
-        self._append_rdap_rate_limit_event(
-            {
-                "event": "rdap_retry_decision",
-                "source_id": parsed.job.source_id,
-                "registrable_domain": parsed.entry.registrable_domain,
-                "authoritative_base_url": authoritative_base_url,
-                "status_code": retry_event.status_code,
-                "attempt_number": retry_event.attempt_number,
-                "max_attempts": retry_event.max_attempts,
-                "wait_seconds": retry_event.wait_seconds,
-                "wait_source": retry_event.wait_source,
-                "retry_after_raw": retry_event.retry_after_raw,
-                "retry_after_seconds": retry_event.retry_after_seconds,
-                "fallback_seconds": (
-                    list(retry_event.fallback_seconds)
-                    if retry_event.fallback_seconds is not None
-                    else list(fallback_seconds)
-                ),
-                "fallback_index": retry_event.fallback_index,
-                "policy_source": policy_source,
-            },
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
-        )
-
-    def _record_rdap_retry_exhausted(
-        self,
-        parsed: ParsedHostItem,
-        rdap_unavailable: RDAPUnavailableInfo,
-        *,
-        authoritative_base_url: str | None,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> None:
-        """Record retry exhaustion that became RDAP-unavailable."""
-        if rdap_unavailable.http_status != 429:
-            return
-        self._append_rdap_rate_limit_event(
-            {
-                "event": "rdap_retry_exhausted",
-                "source_id": parsed.job.source_id,
-                "registrable_domain": parsed.entry.registrable_domain,
-                "authoritative_base_url": authoritative_base_url,
-                "http_status": rdap_unavailable.http_status,
-                "unavailable_reason": rdap_unavailable.reason,
-                "cache_classification": rdap_unavailable.cache_classification,
-                "policy_source": policy_source,
-                "fallback_seconds": list(fallback_seconds),
-            },
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
-        )
-
-    def _record_rdap_success_after_retry(
-        self,
-        parsed: ParsedHostItem,
-        *,
-        retry_count: int,
-        authoritative_base_url: str | None,
-        policy_source: str,
-        fallback_seconds: tuple[float, ...],
-    ) -> None:
-        """Record a successful live RDAP lookup after at least one retry."""
-        if retry_count < 1:
-            return
-        self._append_rdap_rate_limit_event(
-            {
-                "event": "rdap_success_after_retry",
-                "source_id": parsed.job.source_id,
-                "registrable_domain": parsed.entry.registrable_domain,
-                "authoritative_base_url": authoritative_base_url,
-                "retry_count": retry_count,
-                "final_status_code": 200,
-                "policy_source": policy_source,
-            },
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
-        )
-
-    def _rdap_rate_limit_summary(self) -> dict[str, Any]:
-        """Return the worker-local RDAP rate-limit summary payload."""
-        batch_id, worker_id = self._rdap_rate_limit_identity()
-        with self.rdap_rate_limit_lock:
-            servers = json.loads(json.dumps(self.rdap_rate_limit_stats))
-        return {
-            "batch_id": batch_id,
-            "worker_id": worker_id,
-            "config_name": self.runtime_identity.config_name,
-            "servers": dict(sorted(servers.items())),
-        }
-
-    @staticmethod
-    def _recommended_fallback_seconds(
-        fallback_seconds: list[float],
-    ) -> list[float]:
-        """Return a conservative higher fallback sequence."""
-        return [float(value) * 2.0 for value in fallback_seconds]
-
-    def _rdap_rate_limit_recommendations(self) -> dict[str, Any]:
-        """Return worker-local operator recommendations without auto-applying them."""
-        summary = self._rdap_rate_limit_summary()
-        recommendations: dict[str, Any] = {}
-        for server_url, stats in summary["servers"].items():
-            if int(stats.get("http_429_retry_count", 0)) == 0:
-                continue
-            if (
-                int(stats.get("missing_retry_after_429_count", 0)) > 0
-                and int(stats.get("retry_exhausted_count", 0)) > 0
-            ):
-                current = [float(value) for value in stats["fallback_seconds"]]
-                recommendations[server_url] = {
-                    "current_fallback_seconds": current,
-                    "recommended_fallback_seconds": (
-                        self._recommended_fallback_seconds(current)
-                    ),
-                    "reason": "HTTP 429 retries exhausted without usable Retry-After",
-                }
-        return {"authoritative_servers": dict(sorted(recommendations.items()))}
-
-    def write_rdap_rate_limit_debug_artifacts(self) -> None:
-        """Write worker-local RDAP rate-limit debug artifacts when configured."""
-        debug_root = self._rdap_rate_limit_debug_root()
-        if debug_root is None:
-            return
-        debug_root.mkdir(parents=True, exist_ok=True)
-        summary_path = debug_root / "summary.json"
-        recommendations_path = debug_root / "recommendations.json"
-        summary_path.write_text(
-            json.dumps(self._rdap_rate_limit_summary(), indent=2, sort_keys=True)
-            + "\n",
-            encoding="utf-8",
-        )
-        recommendations_path.write_text(
-            json.dumps(
-                self._rdap_rate_limit_recommendations(),
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        with self.rdap_rate_limit_lock:
-            events = list(self.rdap_rate_limit_events)
-        if events:
-            events_path = debug_root / "events.jsonl"
-            with events_path.open("w", encoding="utf-8") as handle:
-                for event in events:
-                    handle.write(json.dumps(event, sort_keys=True))
-                    handle.write("\n")
-        else:
-            events_path = debug_root / "events.jsonl"
-            if events_path.exists():
-                events_path.unlink()
-
-    def _elapsed_runtime_seconds(self) -> float:
-        """Return elapsed runtime using the injected monotonic clock."""
-        return self.time_source() - self.start_time
-
-    def _should_stop_queueing_new_work(self) -> bool:
-        """Return whether the soft runtime budget has been reached."""
-        if self.runtime_budget is None:
-            return False
-        return (
-            self._elapsed_runtime_seconds() >= self.runtime_budget.max_runtime_seconds
-        )
-
-    def _record_budget_stop(
-        self,
-        job,
-        *,
-        sequence: int,
-        total: int,
-        host: str,
-    ) -> None:
-        """Log the first soft-stop request for one budgeted run."""
-        if self.stopped_early:
-            return
-        self.stopped_early = True
-        self.budget_stop_context = BudgetStopContext(
-            source_id=job.source_id,
-            sequence=sequence,
-            total=total,
-            host=host,
-        )
-        log.warning(
-            "Soft runtime budget reached after %.1fs at source=%s entry=%d/%d "
-            "host=%s; stopping new work so the workflow can commit cache progress "
-            "before the GitHub Actions limit",
-            self._elapsed_runtime_seconds(),
-            job.source_id,
-            sequence,
-            total,
-            host,
-        )
-
-    def checker_for(self, source_id: str, source_config: dict) -> DomainChecker:
-        """Return the cached checker instance for one source id."""
-        checker = self.checkers.get(source_id)
-        if checker is None:
-            checker = build_checker(source_config)
-            self.checkers[source_id] = checker
-        return checker
-
-    def rdap_transport_for(
-        self, source_id: str, source_config: dict
-    ) -> AsyncRDAPTransport:
-        """Return the cached RDAP transport for one source id."""
-        transport = self.rdap_transports.get(source_id)
-        if transport is None:
-            checker = self.checker_for(source_id, source_config)
-            transport = AsyncRDAPTransport(
-                checker=checker, bootstrap_cache=AsyncBootstrapCache(checker)
-            )
-            self.rdap_transports[source_id] = transport
-        return transport
-
-    def dns_transport_for(
-        self, source_id: str, source_config: dict
-    ) -> AsyncDNSTransport:
-        """Return the cached DNS transport for one source id."""
-        transport = self.dns_transports.get(source_id)
-        if transport is None:
-            transport = AsyncDNSTransport(
-                checker=self.checker_for(source_id, source_config)
-            )
-            self.dns_transports[source_id] = transport
-        return transport
-
-    def geo_transport_for(
-        self, source_id: str, source_config: dict
-    ) -> AsyncGeoTransport | None:
-        """Return the cached geo transport for one source id when geo is enabled."""
-        if not source_config["geo"]["enabled"]:
-            return None
-        transport = self.geo_transports.get(source_id)
-        if transport is None:
-            effective_provider = str(source_config["geo"]["effective_provider"])
-            token = resolve_geo_token(source_config["geo"], effective_provider)
-            provider = build_geo_provider(
-                effective_provider,
-                timeout=source_config["geo"]["timeout"],
-                token=token,
-            )
-            transport = AsyncGeoTransport(
-                provider,
-                timeout=float(source_config["geo"]["timeout"]),
-                token=token,
-            )
-            self.geo_transports[source_id] = transport
-        return transport
-
-    async def run(self) -> tuple[WriterResult, list[Path], bool]:
-        """Run the staged pipeline for the loaded config."""
-        jobs = build_source_jobs(
-            self.config,
-            prepared_source_ids=self._prepared_source_ids(),
-        )
-        target_output_paths = _collect_output_paths(jobs)
-        writer_tasks = await start_writer_tasks(self.cache_bundle.writers)
-        log_transport = RuntimeLogTransport()
-        log_transport.install()
-        try:
-            async with asyncio.TaskGroup() as task_group:
-                task_group.create_task(self._parse_stage(jobs), name="parse_stage")
-                for index in range(RDAP_STAGE_WORKERS):
-                    task_group.create_task(
-                        self._rdap_stage(), name=f"rdap_stage_{index}"
-                    )
-                for index in range(DNS_STAGE_WORKERS):
-                    task_group.create_task(self._dns_stage(), name=f"dns_stage_{index}")
-                for index in range(GEO_STAGE_WORKERS):
-                    task_group.create_task(self._geo_stage(), name=f"geo_stage_{index}")
-                task_group.create_task(
-                    self._result_collector(), name="result_collector"
-                )
-            self._ingest_prepared_terminal_rows(jobs)
-            if self.stopped_early:
-                return (
-                    WriterResult(
-                        counts=Counter(self.writer.counts),
-                        output_paths=[],
-                    ),
-                    target_output_paths,
-                    False,
-                )
-            _clear_existing_output_paths(target_output_paths)
-            return self.writer.write(), target_output_paths, True
-        finally:
-            log_transport.uninstall()
-            await stop_writer_tasks(self.cache_bundle.writers, writer_tasks)
-
-    def _ingest_prepared_terminal_rows(self, jobs: list) -> None:
-        """Queue shared-preparation terminal rows after stage processing completes."""
-        terminal_rows = self._prepared_terminal_rows()
-        if not terminal_rows:
-            return
-        if not jobs:
-            raise ValueError(
-                "prepared terminal rows require at least one configured runtime job"
-            )
-        anchor_job = jobs[0]
-        for row in terminal_rows:
-            if not isinstance(row, dict):
-                raise ValueError(
-                    "prepared metadata terminal_rows entries must be objects"
-                )
-            self.writer.add_terminal_row(job=anchor_job, row=row, route="review")
-
-    async def _parse_stage(self, jobs: list) -> None:
-        try:
-            for job in jobs:
-                prepared_entries = self._prepared_source_entries(job.source_id)
-                if prepared_entries is None:
-                    entries, _stats = parse_source_entries(job)
-                    if not entries:
-                        log.debug(
-                            "Parse stage queued 0 entries for source=%s", job.source_id
-                        )
-                        continue
-                    entries = schedule_rdap_entries(
-                        self.checker_for(job.source_id, job.config),
-                        job,
-                        entries,
-                    )
-                    total = len(entries)
-                    log.debug(
-                        "Parse stage queued %d entries for source=%s after RDAP scheduling",
-                        total,
-                        job.source_id,
-                    )
-                    iterable: list[ParsedHostItem] = [
-                        ParsedHostItem(
-                            job=job, entry=entry, sequence=sequence, total=total
-                        )
-                        for sequence, entry in enumerate(entries, start=1)
-                    ]
-                else:
-                    total = len(prepared_entries)
-                    log.debug(
-                        "Parse stage queued %d prepared entries for source=%s "
-                        "from automation metadata",
-                        total,
-                        job.source_id,
-                    )
-                    iterable = [
-                        self._parsed_host_from_prepared_entry(
-                            job=job,
-                            payload=entry_payload,
-                            sequence=sequence,
-                            total=total,
-                        )
-                        for sequence, entry_payload in enumerate(
-                            prepared_entries,
-                            start=1,
-                        )
-                    ]
-                for parsed in iterable:
-                    if self._should_stop_queueing_new_work():
-                        self._record_budget_stop(
-                            job,
-                            sequence=parsed.sequence,
-                            total=total,
-                            host=parsed.entry.host,
-                        )
-                        break
-                    if (
-                        parsed.entry.is_public_suffix_input
-                        and parsed.manual_filter_pass
-                    ):
-                        # Manual approval is the only path that can emit a
-                        # public-suffix input without a registrable RDAP root.
-                        await self._emit_manual_filter_pass(parsed, None)
-                        continue
-                    if parsed.entry.is_public_suffix_input:
-                        await self._emit_public_suffix_guard(parsed)
-                        continue
-                    await self.queue_bundle.parse_to_rdap.put(parsed)
-                if self.stopped_early:
-                    break
-        finally:
-            for _ in range(RDAP_STAGE_WORKERS):
-                await self.queue_bundle.parse_to_rdap.put(None)
-
-    def _prepared_rdap_unavailable_info(
-        self, parsed: ParsedHostItem
-    ) -> RDAPUnavailableInfo:
-        """Return unavailable metadata carried by prepared RDAP root metadata."""
-        reason = (
-            parsed.prepared_rdap_unavailable_reason
-            or RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP
-        )
-        return RDAPUnavailableInfo(
-            reason=reason,
-            message=(
-                "batch preparation marked RDAP unavailable for "
-                f"{parsed.entry.registrable_domain}: {reason}"
-            ),
-            cache_classification=RDAP_UNAVAILABLE_CACHE_CLASSIFICATION_BY_REASON.get(
-                reason
-            ),
-        )
-
-    async def _queue_rdap_unavailable_cache_write_once(
-        self,
-        parsed: ParsedHostItem,
-        rdap_unavailable: RDAPUnavailableInfo,
-    ) -> None:
-        """Queue one reason-specific cache write for a prepared unavailable root."""
-        if rdap_unavailable.cache_classification is None:
-            return
-        root = parsed.entry.registrable_domain
-        if root in self.prepared_unavailable_cache_written_roots:
-            return
-        self.prepared_unavailable_cache_written_roots.add(root)
-        ttl_days = int(
-            self.config["cache"]["classification_ttl_days"]["rdap_lookup_unavailable"]
-        )
-        await self.cache_bundle.writers[0].queue.put(
-            RootCacheWriteRequest(
-                domain=root,
-                classification=rdap_unavailable.cache_classification,
-                statuses=[],
-                statuses_complete=False,
-                checked_at=self.now,
-                ttl_days=ttl_days,
-            )
-        )
-        self.cache_stats["cached_written"] += 1
-
-    @staticmethod
-    def _whois_result_from_root_cache(
-        root: str,
-        cached: Any,
-    ) -> WhoisFallbackResult | None:
-        """Return cached WHOIS evidence from a root cache row when present."""
-        classification = str(getattr(cached, "classification", ""))
-        if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED:
-            return whois_result_from_cache(root, WHOIS_STATUS_REGISTERED)
-        if classification == ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED:
-            return whois_result_from_cache(root, WHOIS_STATUS_UNREGISTERED)
-        return None
-
-    @staticmethod
-    def _whois_fallback_enabled(
-        rdap_config: dict[str, Any],
-        rdap_unavailable: RDAPUnavailableInfo | None,
-    ) -> bool:
-        """Return whether this RDAP-unavailable state should use WHOIS fallback."""
-        whois_config = rdap_config.get("whois_fallback", {})
-        if not bool(whois_config.get("enabled", True)):
-            return False
-        if rdap_unavailable is None:
-            return False
-        return rdap_unavailable.reason in WHOIS_FALLBACK_RDAP_UNAVAILABLE_REASONS
-
-    async def _queue_whois_registration_cache_write(
-        self,
-        root: str,
-        whois_result: WhoisFallbackResult,
-    ) -> None:
-        """Queue cache writes for cacheable WHOIS registered/unregistered evidence."""
-        if whois_result.from_cache:
-            return
-        if whois_result.is_registered():
-            classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED
-            ttl_key = "rdap_registrable_domain_registered"
-        elif whois_result.is_unregistered():
-            classification = ROOT_CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED
-            ttl_key = "rdap_registrable_domain_unregistered"
-        else:
-            return
-        await self.cache_bundle.writers[0].queue.put(
-            RootCacheWriteRequest(
-                domain=root,
-                classification=classification,
-                statuses=[],
-                statuses_complete=False,
-                checked_at=self.now,
-                ttl_days=int(self.config["cache"]["classification_ttl_days"][ttl_key]),
-            )
-        )
-        self.cache_stats["cached_written"] += 1
-
-    async def _run_whois_fallback_task(
-        self,
-        parsed: ParsedHostItem,
-    ) -> WhoisFallbackResult:
-        """Run one WHOIS fallback task under the configured semaphore."""
-        whois_config = parsed.job.config.get("rdap", {}).get("whois_fallback", {})
-        async with self.whois_semaphore:
-            return await asyncio.to_thread(
-                run_whois_lookup,
-                parsed.entry.registrable_domain,
-                command=str(whois_config.get("command", "whois")),
-                timeout=float(whois_config.get("timeout", 20.0)),
-            )
-
-    async def _resolve_whois_fallback(
-        self,
-        parsed: ParsedHostItem,
-        rdap_unavailable: RDAPUnavailableInfo | None,
-    ) -> WhoisFallbackResult | None:
-        """Resolve selected RDAP-unavailable roots through a deduped WHOIS task."""
-        if not self._whois_fallback_enabled(
-            parsed.job.config.get("rdap", {}),
-            rdap_unavailable,
-        ):
-            return None
-        root = parsed.entry.registrable_domain
-        cached, cache_source = (
-            await self.cache_bundle.reader.get_fresh_root_with_source(root, self.now)
+    def _lookup_delegation(
+        self, job: SourceJob, entry: ParsedDomainEntry
+    ) -> DelegationResult:
+        checker = build_checker(job.config)
+        resolver_key = checker.resolver_key()
+        now = utc_now()
+        cached, source = self.cache_reader.get_fresh_delegation_sync_with_source(
+            entry.registrable_domain, resolver_key, now
         )
         if cached is not None:
-            cached_whois_result = self._whois_result_from_root_cache(root, cached)
-            if cached_whois_result is not None:
-                assert cache_source is not None
-                self._record_cache_hit("rdap", cache_source)
-                return cached_whois_result
-        task = self.whois_tasks.get(root)
-        if task is None:
-            task = asyncio.create_task(
-                self._run_whois_fallback_task(parsed),
-                name=f"whois_{root}",
-            )
-            self.whois_tasks[root] = task
-        whois_result = await task
-        await self._queue_whois_registration_cache_write(root, whois_result)
-        return whois_result
-
-    async def _resolve_rdap_result(self, parsed: ParsedHostItem) -> RDAPLookupOutcome:
-        root = parsed.entry.registrable_domain
-        next_stage_message = (
-            "continuing to DNS"
-            if parsed.job.config["dns"]["enabled"]
-            else "DNS is disabled so routing directly from RDAP stage"
+            self._record_cache_hit("delegation", source)
+            return self._delegation_from_cache_record(cached)
+        self._record_cache_miss("delegation")
+        result = checker.delegation_lookup(entry.registrable_domain)
+        if result.status in {"timeout", "servfail"}:
+            return result
+        ttl_config = self.config["cache"]["classification_ttl_days"]
+        ttl_days = (
+            int(ttl_config["dns_delegation_actionable"])
+            if result.actionable
+            else int(ttl_config["dns_delegation_unactionable"])
         )
-        cached, cache_source = (
-            await self.cache_bundle.reader.get_fresh_root_with_source(root, self.now)
+        self.cache.put_delegation(
+            domain=result.domain,
+            resolver_key=resolver_key,
+            ns_exists=result.ns_exists,
+            ns_nodata=result.ns_nodata,
+            ns_nxdomain=result.ns_nxdomain,
+            ns_timeout=result.ns_timeout,
+            ns_servfail=result.ns_servfail,
+            no_nameservers=result.no_nameservers,
+            nameservers=result.nameservers,
+            checked_at=now,
+            ttl_days=ttl_days,
+        )
+        return result
+
+    def _lookup_host_resolution(
+        self, job: SourceJob, entry: ParsedDomainEntry
+    ) -> HostResolutionResult:
+        """Run or cache-read the optional dns.host_resolution stage."""
+        checker = build_checker(job.config)
+        resolver_key = checker.resolver_key()
+        now = utc_now()
+        cached, source = self.cache_reader.get_fresh_dns_sync_with_source(
+            entry.host, resolver_key, now
         )
         if cached is not None:
-            assert cache_source is not None
-            self._record_cache_hit("rdap", cache_source)
-            cached_whois_result = self._whois_result_from_root_cache(root, cached)
-            if cached_whois_result is not None:
-                if (
-                    cached_whois_result.is_unregistered()
-                    or not parsed.job.config["dns"]["enabled"]
-                ):
-                    log.debug(
-                        "[%s %d/%d] %s root %s cache hit for root=%s "
-                        "classification=%s; using cached WHOIS registration evidence",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        cache_source,
-                        root,
-                        cached.classification,
-                    )
-                    return RDAPLookupOutcome(None, None, cached_whois_result)
-                log.debug(
-                    "[%s %d/%d] %s root %s cache hit for root=%s "
-                    "classification=%s from WHOIS registered evidence; refreshing live RDAP",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                )
-            if (
-                cached.classification
-                == ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED
-            ):
-                log.debug(
-                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s; filtering hosts under root",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                )
-                return RDAPLookupOutcome(RDAPResult(False, [], from_cache=True))
-            if cached.is_reason_specific_rdap_unavailable():
-                rdap_unavailable = cached.to_rdap_unavailable_info()
-                assert rdap_unavailable is not None
-                log.debug(
-                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s with cached reason-specific unavailable RDAP state; "
-                    "skipping live RDAP and %s",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                    next_stage_message,
-                )
-                return RDAPLookupOutcome(None, rdap_unavailable)
-            if cached.is_legacy_rdap_unavailable():
-                log.debug(
-                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s with legacy cached unavailable RDAP state; "
-                    "refreshing live RDAP",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                )
-            elif cached.statuses_complete:
-                log.debug(
-                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s; skipping live RDAP and %s",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                    next_stage_message,
-                )
-                return RDAPLookupOutcome(
-                    RDAPResult(True, list(cached.statuses), from_cache=True)
-                )
-            else:
-                log.debug(
-                    "[%s %d/%d] %s RDAP root %s cache hit for root=%s "
-                    "classification=%s but cached statuses are incomplete; "
-                    "refreshing live RDAP",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    root,
-                    cached.classification,
-                )
-        else:
-            self._record_cache_miss("rdap")
-            log.debug(
-                "[%s %d/%d] %s RDAP root cache miss for root=%s after checking "
-                "overlay and baseline; performing live RDAP registrable-domain lookup",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                root,
-            )
-
-        task = self.root_tasks.get(root)
-        if task is None:
-            log.debug(
-                "[%s %d/%d] %s starting live RDAP task for root=%s",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                root,
-            )
-            task = asyncio.create_task(
-                self._live_rdap_lookup(parsed), name=f"rdap_{root}"
-            )
-            self.root_tasks[root] = task
-        else:
-            log.debug(
-                "[%s %d/%d] %s joining in-flight RDAP task for root=%s",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                root,
-            )
-        return RDAPLookupOutcome(await task)
-
-    async def _live_rdap_lookup(self, parsed: ParsedHostItem) -> RDAPResult:
-        transport = self.rdap_transport_for(parsed.job.source_id, parsed.job.config)
-        authoritative_base_url = parsed.prepared_authoritative_base_url
-        fallback_seconds, policy_source = self.rdap_fallback_seconds_for(
-            source_config=parsed.job.config,
-            authoritative_base_url=authoritative_base_url,
+            self._record_cache_hit("host_resolution", source)
+            return self._host_resolution_from_cache_record(cached)
+        self._record_cache_miss("host_resolution")
+        result = checker.host_resolution_lookup(entry.host)
+        if result.status in {"timeout", "servfail"}:
+            return result
+        self.cache.put_dns(
+            host=result.host,
+            resolver_key=resolver_key,
+            a_exists=result.a_exists,
+            a_nodata=result.a_nodata,
+            a_nxdomain=result.a_nxdomain,
+            a_timeout=result.a_timeout,
+            a_servfail=result.a_servfail,
+            canonical_name=result.canonical_name or "",
+            ipv4_addresses=result.ipv4_addresses,
+            ipv6_addresses=result.ipv6_addresses,
+            checked_at=now,
+            ttl_days=int(self.config["cache"].get("dns_ttl_days", 1)),
         )
-        self._record_rdap_policy_selected(
-            parsed,
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
-        )
-        retry_count = 0
+        return result
 
-        def retry_observer(retry_event: HTTPRetryEvent) -> None:
-            nonlocal retry_count
-            retry_count += 1
-            self._record_rdap_retry_decision(
-                parsed,
-                retry_event,
-                authoritative_base_url=authoritative_base_url,
-                policy_source=policy_source,
-                fallback_seconds=fallback_seconds,
-            )
-
-        if authoritative_base_url is not None:
-            log.debug(
-                "[%s %d/%d] %s using precomputed authoritative RDAP base URL %s for root=%s",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                authoritative_base_url,
-                parsed.entry.registrable_domain,
-            )
-        try:
-            if authoritative_base_url is None:
-                rdap_result = await transport.lookup(
-                    parsed.entry.registrable_domain,
-                    authoritative_base_url=None,
-                    rdap_rate_limit_retry_fallback_seconds=fallback_seconds,
-                    retry_observer=retry_observer,
-                )
-            else:
-                lock = self.rdap_server_locks.setdefault(
-                    authoritative_base_url,
-                    asyncio.Lock(),
-                )
-                async with lock:
-                    rdap_result = await transport.lookup(
-                        parsed.entry.registrable_domain,
-                        authoritative_base_url=authoritative_base_url,
-                        rdap_rate_limit_retry_fallback_seconds=fallback_seconds,
-                        retry_observer=retry_observer,
-                    )
-        except CacheableRDAPUnavailableError as exc:
-            self._record_rdap_retry_exhausted(
-                parsed,
-                exc.info,
-                authoritative_base_url=authoritative_base_url,
-                policy_source=policy_source,
-                fallback_seconds=fallback_seconds,
-            )
-            ttl_days = int(
-                self.config["cache"]["classification_ttl_days"][
-                    "rdap_lookup_unavailable"
-                ]
-            )
-            if exc.info.cache_classification is not None:
-                await self.cache_bundle.writers[0].queue.put(
-                    RootCacheWriteRequest(
-                        domain=parsed.entry.registrable_domain,
-                        classification=exc.info.cache_classification,
-                        statuses=[],
-                        statuses_complete=False,
-                        checked_at=self.now,
-                        ttl_days=ttl_days,
-                    )
-                )
-                self.cache_stats["cached_written"] += 1
-                log.debug(
-                    "[%s %d/%d] %s queued RDAP unavailable cache write for "
-                    "root=%s classification=%s reason=%s ttl_days=%d",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    parsed.entry.registrable_domain,
-                    exc.info.cache_classification,
-                    exc.info.reason,
-                    ttl_days,
-                )
-            raise
-        self._record_rdap_success_after_retry(
-            parsed,
-            retry_count=retry_count,
-            authoritative_base_url=authoritative_base_url,
-            policy_source=policy_source,
-            fallback_seconds=fallback_seconds,
+    def _lookup_geo(
+        self, job: SourceJob, host_resolution_result: HostResolutionResult
+    ) -> tuple[str, list[IPGeoResult], Any | None]:
+        geo_config = job.config["geo"]
+        provider_name = str(
+            geo_config.get("effective_provider") or geo_config.get("provider")
         )
-        log.debug(
-            "[%s %d/%d] %s live RDAP result for root=%s -> exists=%s statuses=%s",
-            parsed.job.source_id,
-            parsed.sequence,
-            parsed.total,
-            parsed.entry.host,
-            parsed.entry.registrable_domain,
-            rdap_result.exists,
-            list(rdap_result.statuses) or "(none)",
-        )
-        await self.cache_bundle.writers[0].queue.put(
-            RootCacheWriteRequest(
-                domain=parsed.entry.registrable_domain,
-                classification=(
-                    ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED
-                    if rdap_result.exists
-                    else ROOT_CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED
-                ),
-                statuses=list(rdap_result.statuses),
-                statuses_complete=True,
-                checked_at=self.now,
-                ttl_days=(
-                    int(
-                        self.config["cache"]["classification_ttl_days"][
-                            "rdap_registrable_domain_registered"
-                        ]
-                    )
-                    if rdap_result.exists
-                    else int(
-                        self.config["cache"]["classification_ttl_days"][
-                            "rdap_registrable_domain_unregistered"
-                        ]
-                    )
-                ),
-            )
-        )
-        self.cache_stats["cached_written"] += 1
-        log.debug(
-            "[%s %d/%d] %s queued RDAP root cache write for root=%s ttl_days=%d",
-            parsed.job.source_id,
-            parsed.sequence,
-            parsed.total,
-            parsed.entry.host,
-            parsed.entry.registrable_domain,
-            (
-                int(
-                    self.config["cache"]["classification_ttl_days"][
-                        "rdap_registrable_domain_registered"
-                    ]
-                )
-                if rdap_result.exists
-                else int(
-                    self.config["cache"]["classification_ttl_days"][
-                        "rdap_registrable_domain_unregistered"
-                    ]
-                )
-            ),
-        )
-        return rdap_result
-
-    async def _rdap_stage(self) -> None:  # pylint: disable=too-many-statements
-        while True:
-            parsed = await self.queue_bundle.parse_to_rdap.get()
-            try:
-                if parsed is None:
-                    await self.queue_bundle.rdap_to_dns.put(None)
-                    return
-                if parsed.prepared_rdap_status == "unavailable":
-                    rdap_unavailable = self._prepared_rdap_unavailable_info(parsed)
-                    await self._queue_rdap_unavailable_cache_write_once(
-                        parsed,
-                        rdap_unavailable,
-                    )
-                    if parsed.job.config["dns"]["enabled"]:
-                        log.debug(
-                            "[%s %d/%d] %s bypassing RDAP for root=%s because "
-                            "batch preparation marked the authoritative server "
-                            "unavailable; continuing to DNS",
-                            parsed.job.source_id,
-                            parsed.sequence,
-                            parsed.total,
-                            parsed.entry.host,
-                            parsed.entry.registrable_domain,
-                        )
-                    else:
-                        log.debug(
-                            "[%s %d/%d] %s bypassing RDAP for root=%s because "
-                            "batch preparation marked the authoritative server "
-                            "unavailable; DNS is disabled so routing directly "
-                            "from RDAP stage",
-                            parsed.job.source_id,
-                            parsed.sequence,
-                            parsed.total,
-                            parsed.entry.host,
-                            parsed.entry.registrable_domain,
-                        )
-                    rdap_outcome = RDAPLookupOutcome(None, rdap_unavailable)
-                else:
-                    try:
-                        resolved = await self._resolve_rdap_result(parsed)
-                        if isinstance(resolved, RDAPResult):
-                            rdap_outcome = RDAPLookupOutcome(resolved)
-                        elif resolved is None:
-                            rdap_outcome = RDAPLookupOutcome(None)
-                        else:
-                            rdap_outcome = resolved
-                    except RDAPUnavailableError as exc:
-                        if parsed.job.config["dns"]["enabled"]:
-                            log.debug(
-                                "[%s %d/%d] %s RDAP unavailable for root=%s; continuing to DNS",
-                                parsed.job.source_id,
-                                parsed.sequence,
-                                parsed.total,
-                                parsed.entry.host,
-                                parsed.entry.registrable_domain,
-                            )
-                        else:
-                            log.debug(
-                                "[%s %d/%d] %s RDAP unavailable for root=%s; DNS is "
-                                "disabled so routing directly from RDAP stage",
-                                parsed.job.source_id,
-                                parsed.sequence,
-                                parsed.total,
-                                parsed.entry.host,
-                                parsed.entry.registrable_domain,
-                            )
-                        rdap_outcome = RDAPLookupOutcome(None, exc.info)
-                rdap_result = rdap_outcome.rdap_result
-                rdap_unavailable = rdap_outcome.rdap_unavailable
-                whois_result = rdap_outcome.whois_result
-                if (
-                    rdap_result is None
-                    and whois_result is None
-                    and rdap_unavailable is not None
-                    and (parsed.manual_add or not parsed.job.config["dns"]["enabled"])
-                ):
-                    whois_result = await self._resolve_whois_fallback(
-                        parsed,
-                        rdap_unavailable,
-                    )
-                if parsed.manual_add:
-                    await self._emit_manual_add_result(
-                        parsed,
-                        rdap_result,
-                        rdap_unavailable,
-                        whois_result,
-                    )
-                    continue
-                if rdap_result is not None and not rdap_result.exists:
-                    log.debug(
-                        "[%s %d/%d] %s dead before DNS because registrable_domain=%s "
-                        "is RDAP-unregistered (rdap_source=%s)",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        parsed.entry.registrable_domain,
-                        "cache" if rdap_result.from_cache else "live",
-                    )
-                    dns_result = DNSResult(
-                        host=parsed.entry.host,
-                        a_exists=False,
-                        a_nodata=False,
-                        a_nxdomain=True,
-                        a_timeout=False,
-                        a_servfail=False,
-                        canonical_name=None,
-                    )
-                    row = build_output_row(
-                        parsed.job,
-                        parsed.entry,
-                        CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-                        rdap_result,
-                        dns_result,
-                        [],
-                        "skipped",
-                        "dead_root",
-                        "skipped",
-                        "dead_root",
-                        None,
-                        rdap_unavailable=rdap_unavailable,
-                        whois_result=whois_result,
-                        dns_status_override="skipped",
-                        source_ids_override=list(parsed.source_ids) or None,
-                        source_input_labels_override=list(parsed.source_input_labels)
-                        or None,
-                    )
-                    await self.queue_bundle.result_queue.put(
-                        CompletedHostResult(
-                            job=parsed.job,
-                            entry=parsed.entry,
-                            classification=CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-                            route=ROUTE_DEAD,
-                            row=row,
-                            rdap_result=rdap_result,
-                            dns_result=dns_result,
-                            rdap_unavailable=rdap_unavailable,
-                            whois_result=whois_result,
-                        )
-                    )
-                    continue
-                if parsed.manual_filter_pass:
-                    await self._emit_manual_filter_pass(
-                        parsed,
-                        rdap_result,
-                        rdap_unavailable,
-                    )
-                    continue
-                if whois_result is not None and whois_result.is_unregistered():
-                    log.debug(
-                        "[%s %d/%d] %s dead before DNS because registrable_domain=%s "
-                        "is WHOIS-unregistered (whois_source=%s)",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        parsed.entry.registrable_domain,
-                        "cache" if whois_result.from_cache else "live",
-                    )
-                    dns_result = DNSResult(
-                        host=parsed.entry.host,
-                        a_exists=False,
-                        a_nodata=False,
-                        a_nxdomain=True,
-                        a_timeout=False,
-                        a_servfail=False,
-                        canonical_name=None,
-                    )
-                    row = build_output_row(
-                        parsed.job,
-                        parsed.entry,
-                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
-                        rdap_result,
-                        dns_result,
-                        [],
-                        "skipped",
-                        "dead_root",
-                        "skipped",
-                        "dead_root",
-                        None,
-                        rdap_unavailable=rdap_unavailable,
-                        whois_result=whois_result,
-                        dns_status_override="skipped",
-                        source_ids_override=list(parsed.source_ids) or None,
-                        source_input_labels_override=list(parsed.source_input_labels)
-                        or None,
-                    )
-                    await self.queue_bundle.result_queue.put(
-                        CompletedHostResult(
-                            job=parsed.job,
-                            entry=parsed.entry,
-                            classification=CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_UNREGISTERED,
-                            route=ROUTE_DEAD,
-                            row=row,
-                            rdap_result=rdap_result,
-                            dns_result=dns_result,
-                            rdap_unavailable=rdap_unavailable,
-                            whois_result=whois_result,
-                        )
-                    )
-                    continue
-                if not parsed.job.config["dns"]["enabled"]:
-                    log.debug(
-                        "[%s %d/%d] %s bypassed DNS and geo because dns.enabled=false; "
-                        "routing directly from RDAP stage",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                    )
-                    dns_result = DNSResult(
-                        host=parsed.entry.host,
-                        a_exists=False,
-                        a_nodata=False,
-                        a_nxdomain=False,
-                        a_timeout=False,
-                        a_servfail=False,
-                        canonical_name=None,
-                    )
-                    rdap_registered_dns_disabled = (
-                        CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
-                    )
-                    whois_registered_dns_disabled = (
-                        CLASSIFICATION_WHOIS_REGISTRABLE_DOMAIN_REGISTERED_DNS_DISABLED
-                    )
-                    if rdap_result is not None:
-                        classification = rdap_registered_dns_disabled
-                    elif whois_result is not None and whois_result.is_registered():
-                        classification = whois_registered_dns_disabled
-                    elif whois_result is not None:
-                        classification = (
-                            CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED
-                        )
-                    else:
-                        classification = rdap_unavailable_dns_disabled_classification(
-                            rdap_unavailable
-                        )
-                    row = build_output_row(
-                        parsed.job,
-                        parsed.entry,
-                        classification,
-                        rdap_result,
-                        dns_result,
-                        [],
-                        "skipped",
-                        "dns_disabled",
-                        "skipped",
-                        "dns_disabled",
-                        None,
-                        rdap_unavailable=rdap_unavailable,
-                        whois_result=whois_result,
-                        dns_status_override="skipped",
-                        source_ids_override=list(parsed.source_ids) or None,
-                        source_input_labels_override=list(parsed.source_input_labels)
-                        or None,
-                    )
-                    if whois_result is not None and whois_result.is_registered():
-                        route = ROUTE_FILTERED
-                    elif whois_result is not None:
-                        route = ROUTE_REVIEW
-                    else:
-                        route = route_for_rdap_dns_disabled(
-                            rdap_config=parsed.job.config.get("rdap", {}),
-                            rdap_result=rdap_result,
-                            rdap_unavailable=rdap_unavailable,
-                        )
-                    await self.queue_bundle.result_queue.put(
-                        CompletedHostResult(
-                            job=parsed.job,
-                            entry=parsed.entry,
-                            classification=classification,
-                            route=route,
-                            row=row,
-                            rdap_result=rdap_result,
-                            dns_result=dns_result,
-                            rdap_unavailable=rdap_unavailable,
-                            whois_result=whois_result,
-                        )
-                    )
-                    continue
-                await self.queue_bundle.rdap_to_dns.put(
-                    DNSWorkItem(
-                        parsed=parsed,
-                        rdap_result=rdap_result,
-                        rdap_unavailable=rdap_unavailable,
-                        whois_result=whois_result,
-                    )
-                )
-            finally:
-                self.queue_bundle.parse_to_rdap.task_done()
-
-    async def _dns_stage(self) -> None:
-        while True:
-            work_item = await self.queue_bundle.rdap_to_dns.get()
-            try:
-                if work_item is None:
-                    await self.queue_bundle.dns_to_geo.put(None)
-                    return
-                parsed = work_item.parsed
-                resolver_key = dns_resolver_key(parsed.job.config["dns"])
-                cached, cache_source = (
-                    await self.cache_bundle.reader.get_fresh_dns_with_source(
-                        parsed.entry.host, resolver_key, self.now
-                    )
-                )
-                if cached is not None:
-                    assert cache_source is not None
-                    self._record_cache_hit("dns", cache_source)
-                    dns_result = DNSResult(
-                        host=cached.host,
-                        a_exists=cached.a_exists,
-                        a_nodata=cached.a_nodata,
-                        a_nxdomain=cached.a_nxdomain,
-                        a_timeout=cached.a_timeout,
-                        a_servfail=cached.a_servfail,
-                        canonical_name=cached.canonical_name or None,
-                        ipv4_addresses=list(cached.ipv4_addresses),
-                        ipv6_addresses=list(cached.ipv6_addresses),
-                    )
-                    log.debug(
-                        "[%s %d/%d] %s DNS %s cache hit for resolver=%s "
-                        "-> status=%s cname=%s ips=%s",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        cache_source,
-                        resolver_key,
-                        dns_result.status,
-                        dns_result.canonical_name or "(none)",
-                        dns_result.resolved_ips or "(none)",
-                    )
-                else:
-                    self._record_cache_miss("dns")
-                    log.debug(
-                        "[%s %d/%d] %s DNS cache miss for resolver=%s after checking "
-                        "overlay and baseline",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        resolver_key,
-                    )
-                    dns_result = await self.dns_transport_for(
-                        parsed.job.source_id, parsed.job.config
-                    ).lookup(parsed.entry.host)
-                    await self.cache_bundle.writers[1].queue.put(
-                        DNSCacheWriteRequest(
-                            host=parsed.entry.host,
-                            resolver_key=resolver_key,
-                            a_exists=dns_result.a_exists,
-                            a_nodata=dns_result.a_nodata,
-                            a_nxdomain=dns_result.a_nxdomain,
-                            a_timeout=dns_result.a_timeout,
-                            a_servfail=dns_result.a_servfail,
-                            canonical_name=dns_result.canonical_name or "",
-                            ipv4_addresses=list(dns_result.ipv4_addresses),
-                            ipv6_addresses=list(dns_result.ipv6_addresses),
-                            checked_at=self.now,
-                            ttl_days=int(self.config["cache"]["dns_ttl_days"]),
-                        )
-                    )
-                    self.cache_stats["cached_written"] += 1
-                    log.debug(
-                        "[%s %d/%d] %s queued DNS cache write for resolver=%s "
-                        "ttl_days=%d status=%s",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                        resolver_key,
-                        int(self.config["cache"]["dns_ttl_days"]),
-                        dns_result.status,
-                    )
-                checker = self.checker_for(parsed.job.source_id, parsed.job.config)
-                classification = classify_host_from_results(
-                    parsed.entry.host,
-                    parsed.entry.registrable_domain,
-                    work_item.rdap_result,
-                    dns_result,
-                    hold_statuses=set(getattr(checker, "HOLD_STATUSES", set())),
-                    deletion_statuses=set(getattr(checker, "DELETION_STATUSES", set())),
-                )
-                log.debug(
-                    "[%s %d/%d] %s -> %s (root=%s, dns=%s, rdap_statuses=%s)",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    classification,
-                    parsed.entry.registrable_domain,
-                    dns_result.status,
-                    (
-                        "|".join(work_item.rdap_result.statuses)
-                        if work_item.rdap_result is not None
-                        else "(none)"
-                    ),
-                )
-                if not dns_result.resolved_ips:
-                    if classification == CLASSIFICATION_DNS_RESOLVES:
-                        classification = (
-                            CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES
-                        )
-                    log.debug(
-                        "[%s %d/%d] %s produced no resolved IPs; routing directly from DNS stage",
-                        parsed.job.source_id,
-                        parsed.sequence,
-                        parsed.total,
-                        parsed.entry.host,
-                    )
-                    row = build_output_row(
-                        parsed.job,
-                        parsed.entry,
-                        classification,
-                        work_item.rdap_result,
-                        dns_result,
-                        [],
-                        "skipped",
-                        "no_resolved_ips",
-                        "skipped",
-                        "no_resolved_ips",
-                        None,
-                        rdap_unavailable=work_item.rdap_unavailable,
-                        whois_result=work_item.whois_result,
-                        source_ids_override=list(parsed.source_ids) or None,
-                        source_input_labels_override=list(parsed.source_input_labels)
-                        or None,
-                    )
-                    await self.queue_bundle.result_queue.put(
-                        CompletedHostResult(
-                            job=parsed.job,
-                            entry=parsed.entry,
-                            classification=classification,
-                            route=route_for_row(
-                                classification, "skipped", "no_resolved_ips"
-                            ),
-                            row=row,
-                            rdap_result=work_item.rdap_result,
-                            dns_result=dns_result,
-                            rdap_unavailable=work_item.rdap_unavailable,
-                            whois_result=work_item.whois_result,
-                        )
-                    )
-                    continue
-                await self.queue_bundle.dns_to_geo.put(
-                    GeoWorkItem(
-                        parsed=parsed,
-                        rdap_result=work_item.rdap_result,
-                        dns_result=dns_result,
-                        classification=classification,
-                        rdap_unavailable=work_item.rdap_unavailable,
-                        whois_result=work_item.whois_result,
-                    )
-                )
-            finally:
-                self.queue_bundle.rdap_to_dns.task_done()
-
-    async def _lookup_geo(self, work_item: GeoWorkItem):
-        parsed = work_item.parsed
-        if work_item.classification in PRE_GEO_REVIEW_CLASSIFICATIONS:
-            return (
-                None,
-                [],
-                [],
-                "skipped",
-                "classification_precludes_geo_lookup",
-                "skipped",
-                "classification_precludes_geo_lookup",
-                None,
-            )
-        if not parsed.job.config["geo"]["enabled"]:
-            return (
-                None,
-                [],
-                [],
-                "skipped",
-                "geo_disabled",
-                "skipped",
-                "geo_disabled",
-                None,
-            )
-        if not work_item.dns_result.resolved_ips:
-            return (
-                None,
-                [],
-                [],
-                "skipped",
-                "no_resolved_ips",
-                "skipped",
-                "no_resolved_ips",
-                None,
-            )
-        geo_transport = self.geo_transport_for(parsed.job.source_id, parsed.job.config)
-        if geo_transport is None:
-            return (
-                None,
-                [],
-                [],
-                "skipped",
-                "geo_disabled",
-                "skipped",
-                "geo_disabled",
-                None,
-            )
-
-        provider_name = str(parsed.job.config["geo"]["effective_provider"])
-        # Runtime transport owns provider construction; this call retrieves the
-        # already-selected provider instance for logging and result annotation.
-        # pylint: disable-next=protected-access
-        provider_used = geo_transport._provider(provider_name)
-        log.debug(
-            "[%s %d/%d] %s geo evaluation using provider=%s resolved_ips=%s",
-            parsed.job.source_id,
-            parsed.sequence,
-            parsed.total,
-            parsed.entry.host,
-            provider_name,
-            work_item.dns_result.resolved_ips or "(none)",
-        )
-        resolved_ips = list(work_item.dns_result.resolved_ips)
-        geo_results: list[IPGeoResult | None] = [None] * len(resolved_ips)
-        missing_indices: list[int] = []
+        now = utc_now()
+        cached_results: dict[str, IPGeoResult] = {}
         missing_ips: list[str] = []
-        for index, ip in enumerate(resolved_ips):
-            cached, cache_source = (
-                await self.cache_bundle.reader.get_fresh_geo_with_source(
-                    provider_name, ip, self.now
-                )
+        seen_missing_ips: set[str] = set()
+        for ip in host_resolution_result.resolved_ips:
+            cached, source = self.cache_reader.get_fresh_geo_sync_with_source(
+                provider_name, ip, now
             )
             if cached is not None:
-                assert cache_source is not None
-                self._record_cache_hit("geo", cache_source)
-                geo_results[index] = IPGeoResult(
-                    ip=ip,
-                    provider=provider_name,
-                    country_code=cached.country_code,
-                    region_code=cached.region_code,
-                    region_name=cached.region_name,
-                    status="cache_hit",
-                )
-                log.debug(
-                    "[%s %d/%d] %s geo %s cache hit for provider=%s ip=%s "
-                    "-> country=%s region_code=%s region_name=%s",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
-                    cache_source,
-                    provider_name,
-                    ip,
-                    cached.country_code or "(none)",
-                    cached.region_code or "(none)",
-                    cached.region_name or "(none)",
-                )
+                self._record_cache_hit("geo", source)
+                cached_results[ip] = self._geo_from_cache_record(cached)
                 continue
-            self._record_cache_miss("geo")
-            log.debug(
-                "[%s %d/%d] %s geo cache miss for provider=%s ip=%s after checking "
-                "overlay and baseline",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                provider_name,
-                ip,
-            )
-            missing_indices.append(index)
-            missing_ips.append(ip)
-
-        if provider_name in {"geojs", "ipinfo_lite"}:
-            looked_up_results = await geo_transport.lookup_ips(
-                provider_name, missing_ips
-            )
-        else:
-            looked_up_results = [
-                await geo_transport.lookup_ip(provider_name, ip) for ip in missing_ips
-            ]
-        if len(looked_up_results) != len(missing_ips):
-            raise ValueError(
-                f"{provider_name} returned {len(looked_up_results)} geo results "
-                f"for {len(missing_ips)} requested IPs"
-            )
-        for index, result in zip(missing_indices, looked_up_results):
-            ip = resolved_ips[index]
-            geo_results[index] = result
-            log.debug(
-                "[%s %d/%d] %s geo lookup result for provider=%s ip=%s "
-                "-> status=%s country=%s region_code=%s region_name=%s",
-                parsed.job.source_id,
-                parsed.sequence,
-                parsed.total,
-                parsed.entry.host,
-                provider_name,
-                ip,
-                result.status,
-                result.country_code or "(none)",
-                result.region_code or "(none)",
-                result.region_name or "(none)",
-            )
-            if result.usable:
-                await self.cache_bundle.writers[2].queue.put(
-                    GeoCacheWriteRequest(
-                        provider=provider_name,
-                        ip=ip,
-                        country_code=result.country_code,
-                        region_code=result.region_code,
-                        region_name=result.region_name,
-                        checked_at=self.now,
-                        ttl_days=int(parsed.job.config["geo"]["cache_ttl_days"]),
-                    )
-                )
-                self.cache_stats["cached_written"] += 1
-                log.debug(
-                    "[%s %d/%d] %s queued geo cache write for provider=%s ip=%s ttl_days=%d",
-                    parsed.job.source_id,
-                    parsed.sequence,
-                    parsed.total,
-                    parsed.entry.host,
+            if ip not in seen_missing_ips:
+                self.cache_stats["geo_cache_misses"] += 1
+                missing_ips.append(ip)
+                seen_missing_ips.add(ip)
+        try:
+            fetched_results: list[IPGeoResult] = []
+            if missing_ips:
+                provider = build_geo_provider(
                     provider_name,
-                    ip,
-                    int(parsed.job.config["geo"]["cache_ttl_days"]),
+                    timeout=float(geo_config.get("timeout", 5.0)),
+                    token=str(geo_config.get("token", "")),
                 )
-        resolved_geo_results = [result for result in geo_results if result is not None]
-
-        attempts = [
-            {
-                "provider": provider_name,
-                "statuses": {
-                    result.ip: result.status for result in resolved_geo_results
-                },
-            }
-        ]
-        if not any(result.usable for result in resolved_geo_results):
-            return (
-                provider_used,
-                resolved_geo_results,
-                attempts,
-                "review",
-                "geo_lookup_failed",
-                "skipped",
-                "geo_lookup_failed",
-                None,
-            )
-
-        policy = parsed.job.config["geo"]["policy"]
-        if parsed.job.config["geo"]["requires_region_lookup"] and not any(
-            result.region_name.strip()
-            for result in resolved_geo_results
-            if result.usable
-        ):
-            return (
-                provider_used,
-                resolved_geo_results,
-                attempts,
-                "review",
-                "region_name_unavailable",
-                "skipped",
-                "region_name_unavailable",
-                None,
-            )
-        has_rules = (
-            any(policy["include"]["countries"])
-            or any(policy["include"]["regions"])
-            or any(policy["exclude"]["countries"])
-            or any(policy["exclude"]["regions"])
-        )
-        if not policy["enabled"]:
-            return (
-                provider_used,
-                resolved_geo_results,
-                attempts,
-                "ok",
-                "lookup_succeeded",
-                "skipped",
-                "policy_disabled",
-                None,
-            )
-        if not has_rules:
-            return (
-                provider_used,
-                resolved_geo_results,
-                attempts,
-                "ok",
-                "lookup_succeeded",
-                "skipped",
-                "policy_has_no_rules",
-                None,
-            )
-        decision = evaluate_geo_policy(resolved_geo_results, policy)
-        return (
-            provider_used,
-            resolved_geo_results,
-            attempts,
-            "ok",
-            "lookup_succeeded",
-            decision.status,
-            decision.reason,
-            decision,
-        )
-
-    async def _geo_stage(self) -> None:
-        while True:
-            work_item = await self.queue_bundle.dns_to_geo.get()
-            try:
-                if work_item is None:
-                    await self.queue_bundle.result_queue.put(None)
-                    return
-                (
-                    provider_used,
-                    geo_results,
-                    geo_attempts,
-                    geo_status,
-                    geo_reason,
-                    geo_policy_status,
-                    geo_policy_reason,
-                    decision,
-                ) = await self._lookup_geo(work_item)
-                classification = work_item.classification
-                if geo_status == "review":
-                    if geo_reason == "geo_lookup_failed":
-                        classification = CLASSIFICATION_GEO_LOOKUP_FAILED
-                    elif geo_reason == "region_name_unavailable":
-                        classification = CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE
-                if geo_policy_status == "rejected":
-                    classification = CLASSIFICATION_GEO_POLICY_REJECTED
-                matched_ips = decision.matched_ips if decision is not None else []
-                rejected_ips = decision.rejected_ips if decision is not None else []
-                log.debug(
-                    "[%s %d/%d] %s geo -> %s/%s "
-                    "(lookup_reason=%s, policy_reason=%s, provider=%s, ips=%s, "
-                    "matched=%s, rejected=%s, cache_hits=%d, cache_misses=%d)",
-                    work_item.parsed.job.source_id,
-                    work_item.parsed.sequence,
-                    work_item.parsed.total,
-                    work_item.parsed.entry.host,
-                    geo_status,
-                    geo_reason,
-                    geo_policy_status,
-                    geo_policy_reason,
-                    provider_used.provider_name if provider_used is not None else "",
-                    [result.ip for result in geo_results] or "(none)",
-                    matched_ips,
-                    rejected_ips,
-                    sum(1 for result in geo_results if result.status == "cache_hit"),
-                    sum(1 for result in geo_results if result.status != "cache_hit"),
-                )
-                row = build_output_row(
-                    work_item.parsed.job,
-                    work_item.parsed.entry,
-                    classification,
-                    work_item.rdap_result,
-                    work_item.dns_result,
-                    geo_results,
-                    geo_status,
-                    geo_reason,
-                    geo_policy_status,
-                    geo_policy_reason,
-                    provider_used,
-                    rdap_unavailable=work_item.rdap_unavailable,
-                    whois_result=work_item.whois_result,
-                    source_ids_override=list(work_item.parsed.source_ids) or None,
-                    source_input_labels_override=list(
-                        work_item.parsed.source_input_labels
-                    )
-                    or None,
-                )
-                if (
-                    classification
-                    in {
-                        CLASSIFICATION_GEO_LOOKUP_FAILED,
-                        CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
-                    }
-                    and geo_attempts
-                ):
-                    row["geo_attempts"] = geo_attempts
-                await self.queue_bundle.result_queue.put(
-                    CompletedHostResult(
-                        job=work_item.parsed.job,
-                        entry=work_item.parsed.entry,
-                        classification=classification,
-                        route=route_for_row(
-                            classification, geo_policy_status, geo_reason
-                        ),
-                        row=row,
-                        rdap_result=work_item.rdap_result,
-                        dns_result=work_item.dns_result,
-                        rdap_unavailable=work_item.rdap_unavailable,
-                        whois_result=work_item.whois_result,
-                        geo_results=geo_results,
-                        geo_attempts=geo_attempts,
-                        geo_policy=decision,
-                    )
-                )
-            finally:
-                self.queue_bundle.dns_to_geo.task_done()
-
-    async def _result_collector(self) -> None:
-        sentinels_seen = 0
-        while True:
-            result = await self.queue_bundle.result_queue.get()
-            try:
-                if result is None:
-                    sentinels_seen += 1
-                    if sentinels_seen >= GEO_STAGE_WORKERS:
-                        return
+                fetched_results = provider.lookup_ips(missing_ips)
+            fetched_by_ip = {result.ip: result for result in fetched_results}
+            for result in fetched_results:
+                if not result.usable or result.status == GEO_STATUS_CACHE_HIT:
                     continue
-                self.writer.add(result)
-            finally:
-                self.queue_bundle.result_queue.task_done()
-
-
-def _log_run_summary(
-    elapsed: float,
-    writer_result: WriterResult,
-    cache_stats: Counter,
-    cache_file: Path,
-    output_paths: list[Path],
-) -> None:
-    log.info("========================================")
-    log.info("Pipeline complete in %.1fs", elapsed)
-    if cache_file.is_file():
-        log.info("  Cache file: %s (%d bytes)", cache_file, cache_file.stat().st_size)
-    for output_path in output_paths:
-        if not output_path.is_file():
-            continue
-        with output_path.open("r", encoding="utf-8") as handle:
-            line_count = sum(1 for _ in handle)
-        log.info(
-            "  Output file: %s (%d lines, %d bytes)",
-            output_path,
-            line_count,
-            output_path.stat().st_size,
+                self.cache.put_geo(
+                    provider=provider_name,
+                    ip=result.ip,
+                    country_code=result.country_code,
+                    region_code=result.region_code,
+                    region_name=result.region_name,
+                    checked_at=now,
+                    ttl_days=int(geo_config.get("cache_ttl_days", 7)),
+                )
+            results = [
+                cached_results[ip] if ip in cached_results else fetched_by_ip[ip]
+                for ip in host_resolution_result.resolved_ips
+                if ip in cached_results or ip in fetched_by_ip
+            ]
+            policy = evaluate_geo_policy(results, geo_config["policy"])
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Geo lookup failed for %s: %s", host_resolution_result.host, exc
+            )
+            return CLASSIFICATION_GEO_LOOKUP_FAILED, [], None
+        return (
+            geo_policy_classification(policy, results, geo_config["policy"]),
+            results,
+            policy,
         )
-    emitted_hosts = writer_result.counts.get("route_filtered", 0)
-    review_hosts = writer_result.counts.get("route_review", 0)
-    dead_hosts = writer_result.counts.get("route_dead", 0)
-    log.info("  Total input hosts: %d", emitted_hosts + review_hosts + dead_hosts)
-    log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
-    log.info("  Hosts routed to review: %d", review_hosts)
-    log.info(
-        "  Hosts written to output/dead after unregistered registrable-domain verdict: %d",
-        dead_hosts,
-    )
-    log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))
-    log.info("  Cache refreshes: %d", cache_stats.get("cached_refreshed", 0))
-    log.info("  Cache clears: %d", cache_stats.get("cache_cleared", 0))
-    log.info("  RDAP cache hits: %d", cache_stats.get("rdap_cache_hits", 0))
-    log.info("  RDAP cache misses: %d", cache_stats.get("rdap_cache_misses", 0))
-    log.info(
-        "  RDAP overlay cache hits: %d",
-        cache_stats.get("rdap_overlay_cache_hits", 0),
-    )
-    log.info(
-        "  RDAP baseline cache hits: %d",
-        cache_stats.get("rdap_baseline_cache_hits", 0),
-    )
-    log.info("  DNS cache hits: %d", cache_stats.get("dns_cache_hits", 0))
-    log.info("  DNS cache misses: %d", cache_stats.get("dns_cache_misses", 0))
-    log.info(
-        "  DNS overlay cache hits: %d",
-        cache_stats.get("dns_overlay_cache_hits", 0),
-    )
-    log.info(
-        "  DNS baseline cache hits: %d",
-        cache_stats.get("dns_baseline_cache_hits", 0),
-    )
-    log.info("  Geo cache hits: %d", cache_stats.get("geo_cache_hits", 0))
-    log.info("  Geo cache misses: %d", cache_stats.get("geo_cache_misses", 0))
-    log.info(
-        "  Geo overlay cache hits: %d",
-        cache_stats.get("geo_overlay_cache_hits", 0),
-    )
-    log.info(
-        "  Geo baseline cache hits: %d",
-        cache_stats.get("geo_baseline_cache_hits", 0),
-    )
 
-
-def _path_display(path: Path) -> str:
-    """Render one path relative to cwd when possible."""
-    try:
-        return str(path.relative_to(Path.cwd()))
-    except ValueError:
-        return str(path)
-
-
-def _clear_incomplete_run_state(runtime: AsyncPipelineRuntime) -> None:
-    """Remove stale incomplete-run state after a successful full publish."""
-    state_root = runtime.incomplete_manifest_path().parent
-    debug_root = runtime.incomplete_debug_root()
-    if state_root.is_dir():
-        shutil.rmtree(state_root)
-    if debug_root.is_dir():
-        shutil.rmtree(debug_root)
-
-
-def _write_incomplete_run_state(
-    runtime: AsyncPipelineRuntime,
-    elapsed: float,
-    writer_result: WriterResult,
-    output_paths: list[Path],
-) -> Path:
-    """Persist incomplete-run artifacts and one manifest for workflow commits."""
-    manifest_path = runtime.incomplete_manifest_path()
-    state_root = manifest_path.parent
-    publish_snapshot_root = runtime.incomplete_publish_snapshot_root()
-    debug_root = runtime.incomplete_debug_root()
-    incomplete_writer_result: IncompleteRunWriteResult = (
-        runtime.writer.write_incomplete_run(
-            publish_root=publish_snapshot_root,
-            debug_root=debug_root,
+    def _complete(
+        self,
+        *,
+        job: SourceJob,
+        entry: ParsedDomainEntry,
+        classification: str,
+        delegation_result: DelegationResult | None = None,
+        host_resolution_result: HostResolutionResult | None = None,
+        geo_results: list[IPGeoResult] | None = None,
+        geo_policy: Any | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> None:
+        provenance = provenance or {}
+        row = build_base_row(
+            job=job,
+            entry=entry,
+            classification=classification,
+            delegation_result=delegation_result,
+            host_resolution_result=host_resolution_result,
+            geo_results=geo_results or [],
+            geo_policy=geo_policy,
+            source_id_override=provenance.get("source_id_override"),
+            source_input_label_override=provenance.get("source_input_label_override"),
+            source_ids=tuple(provenance.get("source_ids", ())),
+            source_input_labels=tuple(provenance.get("source_input_labels", ())),
         )
-    )
-    stop_context = runtime.budget_stop_context
-    published_branch_paths = [
-        _path_display(path) for path in output_paths if path.parts[:1] == ("output",)
-    ]
-    state_artifact_paths = [
-        _path_display(manifest_path),
-        *[_path_display(path) for path in incomplete_writer_result.state_paths],
-    ]
-    debug_artifact_paths = [
-        _path_display(path) for path in incomplete_writer_result.debug_paths
-    ]
-    payload: dict[str, Any] = {
-        "status": "incomplete",
-        "reason": "max_runtime_seconds_reached",
-        "config_path": str(runtime.runtime_identity.config_path),
-        "config_file_name": runtime.runtime_identity.config_file_name,
-        "config_name": runtime.runtime_identity.config_name,
-        "cache_file": str(runtime.cache_path),
-        "stopped_at": datetime.now(timezone.utc).isoformat(),
-        "elapsed_seconds": elapsed,
-        "max_runtime_seconds": (
-            runtime.runtime_budget.max_runtime_seconds
-            if runtime.runtime_budget is not None
-            else None
-        ),
-        "published_outputs_kept": True,
-        "published_branch_paths": published_branch_paths,
-        "state_artifact_paths": state_artifact_paths,
-        "debug_artifact_paths": debug_artifact_paths,
-        "counts": dict(writer_result.counts),
-        "cache_stats": dict(runtime.cache_stats),
-    }
-    if stop_context is not None:
-        payload["stop_context"] = {
-            "source_id": stop_context.source_id,
-            "sequence": stop_context.sequence,
-            "total": stop_context.total,
-            "host": stop_context.host,
-        }
-    state_root.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return manifest_path
+        self.writer.add(
+            CompletedHostResult(
+                job=job,
+                entry=entry,
+                classification=classification,
+                route=route_for_classification(classification),
+                row=row,
+                delegation_result=delegation_result,
+                host_resolution_result=host_resolution_result,
+                geo_results=geo_results or [],
+                geo_policy=geo_policy,
+            )
+        )
+
+    def _process_entry(
+        self, job: SourceJob, entry: ParsedDomainEntry, provenance: dict[str, Any]
+    ) -> None:
+        if entry.is_public_suffix_input or not entry.registrable_domain:
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+                provenance=provenance,
+            )
+            return
+        delegation_result = self._lookup_delegation(job, entry)
+        delegation_classification = classify_delegation(delegation_result)
+        if not delegation_result.actionable:
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=delegation_classification,
+                delegation_result=delegation_result,
+                provenance=provenance,
+            )
+            return
+        if provenance.get("manual_filter_pass"):
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
+                delegation_result=delegation_result,
+                provenance=provenance,
+            )
+            return
+        if provenance.get("manual_add"):
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=CLASSIFICATION_MANUAL_ADD_ACTIONABLE,
+                delegation_result=delegation_result,
+                provenance=provenance,
+            )
+            return
+        dns_config = job.config["dns"]
+        if not bool(dns_config.get("host_resolution", {}).get("enabled", False)):
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=host_resolution_skipped_classification(),
+                delegation_result=delegation_result,
+                provenance=provenance,
+            )
+            return
+        host_resolution_result = self._lookup_host_resolution(job, entry)
+        host_classification = classify_host_resolution(host_resolution_result)
+        if route_for_classification(host_classification) == "review":
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=host_classification,
+                delegation_result=delegation_result,
+                host_resolution_result=host_resolution_result,
+                provenance=provenance,
+            )
+            return
+        if not bool(job.config["geo"].get("enabled", False)):
+            self._complete(
+                job=job,
+                entry=entry,
+                classification=host_classification,
+                delegation_result=delegation_result,
+                host_resolution_result=host_resolution_result,
+                provenance=provenance,
+            )
+            return
+        geo_classification, geo_results, geo_policy = self._lookup_geo(
+            job, host_resolution_result
+        )
+        self._complete(
+            job=job,
+            entry=entry,
+            classification=geo_classification,
+            delegation_result=delegation_result,
+            host_resolution_result=host_resolution_result,
+            geo_results=geo_results,
+            geo_policy=geo_policy,
+            provenance=provenance,
+        )
+
+    def run(self) -> int:
+        """Run the prepared or config-sourced pipeline."""
+        if self.prepared_metadata:
+            jobs = [
+                SourceJob(
+                    source_id=str(source["id"]),
+                    input_label=str(
+                        source.get("input", {}).get("label")
+                        or source["input"]["location"]
+                    ),
+                    output_stem=str(self.config["config_name"]),
+                    lines=[],
+                    config=source,
+                )
+                for source in self.config["sources"]
+                if source.get("enabled", True)
+            ]
+        else:
+            jobs = build_source_jobs(self.config)
+        parser = DomainListParser()
+        for job in jobs:
+            prepared_entries = _prepared_entries(job, self.prepared_metadata)
+            if prepared_entries:
+                for entry, provenance in prepared_entries:
+                    self._process_entry(job, entry, provenance)
+                continue
+            forced_format = job.config.get("input", {}).get("format", "auto")
+            for entry in parser.process_entries(
+                job.lines,
+                source_name=job.input_label,
+                forced_format=None if forced_format == "auto" else forced_format,
+            ):
+                self._process_entry(job, entry, {})
+        writer_result = self.writer.write()
+        logger.info(
+            "Pipeline emitted counts=%s outputs=%s",
+            dict(writer_result.counts),
+            writer_result.output_paths,
+        )
+        return 0
 
 
 async def run_prepared_pipeline_async(
     runtime_config: dict[str, Any],
     *,
-    runtime_identity: dict[str, str],
+    runtime_identity: dict[str, str] | None = None,
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
 ) -> int:
-    """Run the async pipeline from one prepared automation payload without YAML reload."""
-    start_time = time.monotonic()
-    runtime_budget = (
-        RuntimeBudget(max_runtime_seconds=max_runtime_seconds)
-        if max_runtime_seconds is not None
-        else None
-    )
-    config_identity = RuntimeIdentity(
-        config_path=Path(runtime_identity["config_path"]),
-        config_file_name=runtime_identity["config_file_name"],
-        config_name=runtime_identity["config_name"],
-    )
+    """Run one workflow-owned runtime payload."""
     runtime = AsyncPipelineRuntime.from_runtime_payload(
         runtime_config,
-        runtime_identity=config_identity,
-        runtime_budget=runtime_budget,
+        runtime_identity=runtime_identity,
         prepared_metadata=prepared_metadata,
     )
-    log.info("========================================")
-    log.info("Pipeline start")
-    log.info("  Config path: %s", runtime.runtime_identity.config_path)
-    log.info("  Config file: %s", runtime.runtime_identity.config_file_name)
-    log.info("  Config name: %s", runtime.runtime_identity.config_name)
-    log.info("  Python: %s", sys.version.split()[0])
-    log.info("  Working dir: %s", Path.cwd())
-    log.info("  Cache file: %s", runtime.cache_path)
-    log.info("  Sources configured: %d", len(runtime.config["sources"]))
-    if runtime_budget is not None:
-        log.info("  Soft runtime budget: %.1fs", runtime_budget.max_runtime_seconds)
-    log.info("========================================")
     try:
-        writer_result, output_paths, outputs_published = await runtime.run()
-    except BaseException:
-        runtime.write_rdap_rate_limit_debug_artifacts()
-        raise
-    elapsed = time.monotonic() - start_time
-    if not outputs_published:
-        manifest_path = _write_incomplete_run_state(
-            runtime,
-            elapsed,
-            writer_result,
-            output_paths,
+        if max_runtime_seconds is None:
+            return await asyncio.to_thread(runtime.run)
+        return await asyncio.wait_for(
+            asyncio.to_thread(runtime.run), timeout=max_runtime_seconds
         )
-        log.warning(
-            "Soft runtime budget stop after %.1fs; leaving previously published "
-            "outputs unchanged for this run and writing incomplete-run state to %s",
-            elapsed,
-            manifest_path,
-        )
-    else:
-        _clear_incomplete_run_state(runtime)
-    runtime.write_rdap_rate_limit_debug_artifacts()
-    _log_run_summary(
-        elapsed,
-        writer_result,
-        runtime.cache_stats,
-        runtime.cache_path,
-        output_paths if outputs_published else [],
-    )
-    return 0
+    finally:
+        runtime.close()

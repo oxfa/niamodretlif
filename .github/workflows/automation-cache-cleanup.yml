@@ -20,8 +20,8 @@ jobs:
     env:
       KEEP_COUNT: "2"
       CACHE_PREFIXES: |
-        signal-light-sqlite-block-
-        signal-light-sqlite-direct-
+        domain-pipeline-dns-sqlite-block-
+        domain-pipeline-dns-sqlite-direct-
     steps:
       - name: Delete stale automation sqlite caches
         env:

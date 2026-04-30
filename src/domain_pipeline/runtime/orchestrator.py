@@ -7,31 +7,36 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .async_constants import (
-    DNS_TO_GEO_QUEUE_SIZE,
-    DNS_WRITER_QUEUE_SIZE,
+    HOST_RESOLUTION_TO_GEO_QUEUE_SIZE,
+    HOST_RESOLUTION_WRITER_QUEUE_SIZE,
+    DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE,
+    DELEGATION_WRITER_QUEUE_SIZE,
     GEO_WRITER_QUEUE_SIZE,
-    PARSE_TO_RDAP_QUEUE_SIZE,
-    RDAP_TO_DNS_QUEUE_SIZE,
+    PARSE_TO_DELEGATION_QUEUE_SIZE,
     RESULT_QUEUE_SIZE,
-    ROOT_WRITER_QUEUE_SIZE,
 )
 from .cache_async import (
     AsyncCacheReadFacade,
     AsyncCacheWriter,
-    build_dns_cache_writer,
+    build_delegation_cache_writer,
     build_geo_cache_writer,
-    build_root_cache_writer,
+    build_host_resolution_cache_writer,
 )
-from .contracts import CompletedHostResult, DNSWorkItem, GeoWorkItem, ParsedHostItem
+from .contracts import (
+    CompletedHostResult,
+    GeoWorkItem,
+    HostResolutionWorkItem,
+    ParsedHostItem,
+)
 
 
 @dataclass
 class QueueBundle:
     """Queues owned by the orchestrator."""
 
-    parse_to_rdap: asyncio.Queue[ParsedHostItem | None]
-    rdap_to_dns: asyncio.Queue[DNSWorkItem | None]
-    dns_to_geo: asyncio.Queue[GeoWorkItem | None]
+    parse_to_delegation: asyncio.Queue[ParsedHostItem | None]
+    delegation_to_host_resolution: asyncio.Queue[HostResolutionWorkItem | None]
+    host_resolution_to_geo: asyncio.Queue[GeoWorkItem | None]
     result_queue: asyncio.Queue[CompletedHostResult | None]
 
 
@@ -46,9 +51,11 @@ class CacheBundle:
 def build_queue_bundle() -> QueueBundle:
     """Create the runtime queues with locked sizes."""
     return QueueBundle(
-        parse_to_rdap=asyncio.Queue(maxsize=PARSE_TO_RDAP_QUEUE_SIZE),
-        rdap_to_dns=asyncio.Queue(maxsize=RDAP_TO_DNS_QUEUE_SIZE),
-        dns_to_geo=asyncio.Queue(maxsize=DNS_TO_GEO_QUEUE_SIZE),
+        parse_to_delegation=asyncio.Queue(maxsize=PARSE_TO_DELEGATION_QUEUE_SIZE),
+        delegation_to_host_resolution=asyncio.Queue(
+            maxsize=DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE
+        ),
+        host_resolution_to_geo=asyncio.Queue(maxsize=HOST_RESOLUTION_TO_GEO_QUEUE_SIZE),
         result_queue=asyncio.Queue(maxsize=RESULT_QUEUE_SIZE),
     )
 
@@ -58,10 +65,15 @@ def build_cache_bundle(
 ) -> CacheBundle:
     """Create the async cache facade and dedicated writers."""
     reader = AsyncCacheReadFacade(cache_path, baseline_path=baseline_cache_path)
-    root_writer = build_root_cache_writer(cache_path)
-    root_writer.queue = asyncio.Queue(maxsize=ROOT_WRITER_QUEUE_SIZE)
-    dns_writer = build_dns_cache_writer(cache_path)
-    dns_writer.queue = asyncio.Queue(maxsize=DNS_WRITER_QUEUE_SIZE)
+    delegation_writer = build_delegation_cache_writer(cache_path)
+    delegation_writer.queue = asyncio.Queue(maxsize=DELEGATION_WRITER_QUEUE_SIZE)
+    host_resolution_writer = build_host_resolution_cache_writer(cache_path)
+    host_resolution_writer.queue = asyncio.Queue(
+        maxsize=HOST_RESOLUTION_WRITER_QUEUE_SIZE
+    )
     geo_writer = build_geo_cache_writer(cache_path)
     geo_writer.queue = asyncio.Queue(maxsize=GEO_WRITER_QUEUE_SIZE)
-    return CacheBundle(reader=reader, writers=[root_writer, dns_writer, geo_writer])
+    return CacheBundle(
+        reader=reader,
+        writers=[delegation_writer, host_resolution_writer, geo_writer],
+    )

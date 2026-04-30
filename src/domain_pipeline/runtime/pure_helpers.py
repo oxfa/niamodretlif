@@ -3,81 +3,44 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TypedDict, cast
+from typing import Any, TypedDict
 
 from domain_pipeline.classifications import (
+    CLASSIFICATION_DNS_DELEGATION_EXISTS,
+    CLASSIFICATION_DNS_DELEGATION_NODATA,
+    CLASSIFICATION_DNS_DELEGATION_NO_NAMESERVERS,
+    CLASSIFICATION_DNS_DELEGATION_NXDOMAIN,
+    CLASSIFICATION_DNS_DELEGATION_SERVFAIL,
+    CLASSIFICATION_DNS_DELEGATION_TIMEOUT,
+    CLASSIFICATION_DNS_HOST_NODATA,
+    CLASSIFICATION_DNS_HOST_NXDOMAIN,
     CLASSIFICATION_DNS_LOOKUP_SERVFAIL,
     CLASSIFICATION_DNS_LOOKUP_TIMEOUT,
-    CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
-    CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
-    CLASSIFICATION_DNS_REGISTERED_APEX_NODATA,
-    CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN,
-    CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NODATA,
-    CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NXDOMAIN,
     CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES,
     CLASSIFICATION_DNS_RESOLVES,
     CLASSIFICATION_GEO_LOOKUP_FAILED,
+    CLASSIFICATION_GEO_POLICY_ACCEPTED,
     CLASSIFICATION_GEO_POLICY_REJECTED,
     CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE,
+    CLASSIFICATION_HOST_RESOLUTION_SKIPPED,
     CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-    CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
     CLASSIFICATION_MANUAL_FILTER_OUT,
     CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
-    CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED,
-    CLASSIFICATION_RDAP_STATUS_CLIENT_HOLD,
-    CLASSIFICATION_RDAP_STATUS_DELETION_OTHER,
-    CLASSIFICATION_RDAP_STATUS_HOLD_OTHER,
-    CLASSIFICATION_RDAP_STATUS_INACTIVE,
-    CLASSIFICATION_RDAP_STATUS_PENDING_DELETE,
-    CLASSIFICATION_RDAP_STATUS_PENDING_RENEW,
-    CLASSIFICATION_RDAP_STATUS_PENDING_RESTORE,
-    CLASSIFICATION_RDAP_STATUS_REDEMPTION_PERIOD,
-    CLASSIFICATION_RDAP_STATUS_SERVER_HOLD,
-    CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED,
+    DNS_REVIEW_CLASSIFICATIONS,
     GEO_REVIEW_CLASSIFICATIONS,
-    PUBLIC_REVIEW_CLASSIFICATIONS,
-    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON,
-    RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS,
-    RDAP_UNAVAILABLE_REASON_BY_DNS_DISABLED_CLASSIFICATION,
-    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_408_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_502_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_503_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_504_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON,
-    RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED,
-    RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS,
-    RDAP_UNAVAILABLE_REASON_UNKNOWN,
-    RDAP_STATUS_CLASSIFICATION_ORDER,
-    RDAP_STATUS_CLASSIFICATIONS,
-    RDAP_REVIEW_CLASSIFICATIONS,
     REVIEW_CLASSIFICATION_DNS_FILTERED_OUT,
     REVIEW_CLASSIFICATION_GEO_FILTERED_OUT,
     REVIEW_CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-    REVIEW_CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
     REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT,
-    REVIEW_CLASSIFICATION_RDAP_FILTERED_OUT,
-    ROUTE_DEAD_CLASSIFICATIONS,
-    ROUTE_FILTERED_CLASSIFICATIONS,
-    ROUTE_REVIEW_CLASSIFICATIONS,
+    REVIEW_CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+    ROUTE_UNACTIONABLE_CLASSIFICATIONS,
 )
 from ..checking import (
-    DNSResult,
-    IPGeoProvider,
+    DelegationResult,
+    GeoPolicyDecision,
+    HostResolutionResult,
     IPGeoResult,
-    RDAPResult,
-    RDAPUnavailableInfo,
-    WhoisFallbackResult,
 )
 from ..io.parser import ParsedDomainEntry
 from ..shared import SourceJob
@@ -89,7 +52,10 @@ REVIEW_OUTPUT_COLUMNS = (
     "registrable_domain",
     "classification",
     "classification_reason",
-    "dns_status",
+    "delegation_status",
+    "delegation_reason",
+    "host_resolution_status",
+    "host_resolution_reason",
     "geo_status",
     "geo_reason",
     "geo_policy_status",
@@ -105,248 +71,83 @@ REVIEW_OUTPUT_COLUMNS = (
 class ReviewOutputRow(TypedDict):
     """Typed projection used by the review CSV output."""
 
-    source_id: str
-    source_input_label: str
     input_name: str
     host: str
     registrable_domain: str
     classification: str
     classification_reason: str
-    dns_status: str
+    delegation_status: str
+    delegation_reason: str
+    host_resolution_status: str
+    host_resolution_reason: str
     geo_status: str
     geo_reason: str
     geo_policy_status: str
     geo_policy_reason: str
     geo_provider: str
+    source_id: str
+    source_input_label: str
     source_ids: str
     source_input_labels: str
 
 
 ROUTE_FILTERED = "filtered"
 ROUTE_REVIEW = "review"
-ROUTE_DEAD = "dead"
+ROUTE_UNACTIONABLE = "unactionable"
 
 
-def route_for_rdap_dns_disabled(
-    *,
-    rdap_config: dict[str, Any],
-    rdap_result: RDAPResult | None,
-    rdap_unavailable: RDAPUnavailableInfo | None,
-) -> ResultRoute:
-    """Return the configured terminal route after RDAP when DNS is disabled."""
-    if rdap_result is not None:
-        return ROUTE_FILTERED
-    if rdap_unavailable is None:
-        return ROUTE_REVIEW
-    route_mapping = rdap_config.get("unavailable_dns_disabled_routes", {})
-    if not isinstance(route_mapping, dict):
-        return ROUTE_REVIEW
-    configured_route = route_mapping.get(rdap_unavailable.reason)
-    if configured_route == ROUTE_FILTERED:
-        return ROUTE_FILTERED
-    if configured_route == ROUTE_REVIEW:
-        return ROUTE_REVIEW
-    return ROUTE_REVIEW
+def classify_delegation(result: DelegationResult) -> str:
+    """Return the pipeline classification for one delegation result."""
+    if result.status == "exists":
+        return CLASSIFICATION_DNS_DELEGATION_EXISTS
+    if result.status == "nxdomain":
+        return CLASSIFICATION_DNS_DELEGATION_NXDOMAIN
+    if result.status == "nodata":
+        return CLASSIFICATION_DNS_DELEGATION_NODATA
+    if result.status == "no_nameservers":
+        return CLASSIFICATION_DNS_DELEGATION_NO_NAMESERVERS
+    if result.status == "timeout":
+        return CLASSIFICATION_DNS_DELEGATION_TIMEOUT
+    return CLASSIFICATION_DNS_DELEGATION_SERVFAIL
 
 
-RDAP_UNAVAILABLE_REASON_TEXT = {
-    RDAP_UNAVAILABLE_REASON_NO_AUTHORITATIVE_BOOTSTRAP: (
-        "RDAP has no authoritative bootstrap server and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_TRANSPORT_RETRY_EXHAUSTED: (
-        "RDAP bootstrap transport retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_RETRYABLE_HTTP_EXHAUSTED: (
-        "RDAP bootstrap retryable HTTP status retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_UNEXPECTED_HTTP_STATUS: (
-        "RDAP bootstrap returned an unexpected HTTP status and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_JSON: (
-        "RDAP bootstrap returned malformed JSON and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_INVALID_SERVICES: (
-        "RDAP bootstrap returned malformed services and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_BOOTSTRAP_SETUP_FAILED: (
-        "RDAP bootstrap setup failed and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_INVALID_JSON: (
-        "RDAP authoritative query returned malformed JSON and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_UNEXPECTED_HTTP_STATUS: (
-        "RDAP authoritative query returned an unexpected HTTP status and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_TRANSPORT_RETRY_EXHAUSTED: (
-        "RDAP authoritative query transport retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_400: (
-        "RDAP authoritative query returned HTTP 400 and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_501: (
-        "RDAP authoritative query returned HTTP 501 and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_408_RETRY_EXHAUSTED: (
-        "RDAP authoritative query HTTP 408 retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_429_RETRY_EXHAUSTED: (
-        "RDAP authoritative query HTTP 429 retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_502_RETRY_EXHAUSTED: (
-        "RDAP authoritative query HTTP 502 retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_503_RETRY_EXHAUSTED: (
-        "RDAP authoritative query HTTP 503 retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_QUERY_HTTP_504_RETRY_EXHAUSTED: (
-        "RDAP authoritative query HTTP 504 retry exhausted and DNS is disabled"
-    ),
-    RDAP_UNAVAILABLE_REASON_UNKNOWN: "RDAP lookup was unavailable and DNS is disabled",
-}
+def classify_host_resolution(result: HostResolutionResult) -> str:
+    """Return the pipeline classification for one host-resolution result."""
+    if result.status == "resolved":
+        return CLASSIFICATION_DNS_RESOLVES
+    if result.status == "nxdomain":
+        return CLASSIFICATION_DNS_HOST_NXDOMAIN
+    if result.status == "nodata":
+        return CLASSIFICATION_DNS_HOST_NODATA
+    if result.status == "timeout":
+        return CLASSIFICATION_DNS_LOOKUP_TIMEOUT
+    if result.status == "servfail":
+        return CLASSIFICATION_DNS_LOOKUP_SERVFAIL
+    return CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES
 
 
-def rdap_unavailable_dns_disabled_classification(
-    rdap_unavailable: RDAPUnavailableInfo | None,
-) -> str:
-    """Return the internal DNS-disabled class for one unavailable RDAP reason."""
-    reason = (
-        rdap_unavailable.reason
-        if rdap_unavailable is not None
-        else RDAP_UNAVAILABLE_REASON_UNKNOWN
-    )
-    return RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATION_BY_REASON.get(
-        reason,
-        CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED,
-    )
-
-
-def _rdap_unavailable_reason_text(row: dict[str, Any]) -> str:
-    """Return a user-facing review reason for RDAP-unavailable DNS-disabled rows."""
-    reason = str(row.get("rdap_unavailable_reason", ""))
-    if not reason:
-        reason = RDAP_UNAVAILABLE_REASON_BY_DNS_DISABLED_CLASSIFICATION.get(
-            str(row.get("classification", "")),
-            RDAP_UNAVAILABLE_REASON_UNKNOWN,
-        )
-    return RDAP_UNAVAILABLE_REASON_TEXT.get(
-        reason,
-        "RDAP lookup was unavailable and DNS is disabled",
-    )
-
-
-def _registered_domain_subject(row: dict[str, Any]) -> str:
-    """Return the most specific registered-domain subject available for one row."""
-    if str(row.get("input_kind", "")) == "suffix_rule":
-        return "registered suffix-rule domain"
-    if str(row.get("host", "")) == str(row.get("registrable_domain", "")):
-        return "registered apex domain"
-    return "registered subdomain"
-
-
-def review_reason_for_row(row: dict[str, Any]) -> str:
-    """Return a user-facing reason for why one row landed in review output."""
-    classification = str(row.get("classification", ""))
-    geo_policy_status = str(row.get("geo_policy_status", ""))
-    geo_policy_reason = str(row.get("geo_policy_reason", ""))
-    registered_subject = _registered_domain_subject(row)
-    reason_by_classification = {
-        CLASSIFICATION_INPUT_PUBLIC_SUFFIX: (
-            "input is a public suffix rather than a registrable host"
-        ),
-        CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED: (
-            "RDAP lookup was unavailable and DNS is disabled"
-        ),
-        CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED: (
-            "WHOIS fallback could not determine registration after RDAP was unavailable "
-            "and DNS is disabled"
-        ),
-        CLASSIFICATION_DNS_LOOKUP_TIMEOUT: "DNS lookup returned timeout",
-        CLASSIFICATION_DNS_LOOKUP_SERVFAIL: "DNS lookup returned servfail",
-        CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
-            "manual filter-pass host was not present in any configured source"
-        ),
-        CLASSIFICATION_MANUAL_FILTER_OUT: (
-            "manual filter-out host was explicitly rejected"
-        ),
-        CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
-            "manual filter-out host was not present in any configured source"
-        ),
-        CLASSIFICATION_MANUAL_ADD_UNREGISTERED: (
-            "manual-add host has an unregistered registrable domain"
-        ),
-        CLASSIFICATION_MANUAL_ADD_UNAVAILABLE: (
-            "manual-add host could not get an RDAP registration verdict"
-        ),
-        CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN: (
-            f"{registered_subject} returned NXDOMAIN"
-        ),
-        CLASSIFICATION_DNS_REGISTERED_APEX_NODATA: (
-            f"{registered_subject} has no A/AAAA answers"
-        ),
-        CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NXDOMAIN: (
-            f"{registered_subject} returned NXDOMAIN"
-        ),
-        CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NODATA: (
-            f"{registered_subject} has no A/AAAA answers"
-        ),
-        CLASSIFICATION_RDAP_STATUS_INACTIVE: (
-            "RDAP status inactive indicates the domain should not resolve"
-        ),
-        CLASSIFICATION_RDAP_STATUS_CLIENT_HOLD: (
-            "RDAP status clientHold indicates the domain should not resolve"
-        ),
-        CLASSIFICATION_RDAP_STATUS_SERVER_HOLD: (
-            "RDAP status serverHold indicates the domain should not resolve"
-        ),
-        CLASSIFICATION_RDAP_STATUS_HOLD_OTHER: (
-            "an RDAP hold status indicates the domain should not resolve"
-        ),
-        CLASSIFICATION_RDAP_STATUS_REDEMPTION_PERIOD: (
-            "RDAP status redemptionPeriod indicates the domain is pending deletion"
-        ),
-        CLASSIFICATION_RDAP_STATUS_PENDING_DELETE: (
-            "RDAP status pendingDelete indicates the domain is pending deletion"
-        ),
-        CLASSIFICATION_RDAP_STATUS_PENDING_RESTORE: (
-            "RDAP status pendingRestore indicates the domain is pending deletion"
-        ),
-        CLASSIFICATION_RDAP_STATUS_PENDING_RENEW: (
-            "RDAP status pendingRenew indicates the domain is pending deletion"
-        ),
-        CLASSIFICATION_RDAP_STATUS_DELETION_OTHER: (
-            "an RDAP deletion status indicates the domain is pending deletion"
-        ),
-        CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES: (
-            "DNS did not produce resolved IPs for geo validation"
-        ),
-        CLASSIFICATION_GEO_LOOKUP_FAILED: "geo lookup failed for all resolved IPs",
-        CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE: (
-            "resolved IPs lacked region names required by geo policy"
-        ),
-    }
-
+def route_for_classification(classification: str) -> ResultRoute:
+    """Return the terminal route for one classification."""
+    if classification in ROUTE_UNACTIONABLE_CLASSIFICATIONS:
+        return ROUTE_UNACTIONABLE
     if (
-        classification == CLASSIFICATION_GEO_POLICY_REJECTED
-        or geo_policy_status == "rejected"
+        classification in DNS_REVIEW_CLASSIFICATIONS
+        or classification in GEO_REVIEW_CLASSIFICATIONS
     ):
-        if geo_policy_reason:
-            return f"geo policy rejected resolved IPs: {geo_policy_reason}"
-        return "geo policy rejected resolved IPs"
-    if classification in reason_by_classification:
-        return reason_by_classification[classification]
-    if classification in RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS:
-        return _rdap_unavailable_reason_text(row)
-    if classification:
-        return classification
-    return "review routing triggered without a recorded classification"
+        return ROUTE_REVIEW
+    if classification in {
+        CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+        CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+        CLASSIFICATION_MANUAL_FILTER_OUT,
+        CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+    }:
+        return ROUTE_REVIEW
+    return ROUTE_FILTERED
 
 
-def review_classification_for_row(row: dict[str, Any]) -> str:
-    """Return the public review classification exposed in the CSV output."""
+def public_review_classification(row: dict[str, Any]) -> str:
+    """Return the public review classification for one terminal row."""
     classification = str(row.get("classification", ""))
-    geo_policy_status = str(row.get("geo_policy_status", ""))
-    if classification in PUBLIC_REVIEW_CLASSIFICATIONS:
-        return classification
     if classification == CLASSIFICATION_INPUT_PUBLIC_SUFFIX:
         return REVIEW_CLASSIFICATION_INPUT_PUBLIC_SUFFIX
     if classification == CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES:
@@ -354,45 +155,87 @@ def review_classification_for_row(row: dict[str, Any]) -> str:
     if classification in {
         CLASSIFICATION_MANUAL_FILTER_OUT,
         CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-        CLASSIFICATION_MANUAL_ADD_UNREGISTERED,
-        CLASSIFICATION_MANUAL_ADD_UNAVAILABLE,
     }:
         return REVIEW_CLASSIFICATION_MANUAL_FILTERED_OUT
-    if (
-        classification == CLASSIFICATION_RDAP_LOOKUP_UNAVAILABLE_DNS_DISABLED
-        or classification == CLASSIFICATION_WHOIS_LOOKUP_UNKNOWN_DNS_DISABLED
-        or classification in RDAP_UNAVAILABLE_DNS_DISABLED_CLASSIFICATIONS
-        or classification in RDAP_REVIEW_CLASSIFICATIONS
-    ):
-        return REVIEW_CLASSIFICATION_RDAP_FILTERED_OUT
-    if classification in GEO_REVIEW_CLASSIFICATIONS or geo_policy_status == "rejected":
+    if classification in DNS_REVIEW_CLASSIFICATIONS:
+        return REVIEW_CLASSIFICATION_DNS_FILTERED_OUT
+    if classification in GEO_REVIEW_CLASSIFICATIONS:
         return REVIEW_CLASSIFICATION_GEO_FILTERED_OUT
-    return REVIEW_CLASSIFICATION_DNS_FILTERED_OUT
+    return classification
 
 
-def review_rdap_registration_status(rdap_result: RDAPResult | None) -> str:
-    """Return a user-facing RDAP registration verdict for review output."""
-    if rdap_result is None:
-        return "unavailable"
-    if rdap_result.exists:
-        return "registered"
-    return "unregistered"
+def review_reason_for_row(row: dict[str, Any]) -> str:
+    """Return a user-facing reason for why one row landed in review output."""
+    classification = str(row.get("classification", ""))
+    reason_by_classification = {
+        CLASSIFICATION_INPUT_PUBLIC_SUFFIX: (
+            "input is a public suffix rather than a registrable host"
+        ),
+        CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
+            "manual_filter_pass entry was not present in any configured source"
+        ),
+        CLASSIFICATION_MANUAL_FILTER_OUT: (
+            "host was explicitly sent to review by manual_filter_out"
+        ),
+        CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
+            "manual_filter_out entry was not present in any configured source"
+        ),
+        CLASSIFICATION_DNS_DELEGATION_TIMEOUT: (
+            "NS delegation lookup timed out after retries"
+        ),
+        CLASSIFICATION_DNS_DELEGATION_SERVFAIL: (
+            "NS delegation lookup returned SERVFAIL after retries"
+        ),
+        CLASSIFICATION_DNS_HOST_NXDOMAIN: "host resolution returned NXDOMAIN",
+        CLASSIFICATION_DNS_HOST_NODATA: "host resolution returned NODATA",
+        CLASSIFICATION_DNS_LOOKUP_TIMEOUT: "host resolution timed out after retries",
+        CLASSIFICATION_DNS_LOOKUP_SERVFAIL: "host resolution returned SERVFAIL after retries",
+        CLASSIFICATION_DNS_RESOLVED_WITHOUT_IP_ADDRESSES: (
+            "host resolution produced no usable IP addresses"
+        ),
+        CLASSIFICATION_GEO_LOOKUP_FAILED: "geo lookup did not produce usable data",
+        CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE: (
+            "geo policy required a region name unavailable from the provider"
+        ),
+        CLASSIFICATION_GEO_POLICY_REJECTED: "geo policy rejected the resolved IP set",
+    }
+    return reason_by_classification.get(classification, classification)
 
 
-def row_identity_fields(
+def _json_list(values: list[str] | tuple[str, ...]) -> str:
+    return json.dumps(list(values), ensure_ascii=True, sort_keys=True)
+
+
+def build_base_row(
     *,
-    source_id: str,
-    source_input_label: str,
-    source_ids: list[str],
-    source_input_labels: list[str],
+    job: SourceJob,
     entry: ParsedDomainEntry,
+    classification: str,
+    delegation_result: DelegationResult | None = None,
+    host_resolution_result: HostResolutionResult | None = None,
+    dns_result: HostResolutionResult | None = None,
+    geo_results: list[IPGeoResult] | None = None,
+    geo_policy: GeoPolicyDecision | None = None,
+    source_id_override: str | None = None,
+    source_input_label_override: str | None = None,
+    source_ids: tuple[str, ...] = (),
+    source_input_labels: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Build the shared provenance and parsed-entry fields for one output row."""
-    return {
-        "source_id": source_id,
-        "source_input_label": source_input_label,
-        "source_ids": list(source_ids),
-        "source_input_labels": list(source_input_labels),
+    """Build the raw/terminal row shared by runtime and preparation.
+
+    ``dns_result`` is accepted as a legacy keyword for the optional host-resolution
+    result. Row fields use ``host_resolution_*`` for the stage-specific public
+    contract; ``dns_status`` remains as a compatibility audit field.
+    """
+    if host_resolution_result is None and dns_result is not None:
+        host_resolution_result = dns_result
+    resolved_ips = (
+        host_resolution_result.resolved_ips
+        if host_resolution_result is not None
+        else []
+    )
+    usable_geo_results = [result for result in geo_results or [] if result.usable]
+    row: dict[str, Any] = {
         "input_name": entry.input_name or entry.host,
         "host": entry.host,
         "registrable_domain": entry.registrable_domain,
@@ -401,165 +244,126 @@ def row_identity_fields(
         "input_kind": entry.input_kind,
         "apex_scope": entry.apex_scope,
         "source_format": entry.source_format,
-    }
-
-
-def classify_host_from_results(
-    host: str,
-    registrable_domain: str,
-    rdap_result: RDAPResult | None,
-    dns_result: DNSResult,
-    *,
-    hold_statuses: set[str],
-    deletion_statuses: set[str],
-) -> str:
-    """Classify one host from RDAP and DNS results."""
-    if rdap_result is not None and not rdap_result.exists:
-        return CLASSIFICATION_RDAP_REGISTRABLE_DOMAIN_UNREGISTERED
-    if dns_result.status == "timeout":
-        return CLASSIFICATION_DNS_LOOKUP_TIMEOUT
-    if dns_result.status == "servfail":
-        return CLASSIFICATION_DNS_LOOKUP_SERVFAIL
-    if dns_result.a_nxdomain:
-        if host == registrable_domain:
-            return CLASSIFICATION_DNS_REGISTERED_APEX_NXDOMAIN
-        return CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NXDOMAIN
-    if dns_result.a_nodata:
-        if host == registrable_domain:
-            return CLASSIFICATION_DNS_REGISTERED_APEX_NODATA
-        return CLASSIFICATION_DNS_REGISTERED_SUBDOMAIN_NODATA
-    if rdap_result is not None:
-        statuses_lower = {status.lower() for status in rdap_result.statuses}
-        for status_name in RDAP_STATUS_CLASSIFICATION_ORDER:
-            if status_name in statuses_lower:
-                return RDAP_STATUS_CLASSIFICATIONS[status_name]
-        if statuses_lower & {status.lower() for status in hold_statuses}:
-            return CLASSIFICATION_RDAP_STATUS_HOLD_OTHER
-        if statuses_lower & {status.lower() for status in deletion_statuses}:
-            return CLASSIFICATION_RDAP_STATUS_DELETION_OTHER
-    return CLASSIFICATION_DNS_RESOLVES
-
-
-def route_for_row(
-    classification: str,
-    geo_policy_status: str,
-    geo_reason: str,
-) -> ResultRoute:
-    """Return the final route for one classified row."""
-    if classification in ROUTE_DEAD_CLASSIFICATIONS:
-        return ROUTE_DEAD
-    if classification in ROUTE_REVIEW_CLASSIFICATIONS:
-        return ROUTE_REVIEW
-    if classification in ROUTE_FILTERED_CLASSIFICATIONS:
-        if geo_reason == "no_resolved_ips":
-            return ROUTE_REVIEW
-        if geo_policy_status == "rejected":
-            return ROUTE_REVIEW
-        return ROUTE_FILTERED
-    return ROUTE_REVIEW
-
-
-def ordered_geo_provider_names(configured_provider_name: str) -> list[str]:
-    """Return the one runtime-selected geo provider for the current source policy."""
-    return [configured_provider_name]
-
-
-def build_output_row(
-    job: SourceJob,
-    entry: ParsedDomainEntry,
-    classification: str,
-    rdap_result: RDAPResult | None,
-    dns_result: DNSResult,
-    geo_results: list[IPGeoResult],
-    geo_status: str,
-    geo_reason: str,
-    geo_policy_status: str,
-    geo_policy_reason: str,
-    provider: IPGeoProvider | None,
-    *,
-    rdap_unavailable: RDAPUnavailableInfo | None = None,
-    whois_result: WhoisFallbackResult | None = None,
-    dns_status_override: str | None = None,
-    source_id_override: str | None = None,
-    source_input_label_override: str | None = None,
-    source_ids_override: list[str] | None = None,
-    source_input_labels_override: list[str] | None = None,
-) -> dict[str, Any]:
-    """Build the full audit row for one processed host.
-
-    RDAP-unavailable metadata is raw/terminal JSONL-only; review CSV projection
-    keeps the existing column set.
-    """
-    effective_geo_provider = str(
-        job.config.get("geo", {}).get("effective_provider", "")
-    )
-    geo_provider_name = ""
-    if provider is not None:
-        geo_provider_name = provider.provider_name
-    elif effective_geo_provider and (
-        geo_status == "review"
-        or geo_policy_status in {"accepted", "rejected"}
-        or geo_reason == "lookup_succeeded"
-    ):
-        geo_provider_name = effective_geo_provider
-    row: dict[str, Any] = {
-        **row_identity_fields(
-            source_id=source_id_override or job.source_id,
-            source_input_label=source_input_label_override or job.input_label,
-            source_ids=source_ids_override or [job.source_id],
-            source_input_labels=source_input_labels_override or [job.input_label],
-            entry=entry,
-        ),
         "classification": classification,
-        "rdap_registration_status": review_rdap_registration_status(rdap_result),
-        "dns_status": dns_status_override or dns_result.status,
-        "canonical_name": dns_result.canonical_name or "",
-        "resolved_ips": dns_result.resolved_ips,
-        "geo_status": geo_status,
-        "geo_reason": geo_reason,
-        "geo_policy_status": geo_policy_status,
-        "geo_policy_reason": geo_policy_reason,
-        "geo_provider": geo_provider_name,
+        "classification_reason": review_reason_for_row(
+            {"classification": classification}
+        ),
+        "delegation_status": (
+            delegation_result.status if delegation_result is not None else "skipped"
+        ),
+        "delegation_reason": (
+            delegation_result.status if delegation_result is not None else "skipped"
+        ),
+        "delegation_nameservers": (
+            list(delegation_result.nameservers) if delegation_result is not None else []
+        ),
+        "host_resolution_status": (
+            host_resolution_result.status
+            if host_resolution_result is not None
+            else "skipped"
+        ),
+        "host_resolution_reason": (
+            host_resolution_result.status
+            if host_resolution_result is not None
+            else "skipped"
+        ),
+        "dns_status": (
+            host_resolution_result.status
+            if host_resolution_result is not None
+            else "skipped"
+        ),
+        "canonical_name": (
+            host_resolution_result.canonical_name
+            if host_resolution_result is not None
+            else ""
+        ),
+        "resolved_ips": resolved_ips,
+        "geo_status": geo_policy.status if geo_policy is not None else "skipped",
+        "geo_reason": geo_policy.reason if geo_policy is not None else "skipped",
+        "geo_policy_status": geo_policy.status if geo_policy is not None else "skipped",
+        "geo_policy_reason": geo_policy.reason if geo_policy is not None else "skipped",
+        "geo_provider": usable_geo_results[0].provider if usable_geo_results else "",
         "geo_countries": sorted(
-            {result.country_code for result in geo_results if result.country_code}
-        ),
-        "geo_region_codes": sorted(
-            {result.region_code for result in geo_results if result.region_code}
-        ),
-        "geo_region_names": sorted(
             {
-                result.region_name.strip()
-                for result in geo_results
-                if result.region_name.strip()
+                result.country_code
+                for result in usable_geo_results
+                if result.country_code
             }
         ),
+        "geo_region_codes": sorted(
+            {result.region_code for result in usable_geo_results if result.region_code}
+        ),
+        "geo_region_names": sorted(
+            {result.region_name for result in usable_geo_results if result.region_name}
+        ),
+        "source_id": source_id_override or job.source_id,
+        "source_input_label": source_input_label_override or job.input_label,
+        "source_ids": list(source_ids or (job.source_id,)),
+        "source_input_labels": list(source_input_labels or (job.input_label,)),
     }
-    if rdap_unavailable is not None:
-        row["rdap_unavailable_reason"] = rdap_unavailable.reason
-        if rdap_unavailable.http_status is not None:
-            row["rdap_unavailable_http_status"] = rdap_unavailable.http_status
-    if whois_result is not None:
-        row["whois_fallback_status"] = whois_result.status
-        row["whois_fallback_reason"] = whois_result.reason
-        row["whois_fallback_matched_pattern"] = whois_result.matched_pattern
-        if whois_result.exit_code is not None:
-            row["whois_fallback_exit_code"] = whois_result.exit_code
-        row["whois_fallback_command_mode"] = whois_result.command_mode
-        row["whois_fallback_from_cache"] = whois_result.from_cache
+    row["classification_reason"] = review_reason_for_row(row)
     return row
 
 
 def build_review_output_row(row: dict[str, Any]) -> ReviewOutputRow:
-    """Project one full output row down to the review CSV columns."""
-    review_row = dict(row)
-    review_row["classification"] = review_classification_for_row(row)
-    review_row["classification_reason"] = review_reason_for_row(row)
-    for column in ("source_ids", "source_input_labels"):
-        value = review_row.get(column, [])
-        if isinstance(value, str):
-            continue
-        review_row[column] = json.dumps(list(value), separators=(",", ":"))
-    return cast(
-        ReviewOutputRow,
-        {column: str(review_row.get(column, "")) for column in REVIEW_OUTPUT_COLUMNS},
-    )
+    """Project one raw terminal row into the public review CSV schema."""
+    projected = {
+        "input_name": str(row.get("input_name", "")),
+        "host": str(row.get("host", "")),
+        "registrable_domain": str(row.get("registrable_domain", "")),
+        "classification": public_review_classification(row),
+        "classification_reason": review_reason_for_row(row),
+        "delegation_status": str(row.get("delegation_status", "")),
+        "delegation_reason": str(row.get("delegation_reason", "")),
+        "host_resolution_status": str(row.get("host_resolution_status", "")),
+        "host_resolution_reason": str(row.get("host_resolution_reason", "")),
+        "geo_status": str(row.get("geo_status", "")),
+        "geo_reason": str(row.get("geo_reason", "")),
+        "geo_policy_status": str(row.get("geo_policy_status", "")),
+        "geo_policy_reason": str(row.get("geo_policy_reason", "")),
+        "geo_provider": str(row.get("geo_provider", "")),
+        "source_id": str(row.get("source_id", "")),
+        "source_input_label": str(row.get("source_input_label", "")),
+        "source_ids": _json_list(
+            tuple(str(value) for value in row.get("source_ids", []))
+        ),
+        "source_input_labels": _json_list(
+            tuple(str(value) for value in row.get("source_input_labels", []))
+        ),
+    }
+    return projected  # type: ignore[return-value]
+
+
+def skipped_host_resolution_result(host: str) -> HostResolutionResult:
+    """Return a skipped host-resolution placeholder for row building."""
+    return HostResolutionResult(host=host)
+
+
+def host_resolution_skipped_classification() -> str:
+    """Return the classification used when host resolution is intentionally skipped."""
+    return CLASSIFICATION_HOST_RESOLUTION_SKIPPED
+
+
+def ordered_geo_provider_names(configured_provider_name: str) -> tuple[str, ...]:
+    """Return deterministic geo provider order for one configured provider."""
+    return (configured_provider_name,)
+
+
+def geo_policy_classification(
+    policy: GeoPolicyDecision | None,
+    results: list[IPGeoResult],
+    policy_payload: dict[str, Any],
+) -> str:
+    """Return the terminal geo classification for one host."""
+    if policy is None:
+        return CLASSIFICATION_GEO_LOOKUP_FAILED
+    if policy.status == "accepted":
+        return CLASSIFICATION_GEO_POLICY_ACCEPTED
+    include = policy_payload.get("include", {})
+    exclude = policy_payload.get("exclude", {})
+    has_region_rules = bool(include.get("regions", []) or exclude.get("regions", []))
+    if has_region_rules and any(
+        result.usable and not result.region_name for result in results
+    ):
+        return CLASSIFICATION_GEO_REGION_NAME_UNAVAILABLE
+    return CLASSIFICATION_GEO_POLICY_REJECTED
