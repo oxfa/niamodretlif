@@ -18,6 +18,7 @@ from ..checking import (
     RDAPResult,
     build_geo_provider,
 )
+from ..checking.http_requestor import RetryObserver
 from ..checking.ip_geo import GEOJS_BULK_CHUNK_SIZE, IPINFO_LITE_BULK_CHUNK_SIZE
 from .bootstrap_async import AsyncBootstrapCache
 
@@ -37,7 +38,12 @@ class AsyncRDAPTransport:
     bootstrap_cache: AsyncBootstrapCache
 
     async def lookup(
-        self, domain: str, *, authoritative_base_url: str | None = None
+        self,
+        domain: str,
+        *,
+        authoritative_base_url: str | None = None,
+        rdap_rate_limit_retry_fallback_seconds: tuple[float, ...] | None = None,
+        retry_observer: RetryObserver | None = None,
     ) -> RDAPResult:
         """Resolve one RDAP result on a worker thread."""
         logger.debug("Dispatching async RDAP lookup for %s", domain)
@@ -51,6 +57,10 @@ class AsyncRDAPTransport:
             self.checker.rdap_lookup,
             domain,
             authoritative_base_url=authoritative_base_url,
+            rdap_rate_limit_retry_fallback_seconds=(
+                rdap_rate_limit_retry_fallback_seconds
+            ),
+            retry_observer=retry_observer,
         )
         logger.debug(
             "Async RDAP lookup for %s -> exists=%s statuses=%s from_cache=%s",

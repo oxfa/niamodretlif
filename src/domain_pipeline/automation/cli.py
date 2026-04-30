@@ -80,6 +80,9 @@ def _handle_orchestrate(
     prepared = prepare_batch(
         source_root=source_root,
         config_path=Path(args.config),
+        global_config_path=(
+            None if args.global_config is None else Path(args.global_config)
+        ),
         worker_ids=worker_ids,
         batch_id=batch_id,
     )
@@ -330,6 +333,7 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         orchestrate_parser,
         [
             ("--config", {"required": True}),
+            ("--global-config", {"default": None}),
             ("--run-id", {"required": True}),
             ("--run-attempt", {"required": True}),
             ("--worker-count", {"type": int, "default": 18}),

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -47,6 +48,7 @@ from ..checking import (
     build_geo_provider,
     evaluate_geo_policy,
 )
+from ..checking.http_requestor import HTTPRetryEvent
 from ..io.parser import ParsedDomainEntry
 from ..io.output_manager import output_paths_for_job, review_output_path_for_job
 from ..path_layout import (
@@ -218,6 +220,9 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         self.geo_transports: dict[str, AsyncGeoTransport] = {}
         self.root_tasks: dict[str, asyncio.Task[RDAPResult]] = {}
         self.rdap_server_locks: dict[str, asyncio.Lock] = {}
+        self.rdap_rate_limit_events: list[dict[str, Any]] = []
+        self.rdap_rate_limit_stats: dict[str, dict[str, Any]] = {}
+        self.rdap_rate_limit_lock = threading.Lock()
         self.prepared_unavailable_cache_written_roots: set[str] = set()
         self.cache_stats: Counter = Counter()
         self.stopped_early = False
@@ -637,6 +642,339 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
         """Increment the cache miss counter after both layers miss."""
         self.cache_stats[f"{cache_name}_cache_misses"] += 1
 
+    def rdap_fallback_seconds_for(
+        self,
+        *,
+        source_config: dict[str, Any],
+        authoritative_base_url: str | None,
+    ) -> tuple[tuple[float, ...], str]:
+        """Return RDAP 429 fallback seconds and selected policy source.
+
+        Selection order is authoritative server profile, source config,
+        global default, then the DomainChecker compatibility fallback.
+        """
+        global_policy = self.config.get("rdap_global_policy", {})
+        if not isinstance(global_policy, dict):
+            global_policy = {}
+        server_policies = global_policy.get("authoritative_servers", {})
+        if (
+            authoritative_base_url is not None
+            and isinstance(server_policies, dict)
+            and authoritative_base_url in server_policies
+        ):
+            server_policy = server_policies[authoritative_base_url]
+            if isinstance(server_policy, dict):
+                fallback_seconds = server_policy.get(
+                    "rate_limit_retry_fallback_seconds"
+                )
+                if fallback_seconds:
+                    return tuple(float(value) for value in fallback_seconds), (
+                        "authoritative_server_profile"
+                    )
+
+        rdap_config = source_config.get("rdap", {})
+        if isinstance(rdap_config, dict):
+            source_marker = str(
+                rdap_config.get("rate_limit_retry_fallback_seconds_source", "")
+            )
+            source_fallback = rdap_config.get("rate_limit_retry_fallback_seconds")
+            if source_fallback and source_marker in {"source_override", ""}:
+                policy_source = source_marker or "source_override"
+                return tuple(float(value) for value in source_fallback), policy_source
+
+        default_fallback = global_policy.get("rate_limit_retry_fallback_seconds")
+        if default_fallback:
+            return tuple(float(value) for value in default_fallback), "global_default"
+
+        if isinstance(rdap_config, dict):
+            source_fallback = rdap_config.get("rate_limit_retry_fallback_seconds")
+            if source_fallback:
+                source_marker = str(
+                    rdap_config.get(
+                        "rate_limit_retry_fallback_seconds_source",
+                        "source_override",
+                    )
+                )
+                return tuple(float(value) for value in source_fallback), source_marker
+
+        return (
+            tuple(DomainChecker.DEFAULT_RDAP_RATE_LIMIT_RETRY_FALLBACK_SECONDS),
+            "builtin_default",
+        )
+
+    def _rdap_rate_limit_debug_root(self) -> Path | None:
+        """Return the worker-local RDAP rate-limit debug root, when configured."""
+        return self._runtime_override_path("rdap_rate_limit_debug_root")
+
+    def _rdap_rate_limit_identity(self) -> tuple[str, str]:
+        """Return batch and worker ids inferred from the configured debug path."""
+        debug_root = self._rdap_rate_limit_debug_root()
+        if debug_root is None:
+            return "", ""
+        parts = debug_root.parts
+        if "workers" not in parts:
+            return "", ""
+        workers_index = parts.index("workers")
+        if len(parts) <= workers_index + 2:
+            return "", ""
+        return parts[workers_index + 1], parts[workers_index + 2]
+
+    def _server_stats(
+        self,
+        authoritative_base_url: str | None,
+        *,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> dict[str, Any]:
+        """Return mutable summary counters for one authoritative RDAP server."""
+        server_key = authoritative_base_url or "(bootstrap)"
+        stats = self.rdap_rate_limit_stats.setdefault(
+            server_key,
+            {
+                "policy_source": policy_source,
+                "fallback_seconds": list(fallback_seconds),
+                "lookup_count": 0,
+                "retry_decision_count": 0,
+                "http_429_retry_count": 0,
+                "missing_retry_after_429_count": 0,
+                "retry_after_retry_count": 0,
+                "retry_exhausted_count": 0,
+                "success_after_retry_count": 0,
+                "total_wait_seconds": 0.0,
+            },
+        )
+        stats["policy_source"] = policy_source
+        stats["fallback_seconds"] = list(fallback_seconds)
+        return stats
+
+    def _append_rdap_rate_limit_event(
+        self,
+        event: dict[str, Any],
+        *,
+        authoritative_base_url: str | None,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> None:
+        """Record one worker-local RDAP rate-limit debug event."""
+        with self.rdap_rate_limit_lock:
+            self.rdap_rate_limit_events.append(event)
+            stats = self._server_stats(
+                authoritative_base_url,
+                policy_source=policy_source,
+                fallback_seconds=fallback_seconds,
+            )
+            event_name = str(event.get("event", ""))
+            if event_name == "rdap_rate_limit_policy_selected":
+                stats["lookup_count"] += 1
+            elif event_name == "rdap_retry_decision":
+                stats["retry_decision_count"] += 1
+                stats["total_wait_seconds"] += float(event.get("wait_seconds", 0.0))
+                if event.get("status_code") == 429:
+                    stats["http_429_retry_count"] += 1
+                    if event.get("wait_source") == "retry_after_header":
+                        stats["retry_after_retry_count"] += 1
+                    else:
+                        stats["missing_retry_after_429_count"] += 1
+            elif event_name == "rdap_retry_exhausted":
+                stats["retry_exhausted_count"] += 1
+            elif event_name == "rdap_success_after_retry":
+                stats["success_after_retry_count"] += 1
+
+    def _record_rdap_policy_selected(
+        self,
+        parsed: ParsedHostItem,
+        *,
+        authoritative_base_url: str | None,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> None:
+        """Record the selected RDAP rate-limit policy for one live lookup."""
+        batch_id, worker_id = self._rdap_rate_limit_identity()
+        self._append_rdap_rate_limit_event(
+            {
+                "event": "rdap_rate_limit_policy_selected",
+                "source_id": parsed.job.source_id,
+                "host": parsed.entry.host,
+                "registrable_domain": parsed.entry.registrable_domain,
+                "authoritative_base_url": authoritative_base_url,
+                "policy_source": policy_source,
+                "fallback_seconds": list(fallback_seconds),
+                "config_name": self.runtime_identity.config_name,
+                "worker_id": worker_id,
+                "batch_id": batch_id,
+            },
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
+
+    def _record_rdap_retry_decision(
+        self,
+        parsed: ParsedHostItem,
+        retry_event: HTTPRetryEvent,
+        *,
+        authoritative_base_url: str | None,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> None:
+        """Record one pending RDAP retry wait decision."""
+        self._append_rdap_rate_limit_event(
+            {
+                "event": "rdap_retry_decision",
+                "source_id": parsed.job.source_id,
+                "registrable_domain": parsed.entry.registrable_domain,
+                "authoritative_base_url": authoritative_base_url,
+                "status_code": retry_event.status_code,
+                "attempt_number": retry_event.attempt_number,
+                "max_attempts": retry_event.max_attempts,
+                "wait_seconds": retry_event.wait_seconds,
+                "wait_source": retry_event.wait_source,
+                "retry_after_raw": retry_event.retry_after_raw,
+                "retry_after_seconds": retry_event.retry_after_seconds,
+                "fallback_seconds": (
+                    list(retry_event.fallback_seconds)
+                    if retry_event.fallback_seconds is not None
+                    else list(fallback_seconds)
+                ),
+                "fallback_index": retry_event.fallback_index,
+                "policy_source": policy_source,
+            },
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
+
+    def _record_rdap_retry_exhausted(
+        self,
+        parsed: ParsedHostItem,
+        rdap_unavailable: RDAPUnavailableInfo,
+        *,
+        authoritative_base_url: str | None,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> None:
+        """Record retry exhaustion that became RDAP-unavailable."""
+        if rdap_unavailable.http_status != 429:
+            return
+        self._append_rdap_rate_limit_event(
+            {
+                "event": "rdap_retry_exhausted",
+                "source_id": parsed.job.source_id,
+                "registrable_domain": parsed.entry.registrable_domain,
+                "authoritative_base_url": authoritative_base_url,
+                "http_status": rdap_unavailable.http_status,
+                "unavailable_reason": rdap_unavailable.reason,
+                "cache_classification": rdap_unavailable.cache_classification,
+                "policy_source": policy_source,
+                "fallback_seconds": list(fallback_seconds),
+            },
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
+
+    def _record_rdap_success_after_retry(
+        self,
+        parsed: ParsedHostItem,
+        *,
+        retry_count: int,
+        authoritative_base_url: str | None,
+        policy_source: str,
+        fallback_seconds: tuple[float, ...],
+    ) -> None:
+        """Record a successful live RDAP lookup after at least one retry."""
+        if retry_count < 1:
+            return
+        self._append_rdap_rate_limit_event(
+            {
+                "event": "rdap_success_after_retry",
+                "source_id": parsed.job.source_id,
+                "registrable_domain": parsed.entry.registrable_domain,
+                "authoritative_base_url": authoritative_base_url,
+                "retry_count": retry_count,
+                "final_status_code": 200,
+                "policy_source": policy_source,
+            },
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
+
+    def _rdap_rate_limit_summary(self) -> dict[str, Any]:
+        """Return the worker-local RDAP rate-limit summary payload."""
+        batch_id, worker_id = self._rdap_rate_limit_identity()
+        with self.rdap_rate_limit_lock:
+            servers = json.loads(json.dumps(self.rdap_rate_limit_stats))
+        return {
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "config_name": self.runtime_identity.config_name,
+            "servers": dict(sorted(servers.items())),
+        }
+
+    @staticmethod
+    def _recommended_fallback_seconds(
+        fallback_seconds: list[float],
+    ) -> list[float]:
+        """Return a conservative higher fallback sequence."""
+        return [float(value) * 2.0 for value in fallback_seconds]
+
+    def _rdap_rate_limit_recommendations(self) -> dict[str, Any]:
+        """Return worker-local operator recommendations without auto-applying them."""
+        summary = self._rdap_rate_limit_summary()
+        recommendations: dict[str, Any] = {}
+        for server_url, stats in summary["servers"].items():
+            if int(stats.get("http_429_retry_count", 0)) == 0:
+                continue
+            if (
+                int(stats.get("missing_retry_after_429_count", 0)) > 0
+                and int(stats.get("retry_exhausted_count", 0)) > 0
+            ):
+                current = [float(value) for value in stats["fallback_seconds"]]
+                recommendations[server_url] = {
+                    "current_fallback_seconds": current,
+                    "recommended_fallback_seconds": (
+                        self._recommended_fallback_seconds(current)
+                    ),
+                    "reason": "HTTP 429 retries exhausted without usable Retry-After",
+                }
+        return {"authoritative_servers": dict(sorted(recommendations.items()))}
+
+    def write_rdap_rate_limit_debug_artifacts(self) -> None:
+        """Write worker-local RDAP rate-limit debug artifacts when configured."""
+        debug_root = self._rdap_rate_limit_debug_root()
+        if debug_root is None:
+            return
+        debug_root.mkdir(parents=True, exist_ok=True)
+        summary_path = debug_root / "summary.json"
+        recommendations_path = debug_root / "recommendations.json"
+        summary_path.write_text(
+            json.dumps(self._rdap_rate_limit_summary(), indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        recommendations_path.write_text(
+            json.dumps(
+                self._rdap_rate_limit_recommendations(),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.rdap_rate_limit_lock:
+            events = list(self.rdap_rate_limit_events)
+        if events:
+            events_path = debug_root / "events.jsonl"
+            with events_path.open("w", encoding="utf-8") as handle:
+                for event in events:
+                    handle.write(json.dumps(event, sort_keys=True))
+                    handle.write("\n")
+        else:
+            events_path = debug_root / "events.jsonl"
+            if events_path.exists():
+                events_path.unlink()
+
     def _elapsed_runtime_seconds(self) -> float:
         """Return elapsed runtime using the injected monotonic clock."""
         return self.time_source() - self.start_time
@@ -1040,6 +1378,29 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
     async def _live_rdap_lookup(self, parsed: ParsedHostItem) -> RDAPResult:
         transport = self.rdap_transport_for(parsed.job.source_id, parsed.job.config)
         authoritative_base_url = parsed.prepared_authoritative_base_url
+        fallback_seconds, policy_source = self.rdap_fallback_seconds_for(
+            source_config=parsed.job.config,
+            authoritative_base_url=authoritative_base_url,
+        )
+        self._record_rdap_policy_selected(
+            parsed,
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
+        retry_count = 0
+
+        def retry_observer(retry_event: HTTPRetryEvent) -> None:
+            nonlocal retry_count
+            retry_count += 1
+            self._record_rdap_retry_decision(
+                parsed,
+                retry_event,
+                authoritative_base_url=authoritative_base_url,
+                policy_source=policy_source,
+                fallback_seconds=fallback_seconds,
+            )
+
         if authoritative_base_url is not None:
             log.debug(
                 "[%s %d/%d] %s using precomputed authoritative RDAP base URL %s for root=%s",
@@ -1055,6 +1416,8 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                 rdap_result = await transport.lookup(
                     parsed.entry.registrable_domain,
                     authoritative_base_url=None,
+                    rdap_rate_limit_retry_fallback_seconds=fallback_seconds,
+                    retry_observer=retry_observer,
                 )
             else:
                 lock = self.rdap_server_locks.setdefault(
@@ -1065,8 +1428,17 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     rdap_result = await transport.lookup(
                         parsed.entry.registrable_domain,
                         authoritative_base_url=authoritative_base_url,
+                        rdap_rate_limit_retry_fallback_seconds=fallback_seconds,
+                        retry_observer=retry_observer,
                     )
         except CacheableRDAPUnavailableError as exc:
+            self._record_rdap_retry_exhausted(
+                parsed,
+                exc.info,
+                authoritative_base_url=authoritative_base_url,
+                policy_source=policy_source,
+                fallback_seconds=fallback_seconds,
+            )
             ttl_days = int(
                 self.config["cache"]["classification_ttl_days"][
                     "rdap_lookup_unavailable"
@@ -1097,6 +1469,13 @@ class AsyncPipelineRuntime:  # pylint: disable=too-many-instance-attributes,attr
                     ttl_days,
                 )
             raise
+        self._record_rdap_success_after_retry(
+            parsed,
+            retry_count=retry_count,
+            authoritative_base_url=authoritative_base_url,
+            policy_source=policy_source,
+            fallback_seconds=fallback_seconds,
+        )
         log.debug(
             "[%s %d/%d] %s live RDAP result for root=%s -> exists=%s statuses=%s",
             parsed.job.source_id,
@@ -2067,7 +2446,11 @@ async def run_prepared_pipeline_async(
     if runtime_budget is not None:
         log.info("  Soft runtime budget: %.1fs", runtime_budget.max_runtime_seconds)
     log.info("========================================")
-    writer_result, output_paths, outputs_published = await runtime.run()
+    try:
+        writer_result, output_paths, outputs_published = await runtime.run()
+    except BaseException:
+        runtime.write_rdap_rate_limit_debug_artifacts()
+        raise
     elapsed = time.monotonic() - start_time
     if not outputs_published:
         manifest_path = _write_incomplete_run_state(
@@ -2084,6 +2467,7 @@ async def run_prepared_pipeline_async(
         )
     else:
         _clear_incomplete_run_state(runtime)
+    runtime.write_rdap_rate_limit_debug_artifacts()
     _log_run_summary(
         elapsed,
         writer_result,

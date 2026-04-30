@@ -25,5 +25,6 @@ jobs:
     with:
       config_name: block
       config_path: config/block.yaml
+      global_config_path: config/global.yaml
       worker_count: 18
     secrets: inherit

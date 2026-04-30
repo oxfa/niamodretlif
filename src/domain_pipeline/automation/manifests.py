@@ -95,6 +95,7 @@ class WorkerRuntimeSpec(AutomationModel):
     output_spec: WorkerOutputSpec
     debug_log_path: str
     runtime_paths: dict[str, str] = Field(default_factory=dict)
+    rdap_global_policy: dict[str, Any] = Field(default_factory=dict)
 
     def to_runtime_payload(
         self,
@@ -111,6 +112,7 @@ class WorkerRuntimeSpec(AutomationModel):
             "cache": copy.deepcopy(self.cache),
             "sources": copy.deepcopy(self.sources),
             "runtime_paths": copy.deepcopy(self.runtime_paths),
+            "rdap_global_policy": copy.deepcopy(self.rdap_global_policy),
         }
         cache_payload = payload["cache"]
         cache_file = str(cache_payload.get("cache_file", "")).strip()

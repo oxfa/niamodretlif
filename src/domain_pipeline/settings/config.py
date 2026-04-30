@@ -206,6 +206,84 @@ class RDAPConfig(StrictModel):
         return dict(value)
 
 
+def _validate_fallback_seconds_sequence(
+    value: tuple[float, ...] | list[float],
+    *,
+    field_name: str,
+) -> tuple[float, ...]:
+    """Validate one RDAP rate-limit fallback sequence."""
+    if not value:
+        raise ValueError(f"{field_name} must be non-empty")
+    normalized: list[float] = []
+    for seconds in value:
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(
+                f"{field_name} entries must be finite non-negative numbers"
+            )
+        normalized.append(float(seconds))
+    return tuple(normalized)
+
+
+class RDAPAuthoritativeServerPolicyConfig(StrictModel):
+    """Per-authoritative-RDAP-server retry fallback policy."""
+
+    rate_limit_retry_fallback_seconds: tuple[float, ...]
+
+    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
+    @classmethod
+    def _validate_rate_limit_retry_fallback_seconds(
+        cls, value: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        return _validate_fallback_seconds_sequence(
+            value,
+            field_name=(
+                "rdap.authoritative_servers[].rate_limit_retry_fallback_seconds"
+            ),
+        )
+
+
+class RDAPGlobalPolicyConfig(StrictModel):
+    """RDAP section of the non-runnable global policy config."""
+
+    rate_limit_retry_fallback_seconds: tuple[float, ...]
+    authoritative_servers: dict[str, RDAPAuthoritativeServerPolicyConfig] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("rate_limit_retry_fallback_seconds", mode="after")
+    @classmethod
+    def _validate_rate_limit_retry_fallback_seconds(
+        cls, value: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        return _validate_fallback_seconds_sequence(
+            value,
+            field_name="rdap.rate_limit_retry_fallback_seconds",
+        )
+
+    @field_validator("authoritative_servers", mode="after")
+    @classmethod
+    def _validate_authoritative_servers(
+        cls,
+        value: dict[str, RDAPAuthoritativeServerPolicyConfig],
+    ) -> dict[str, RDAPAuthoritativeServerPolicyConfig]:
+        for server_url in value:
+            if not server_url.strip():
+                raise ValueError(
+                    "rdap.authoritative_servers keys must be non-empty strings"
+                )
+            if not server_url.endswith("/"):
+                raise ValueError("rdap.authoritative_servers keys must end in '/'")
+        return dict(value)
+
+
+class GlobalPolicyConfig(StrictModel):
+    """Non-runnable checked-in policy shared by trusted automation configs."""
+
+    version: Literal[1]
+    kind: Literal["rdap_global_policy"]
+    rdap: RDAPGlobalPolicyConfig
+
+
 class OutputConfig(StrictModel):
     """Per-source output settings."""
 
@@ -508,9 +586,63 @@ def _format_validation_error(exc: ValidationError) -> str:
     return f"{location}: {message}" if location else message
 
 
-def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str, Any]:
+def load_global_policy(path: Path) -> dict[str, Any]:
+    """Load and validate the non-runnable global RDAP policy config."""
+    payload = _load_yaml_payload(path)
+    try:
+        global_config = GlobalPolicyConfig.model_validate(payload)
+    except ValidationError as exc:
+        raise ValueError(_format_validation_error(exc)) from exc
+    return global_config.model_dump()
+
+
+def _default_has_explicit_rdap_fallback(raw_config: RawPipelineConfig) -> bool:
+    """Return whether defaults.rdap explicitly sets the source fallback."""
+    if "rdap" not in raw_config.defaults.model_fields_set:
+        return False
+    return (
+        "rate_limit_retry_fallback_seconds" in raw_config.defaults.rdap.model_fields_set
+    )
+
+
+def _source_has_explicit_rdap_fallback(source: SourceOverrideConfig) -> bool:
+    """Return whether one source explicitly sets the source fallback."""
+    if source.rdap is None:
+        return False
+    return "rate_limit_retry_fallback_seconds" in source.rdap.model_fields_set
+
+
+def _rdap_fallback_source_marker(
+    *,
+    source: SourceOverrideConfig,
+    raw_config: RawPipelineConfig,
+    global_policy: dict[str, Any] | None,
+) -> str:
+    """Return the normalized source's RDAP fallback provenance marker."""
+    if _source_has_explicit_rdap_fallback(source):
+        return "source_override"
+    if global_policy is not None and not _default_has_explicit_rdap_fallback(
+        raw_config
+    ):
+        return "global_default"
+    if _default_has_explicit_rdap_fallback(raw_config):
+        return "source_override"
+    return "builtin_default"
+
+
+def _load_config(
+    path: Path,
+    *,
+    validate_runtime_credentials: bool,
+    global_config_path: Path | None = None,
+) -> dict[str, Any]:
     """Load and validate one version 2 YAML configuration file."""
     config_namespace = config_namespace_from_path(path)
+    global_policy = (
+        load_global_policy(global_config_path)
+        if global_config_path is not None
+        else None
+    )
     payload = _load_yaml_payload(path)
     if payload.get("version") != 2:
         raise ValueError(
@@ -523,6 +655,12 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
         raise ValueError(_format_validation_error(exc)) from exc
 
     defaults_payload = raw_config.defaults.model_dump()
+    if global_policy is not None and not _default_has_explicit_rdap_fallback(
+        raw_config
+    ):
+        defaults_payload["rdap"]["rate_limit_retry_fallback_seconds"] = list(
+            global_policy["rdap"]["rate_limit_retry_fallback_seconds"]
+        )
     normalized_sources: list[dict[str, Any]] = []
     seen_source_ids: set[str] = set()
     for source in raw_config.sources:
@@ -547,7 +685,7 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
                 "version": raw_config.version,
                 "config_name": config_namespace,
                 "config_path": str(path),
-                "defaults": raw_config.defaults.model_dump(),
+                "defaults": defaults_payload,
                 "cache": raw_config.cache.model_dump(),
                 "sources": normalized_sources,
             }
@@ -567,6 +705,18 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
         )
 
     normalized_payload = normalized_config.model_dump()
+    if global_policy is not None:
+        normalized_payload["rdap_global_policy"] = global_policy["rdap"]
+    source_by_id = {source.id: source for source in raw_config.sources}
+    for source_payload in normalized_payload["sources"]:
+        source = source_by_id[str(source_payload["id"])]
+        source_payload["rdap"]["rate_limit_retry_fallback_seconds_source"] = (
+            _rdap_fallback_source_marker(
+                source=source,
+                raw_config=raw_config,
+                global_policy=global_policy,
+            )
+        )
     _inject_effective_geo_fields(normalized_payload["defaults"]["geo"])
     for source in normalized_payload["sources"]:
         _validate_source_stage_dependencies(source)
@@ -581,6 +731,14 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
     return normalized_payload
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def load_config(
+    path: Path,
+    *,
+    global_config_path: Path | None = None,
+) -> dict[str, Any]:
     """Load a runtime-ready version 2 YAML configuration file."""
-    return _load_config(path, validate_runtime_credentials=True)
+    return _load_config(
+        path,
+        validate_runtime_credentials=True,
+        global_config_path=global_config_path,
+    )
