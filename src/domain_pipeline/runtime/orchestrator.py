@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .async_constants import (
+    DELEGATION_INPUT_QUEUE_SIZE,
     HOST_RESOLUTION_TO_GEO_QUEUE_SIZE,
     HOST_RESOLUTION_WRITER_QUEUE_SIZE,
     DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE,
     DELEGATION_WRITER_QUEUE_SIZE,
     GEO_WRITER_QUEUE_SIZE,
-    PARSE_TO_DELEGATION_QUEUE_SIZE,
     RESULT_QUEUE_SIZE,
 )
 from .cache_async import (
@@ -32,9 +32,9 @@ from .contracts import (
 
 @dataclass
 class QueueBundle:
-    """Queues owned by the orchestrator."""
+    """Worker-local queues owned by the orchestrator."""
 
-    parse_to_delegation: asyncio.Queue[ParsedHostItem | None]
+    delegation_input: asyncio.Queue[ParsedHostItem | None]
     delegation_to_host_resolution: asyncio.Queue[HostResolutionWorkItem | None]
     host_resolution_to_geo: asyncio.Queue[GeoWorkItem | None]
     result_queue: asyncio.Queue[CompletedHostResult | None]
@@ -49,9 +49,9 @@ class CacheBundle:
 
 
 def build_queue_bundle() -> QueueBundle:
-    """Create the runtime queues with locked sizes."""
+    """Create the worker-local runtime queues with locked sizes."""
     return QueueBundle(
-        parse_to_delegation=asyncio.Queue(maxsize=PARSE_TO_DELEGATION_QUEUE_SIZE),
+        delegation_input=asyncio.Queue(maxsize=DELEGATION_INPUT_QUEUE_SIZE),
         delegation_to_host_resolution=asyncio.Queue(
             maxsize=DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE
         ),

@@ -18,8 +18,9 @@ version: 2
 # behavior. Unmatched manual_filter_pass entries route to review without DNS
 # lookup because they are operator reconciliation rows. manual_filter_out is
 # exact-host-only, takes precedence over matching source entries, bypasses
-# DNS/geo entirely, and emits one review row per host. Public suffix inputs
-# route to review because there is no registrable domain to query.
+# DNS/geo entirely, and emits one review row per host. Public suffix inputs are
+# prepare-owned review/audit rows because there is no registrable domain to
+# query.
 #
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.

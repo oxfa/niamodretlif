@@ -7,8 +7,8 @@ version: 2
 # manual_filter_pass and manual_add entries still require DNS delegation.
 # manual_add takes precedence over matching source entries for the same host.
 # When delegation is actionable they bypass host-resolution and geo checks and
-# emit filtered output. Public-suffix manual inputs route to review because
-# they have no registrable domain for delegation.
+# emit filtered output. Public-suffix inputs are prepare-owned review/audit rows
+# because they have no registrable domain for delegation.
 
 defaults:
   fetch:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from domain_pipeline.classifications import (
+    CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
     CLASSIFICATION_MANUAL_FILTER_OUT,
     CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
@@ -120,6 +121,23 @@ def _manual_review_row(
         source_input_label_override=input_label,
         source_ids=source_ids or (classification,),
         source_input_labels=source_input_labels or (input_label,),
+    )
+
+
+def _public_suffix_review_row(
+    *,
+    job: SourceJob,
+    prepared_entry: PreparedHostEntry,
+) -> dict[str, Any]:
+    """Return the prepare-owned terminal row for one public suffix input."""
+    return build_base_row(
+        job=job,
+        entry=prepared_entry.entry,
+        classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+        source_id_override=prepared_entry.source_id_override,
+        source_input_label_override=prepared_entry.source_input_label_override,
+        source_ids=prepared_entry.source_ids,
+        source_input_labels=prepared_entry.source_input_labels,
     )
 
 
@@ -337,6 +355,17 @@ def prepare_inputs(
             current.entry.host,
         ),
     ):
+        if (
+            prepared_entry.entry.is_public_suffix_input
+            or not prepared_entry.entry.registrable_domain
+        ):
+            row = _public_suffix_review_row(
+                job=source_jobs_by_id[prepared_entry.source_id],
+                prepared_entry=prepared_entry,
+            )
+            preparation_review_rows.append(row)
+            preparation_terminal_rows.append({**row, "route": "review"})
+            continue
         entries_by_source[prepared_entry.source_id].append(prepared_entry)
 
     for host, entry in sorted(manual_pass_entries.items()):
