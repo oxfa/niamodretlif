@@ -9,37 +9,27 @@ version: 2
 # - input/manual_filter_pass/<config-stem>.txt
 # - input/manual_filter_out/<config-stem>.txt
 # - input/manual_add/<config-stem>.txt
-# The manual-pass file is only supported when all enabled sources in the config
-# have dns.enabled=true. It is rejected for RDAP-only mode or mixed DNS modes
-# in workflow-owned runtime. Hosts listed there run through RDAP when they have
-# an ICANN registrable root, but bypass DNS and geo. Unregistered roots still
-# route to dead output; otherwise matched hosts are emitted to the filtered
-# output for that config.
-# The manual filter-out file is exact-host-only, skips RDAP/DNS/geo entirely,
-# and emits review rows only.
-# manual_filter_pass entries that are ICANN public suffix inputs have no
-# registrable root to query, so explicit approval sends them directly to
-# filtered output with RDAP/DNS/geo skipped.
-# The manual-add file is config-scoped, always skips DNS/geo, and is validated
-# against the config's shared registration settings. RDAP/WHOIS-registered
-# roots are emitted to filtered output, while unregistered or unavailable roots
-# emit review rows instead of dead output. ICANN public-suffix inputs such as
-# "com" are rejected because manual-add entries must still run through a
-# registration check.
-# Runtime rows use three terminal routes: filtered for positive output, review
-# for uncertain or operator-attention cases, and dead only for unregistered
-# ICANN registrable domains proven by RDAP or WHOIS fallback. ICANN public
-# suffix inputs route to review unless explicitly approved through
-# manual_filter_pass. RDAP-unavailable hosts with DNS disabled route to review
-# unless a selected reason is resolved by WHOIS fallback or
-# rdap.unavailable_dns_disabled_routes maps another reason to filtered.
-# A host must not appear in both manual filter files for the same config.
-# A host must not appear in manual_add and either manual_filter_pass or
-# manual_filter_out for the same config.
-# When the same host appears in multiple enabled sources, shared preparation
-# collapses it only if the effective dns/rdap/geo behavior is identical across
-# those sources; conflicting behavior raises a validation error unless the host
-# is removed up front by manual_filter_out or overridden by manual_add.
+# manual_filter_pass and manual_add entries still require DNS delegation on the
+# registrable domain. If delegation is actionable, they skip host-resolution
+# and geo and emit filtered output. manual_add takes precedence over matching
+# source entries for the same host. If delegation is not actionable, they route
+# to unactionable or review using the normal delegation result. Unmatched
+# manual_add entries require all enabled sources to share delegation/output
+# behavior. Unmatched manual_filter_pass entries route to review without DNS
+# lookup because they are operator reconciliation rows. manual_filter_out is
+# exact-host-only, takes precedence over matching source entries, bypasses
+# DNS/geo entirely, and emits one review row per host. Public suffix inputs
+# route to review because there is no registrable domain to query.
+#
+# Runtime rows use three terminal routes:
+# - filtered: positive output rows.
+# - review: uncertain or operator-attention rows.
+# - unactionable: rows whose registrable domain currently has no usable DNS
+#   delegation by NS lookup.
+# Duplicate host collapse is keyed by final host and compares dns.delegation,
+# dns.host_resolution, geo, and output behavior across enabled sources. For
+# manual_add-matched hosts, only delegation/output behavior must match because
+# manual_add bypasses host-resolution and geo after delegation passes.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
@@ -47,25 +37,15 @@ defaults:
     request_timeout: 30.0
 
   dns:
-    # Enable or disable exact-host DNS lookups.
-    # Valid stage combinations are:
-    # - dns.enabled: false, geo.enabled: false -> RDAP only
-    # - dns.enabled: true,  geo.enabled: false -> RDAP + DNS
-    # - dns.enabled: true,  geo.enabled: true  -> RDAP + DNS + geo
-    # Geo requires DNS, so dns.enabled: false with geo.enabled: true is invalid.
-    enabled: true
-    # Optional custom nameservers for DNS lookups.
-    # Entries must be literal IPv4 or IPv6 resolver addresses.
-    # Leave this empty to use the platform resolver.
+    # Shared resolver settings for both DNS stages.
+    # Entries must be literal IPv4 or IPv6 resolver addresses. Leave empty to
+    # use the platform resolver unless ECS forces a verified public resolver.
     nameservers: []
     # Per-query DNS timeout, in seconds.
     timeout: 5.0
     # Optional EDNS Client Subnet (ECS) settings.
-    # Set enabled=true and provide a CIDR subnet when querying a resolver
-    # that accepts client-supplied ECS data.
-    # If ECS is enabled and nameservers is empty, or if the configured
-    # nameservers are not in the runtime's verified ECS-capable public-resolver
-    # list, the runtime falls back to Google Public DNS.
+    # Set enabled=true and provide a CIDR subnet when querying a resolver that
+    # accepts client-supplied ECS data.
     ecs:
       enabled: false
       # Example: 203.0.113.0/24 or 2001:db8::/48
@@ -73,171 +53,100 @@ defaults:
       # Scope to advertise in the ECS option. Leave at 0 unless you have a
       # specific resolver-side requirement.
       scope_prefix_length: 0
-
-  rdap:
-    # Per-request RDAP timeout, in seconds.
-    timeout: 10.0
-    # Fallback retry waits, in seconds, for RDAP HTTP 429 rate-limit responses
-    # that do not include a usable Retry-After header. A valid Retry-After
-    # response header takes precedence over this sequence. If retries exceed
-    # the sequence length, the final value is reused. config/global.yaml uses
-    # the same key for trusted automation's shared default policy; this
-    # source-level field remains available when a config needs to override it.
-    rate_limit_retry_fallback_seconds:
-      - 1.0
-      - 2.0
-      - 4.0
-    # Optional per-reason routing policy for RDAP-unavailable hosts when DNS is
-    # disabled. Omitted reasons route to review. Allowed route values are
-    # review and filtered; dead is intentionally unsupported because dead output
-    # is reserved for unregistered ICANN registrable domains.
-    unavailable_dns_disabled_routes: {}
-    # WHOIS fallback is secondary registration evidence for DNS-disabled rows
-    # after RDAP cannot produce an authoritative verdict for selected reasons:
-    # rdap_query_http_429_retry_exhausted and rdap_no_authoritative_bootstrap.
-    # The command is invoked without a shell as:
-    # <command> -I <normalized_registrable_domain>
-    # Registered/unregistered WHOIS verdicts reuse the root registration cache.
-    # Unknown/error/timeout/missing-command results are not cached and route
-    # DNS-disabled rows to review. Review CSV columns are unchanged; WHOIS
-    # metadata is written only to raw/terminal JSONL audit rows.
-    whois_fallback:
-      enabled: true
-      command: whois
-      timeout: 20.0
-      max_concurrency: 2
-    # Source-level mappings merge with defaults. To override an inherited
-    # reason, set the same reason to review or filtered.
+    # Mandatory NS lookup for the parsed registrable domain. Timeout/SERVFAIL
+    # are retried up to this stage-specific attempt count and are not cached
+    # after retry exhaustion.
+    delegation:
+      retry_attempts: 3
+    # Optional exact-host A/AAAA/CNAME resolution. If enabled is omitted, the
+    # runtime defaults it to true when geo.enabled=true and false otherwise.
+    # Timeout/SERVFAIL use this stage-specific retry budget and are not cached
+    # after retry exhaustion.
+    host_resolution:
+      enabled: false
+      retry_attempts: 3
 
   geo:
-    # Enable geo lookups and evaluate the resolved IPs against the policy
-    # block below. When false, geo data is not requested.
+    # Enable geo lookups and evaluate the resolved IPs against the policy block
+    # below. Geo only runs after delegation passes and host_resolution passes
+    # when host_resolution is enabled.
     enabled: false
     # Compatibility/readability field. Runtime provider selection is inferred
     # from the policy below:
     # - no region rules -> ipinfo_lite
     # - any region rules -> geojs
-    # Keep this value aligned with the inferred provider for clarity.
     provider: ipinfo_lite
     # Per-request timeout, in seconds, for geo lookups.
     timeout: 5.0
-    # Number of days to keep geo results cached.
+    # Number of days to keep successful usable geo results cached. Provider
+    # failures, invalid payloads, rate limits, exceptions, and non-usable
+    # results are not cached.
     cache_ttl_days: 7
     # In GitHub Actions, pass GEO_IPINFO_TOKEN through step-level env for the
     # country-only worker-runtime path instead of committing a token here.
-    # The trusted automation aggregate step publishes from prepared manifests
-    # and does not reread this YAML or require GEO_IPINFO_TOKEN.
     policy:
-      # Enable or disable geo policy filtering after geo lookups succeed.
-      # When false, geo data may still be looked up, but hosts are not
-      # accepted/rejected by include/exclude rules.
       enabled: false
-      # How many resolved IPs must match for the policy to accept the host.
-      # "all_ips" requires every resolved IP to satisfy the policy.
-      # "any_ip" accepts the host if at least one IP satisfies the policy.
       match_scope: all_ips
-      # DNS no-IP cases are routed to review before geo runs.
-      # Hosts whose selected geo provider fails, or whose region-aware lookup
-      # lacks a usable region_name, are routed to review.
       include:
-        # Optional positive-match rules. When this block is non-empty, a host
-        # must match at least one include country/region before it can pass.
-        # When both include and exclude are empty, the policy has no effective
-        # rules and the runtime treats it as skipped.
-        # Country values use uppercase country codes (for example, US, CA).
-        # Region values are matched as exact normalized region names.
-        # Adding any region rule switches runtime lookup to geojs, which uses
-        # conservative internal bulk multi-IP requests for resolved IP sets.
-        # GeoJS-backed region rules must use names such as California, not
-        # ISO-style codes such as US-CA.
         countries: []
         # Region examples: California, Ontario.
         regions: []
       exclude:
-        # Negative-match rules. Hosts matching exclude are rejected even if
-        # they also matched include.
         countries: []
         # Region examples: California, Ontario.
         regions: []
 
   output:
     # Output directory for files written by the pipeline.
-    # Equivalent paths such as output and ./output are treated as the same target.
-    # Route outputs are filtered, review, and dead. Dead output is reserved for
-    # unregistered ICANN registrable domains proven by RDAP or WHOIS fallback.
     # For a config named config/domain-pipeline.yaml, the runtime writes:
     # - output/filtered/domain-pipeline.txt
-    # - output/dead/domain-pipeline.txt
+    # - output/unactionable/domain-pipeline.txt
     # - output/review/domain-pipeline.csv
-    # Keep one directory across enabled sources in the same config.
     directory: output
 
 cache:
   classification_ttl_days:
-    # Cache retention, in days, for unregistered ICANN registrable-domain RDAP
-    # verdicts and WHOIS fallback verdicts.
-    rdap_registrable_domain_unregistered: 30
-    # Cache retention, in days, for registered ICANN registrable-domain RDAP
-    # verdicts and WHOIS fallback verdicts.
-    rdap_registrable_domain_registered: 7
-    # Cache retention, in days, for reusable reason-specific RDAP-unavailable
-    # ICANN registrable-domain states. Legacy broad rdap_lookup_unavailable
-    # rows are read for compatibility but refreshed with live RDAP.
-    rdap_lookup_unavailable: 7
-  # Cache retention, in days, for DNS lookup results.
+    # Cache retention, in days, for delegated registrable domains.
+    dns_delegation_actionable: 7
+    # Cache retention, in days, for registrable domains without usable NS
+    # delegation. Transient timeout/SERVFAIL delegation results are not cached.
+    dns_delegation_unactionable: 1
+  # Cache retention, in days, for stable exact-host dns.host_resolution results.
+  # Transient timeout/SERVFAIL host-resolution results are not cached.
+  # This does not control delegation cache retention; delegation uses the two
+  # dns_delegation_* TTLs above.
   dns_ttl_days: 1
 
 sources:
   - id: local-default
-    # Unique source identifier used for source-level logging and output rows.
-    # Source ids must be unique within one config file.
-    # Set to false to keep the source in the file but skip it at runtime.
     enabled: true
     input:
-      # Input type.
       # Valid values: file, url
       type: file
-      # Path or URL to process.
       # For file inputs, glob patterns such as input/*.txt are expanded.
       location: input/test.txt
-    # Optional per-source overrides. Omit a section to inherit the matching
-    # value from defaults above.
+      # Valid values: auto, plain, hosts, adblock, dnsmasq
+      format: auto
     fetch:
-      # Override the default fetch timeout for this source only.
-      # This affects URL inputs only.
       request_timeout: 30.0
     dns:
-      # Override DNS enablement, resolver list, or timeout for this source only.
-      # Entries must be literal IPv4 or IPv6 resolver addresses.
-      enabled: true
       nameservers: []
       timeout: 5.0
       ecs:
         enabled: false
         subnet: ""
         scope_prefix_length: 0
-    rdap:
-      # Override RDAP behavior for this source only.
-      timeout: 10.0
-      whois_fallback:
-        enabled: true
-        command: whois
-        timeout: 20.0
-        max_concurrency: 2
-      # Optional per-source route overrides. Omit this key to inherit the
-      # default mapping above.
-      # unavailable_dns_disabled_routes:
-      #   rdap_no_authoritative_bootstrap: review
+      delegation:
+        retry_attempts: 3
+      host_resolution:
+        enabled: false
+        retry_attempts: 3
     geo:
-      # Source-specific geo settings. Explicit fields override defaults; omit
-      # nested keys to keep inheriting the matching default values.
-      # Geo lookups require dns.enabled=true for the source.
       enabled: false
       provider: ipinfo_lite
       timeout: 5.0
       cache_ttl_days: 7
       policy:
-        # Source-specific policy overrides.
         enabled: false
         match_scope: all_ips
         include:
@@ -247,20 +156,4 @@ sources:
           countries: []
           regions: []
     output:
-      # Optional per-source override. All enabled sources in one config must
-      # still resolve to the same output.directory because outputs are grouped
-      # by the config filename stem, not by source id.
-      #
-      # With directory: output and this file named domain-pipeline.yaml.sample,
-      # the runtime writes:
-      # - output/filtered/domain-pipeline.txt
-      # - output/dead/domain-pipeline.txt
-      # - output/review/domain-pipeline.csv
-      #
-      # The filtered/dead txt files and review file follow output.directory.
-      # ICANN public suffix inputs write review rows instead of filtered or dead
-      # rows, except when explicitly approved through manual_filter_pass.
-      # RDAP-unavailable DNS-disabled hosts write review rows unless WHOIS
-      # fallback resolves a selected reason or the specific unavailable reason
-      # is mapped to filtered under rdap.
       directory: output

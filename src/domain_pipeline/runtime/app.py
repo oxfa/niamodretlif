@@ -60,38 +60,53 @@ def _log_run_summary(
             line_count,
             output_path.stat().st_size,
         )
-    emitted_hosts = counts.get("routed_filtered", 0)
-    review_hosts = counts.get("routed_review", 0)
-    dead_hosts = counts.get("routed_dead", 0)
-    log.info("  Total input hosts: %d", emitted_hosts + review_hosts + dead_hosts)
+    emitted_hosts = counts.get("route_filtered", 0)
+    review_hosts = counts.get("route_review", 0)
+    unactionable_hosts = counts.get("route_unactionable", 0)
+    log.info(
+        "  Total input hosts: %d",
+        emitted_hosts + review_hosts + unactionable_hosts,
+    )
     log.info("  Hosts emitted to filtered output: %d", emitted_hosts)
     log.info("  Hosts routed to review: %d", review_hosts)
     log.info(
-        "  Hosts written to output/dead after unregistered registrable-domain verdict: %d",
-        dead_hosts,
+        "  Hosts written to output/unactionable after failed delegation: %d",
+        unactionable_hosts,
     )
     log.info("  Cache writes: %d", cache_stats.get("cached_written", 0))
     log.info("  Cache refreshes: %d", cache_stats.get("cached_refreshed", 0))
     log.info("  Cache clears: %d", cache_stats.get("cache_cleared", 0))
-    log.info("  RDAP cache hits: %d", cache_stats.get("rdap_cache_hits", 0))
-    log.info("  RDAP cache misses: %d", cache_stats.get("rdap_cache_misses", 0))
     log.info(
-        "  RDAP overlay cache hits: %d",
-        cache_stats.get("rdap_overlay_cache_hits", 0),
+        "  Delegation cache hits: %d",
+        cache_stats.get("delegation_cache_hits", 0),
     )
     log.info(
-        "  RDAP baseline cache hits: %d",
-        cache_stats.get("rdap_baseline_cache_hits", 0),
-    )
-    log.info("  DNS cache hits: %d", cache_stats.get("dns_cache_hits", 0))
-    log.info("  DNS cache misses: %d", cache_stats.get("dns_cache_misses", 0))
-    log.info(
-        "  DNS overlay cache hits: %d",
-        cache_stats.get("dns_overlay_cache_hits", 0),
+        "  Delegation cache misses: %d",
+        cache_stats.get("delegation_cache_misses", 0),
     )
     log.info(
-        "  DNS baseline cache hits: %d",
-        cache_stats.get("dns_baseline_cache_hits", 0),
+        "  Delegation overlay cache hits: %d",
+        cache_stats.get("delegation_overlay_cache_hits", 0),
+    )
+    log.info(
+        "  Delegation baseline cache hits: %d",
+        cache_stats.get("delegation_baseline_cache_hits", 0),
+    )
+    log.info(
+        "  Host-resolution cache hits: %d",
+        cache_stats.get("host_resolution_cache_hits", 0),
+    )
+    log.info(
+        "  Host-resolution cache misses: %d",
+        cache_stats.get("host_resolution_cache_misses", 0),
+    )
+    log.info(
+        "  Host-resolution overlay cache hits: %d",
+        cache_stats.get("host_resolution_overlay_cache_hits", 0),
+    )
+    log.info(
+        "  Host-resolution baseline cache hits: %d",
+        cache_stats.get("host_resolution_baseline_cache_hits", 0),
     )
     log.info("  Geo cache hits: %d", cache_stats.get("geo_cache_hits", 0))
     log.info("  Geo cache misses: %d", cache_stats.get("geo_cache_misses", 0))

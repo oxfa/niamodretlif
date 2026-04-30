@@ -178,15 +178,15 @@ def worker_filtered_path(
     )
 
 
-def worker_dead_path(
+def worker_unactionable_path(
     workspace_root: Path, *, batch_id: str, worker_id: str, config_name: str
 ) -> Path:
-    """Return the worker dead-output path."""
+    """Return the worker unactionable-output path."""
     return (
         worker_publish_output_root(
             workspace_root, batch_id=batch_id, worker_id=worker_id
         )
-        / "dead"
+        / "unactionable"
         / f"{config_name}.txt"
     )
 

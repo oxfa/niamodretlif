@@ -1,16 +1,21 @@
 """Pipeline runtime orchestration and cache state."""
 
-from .history import PipelineCache, RootDomainClassificationRecord
-from .contracts import CompletedHostResult, DNSWorkItem, GeoWorkItem, ParsedHostItem
+from .contracts import (
+    CompletedHostResult,
+    GeoWorkItem,
+    HostResolutionWorkItem,
+    ParsedHostItem,
+)
 from .handoffs import read_and_validate_handoff, write_handoff
+from .history import DelegationHistoryRecord, PipelineCache
 
 __all__ = [
     "CompletedHostResult",
-    "DNSWorkItem",
+    "DelegationHistoryRecord",
     "GeoWorkItem",
+    "HostResolutionWorkItem",
     "ParsedHostItem",
     "PipelineCache",
-    "RootDomainClassificationRecord",
     "read_and_validate_handoff",
     "write_handoff",
 ]

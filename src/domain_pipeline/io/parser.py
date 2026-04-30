@@ -24,7 +24,7 @@ Processing steps applied to each file:
 4. Lowercase and remove trailing dots.
 5. Encode IDN labels to Punycode (IDNA).
 6. Validate structural syntax (RFC 1035 label limits).
-7. Extract the RDAP registrable domain (ICANN eTLD+1) via ``publicsuffix2``.
+7. Extract the DNS delegation target (ICANN eTLD+1) via ``publicsuffix2``.
 8. Deduplicate exact hosts while preserving their registrable domain.
 
 Files that are mixed-format or unrecognized are skipped.

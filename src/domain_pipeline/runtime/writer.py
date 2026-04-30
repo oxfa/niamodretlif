@@ -35,6 +35,14 @@ def _audit_row(row: dict[str, Any], *, route: str) -> dict[str, Any]:
     return audit_row
 
 
+def _txt_output_value(row: dict[str, Any]) -> str:
+    """Return the public TXT value while host remains the duplicate key."""
+    input_name = str(row.get("input_name", "")).strip()
+    if input_name:
+        return input_name
+    return str(row["host"])
+
+
 def _publish_snapshot_relative_path(path: Path) -> Path:
     """Return one stable publish-snapshot path rooted at output/."""
     parts = path.parts
@@ -76,7 +84,7 @@ class _BufferedOutputGroup:  # pylint: disable=too-many-instance-attributes
 
     job: SourceJob
     filtered_rows: list[dict[str, Any]]
-    dead_rows: list[dict[str, Any]]
+    unactionable_rows: list[dict[str, Any]]
     audit_rows: list[dict[str, Any]]
     review_rows: list[dict[str, Any]]
     seen_host_outputs: dict[str, set[str]]
@@ -98,14 +106,14 @@ class ResultCollectorWriter:
         output_paths = output_paths_for_job(job)
         group_key = (
             output_paths["filtered"],
-            output_paths["dead"],
+            output_paths["unactionable"],
             output_paths["audit"],
             review_output_path_for_job(job),
         )
         group = self.groups.get(group_key)
         if group is None:
             logger.debug(
-                "Creating writer output group for source=%s filtered=%s dead=%s audit=%s "
+                "Creating writer output group for source=%s filtered=%s unactionable=%s audit=%s "
                 "review=%s",
                 job.source_id,
                 group_key[0],
@@ -116,10 +124,10 @@ class ResultCollectorWriter:
             group = _BufferedOutputGroup(
                 job=job,
                 filtered_rows=[],
-                dead_rows=[],
+                unactionable_rows=[],
                 audit_rows=[],
                 review_rows=[],
-                seen_host_outputs={"filtered": set(), "dead": set()},
+                seen_host_outputs={"filtered": set(), "unactionable": set()},
                 seen_audit_rows=set(),
                 seen_review_rows=set(),
             )
@@ -163,19 +171,19 @@ class ResultCollectorWriter:
         )
         self.counts[result.classification] += 1
         self.counts[f"route_{result.route}"] += 1
-        if result.route == "dead":
+        if result.route == "unactionable":
             host = result.row["host"]
-            if host in group.seen_host_outputs["dead"]:
+            if host in group.seen_host_outputs["unactionable"]:
                 raise DuplicateOutputInvariantError(
-                    "dead_host",
+                    "unactionable_host",
                     str(host),
                     context={"source": group.job.source_id},
                 )
-            group.seen_host_outputs["dead"].add(host)
-            group.dead_rows.append(result.row)
-            logger.debug("Queued host=%s for dead output", host)
+            group.seen_host_outputs["unactionable"].add(host)
+            group.unactionable_rows.append(result.row)
+            logger.debug("Queued host=%s for unactionable output", host)
             logger.debug(
-                "Routed host=%s to dead output after terminal routing decision",
+                "Routed host=%s to unactionable output after terminal routing decision",
                 result.row["host"],
             )
         elif result.route == "filtered":
@@ -231,16 +239,16 @@ class ResultCollectorWriter:
                 )
             group.seen_host_outputs["filtered"].add(host)
             group.filtered_rows.append(row)
-        elif route == "dead":
+        elif route == "unactionable":
             host = str(row["host"])
-            if host in group.seen_host_outputs["dead"]:
+            if host in group.seen_host_outputs["unactionable"]:
                 raise DuplicateOutputInvariantError(
-                    "dead_host",
+                    "unactionable_host",
                     host,
                     context={"source": group.job.source_id},
                 )
-            group.seen_host_outputs["dead"].add(host)
-            group.dead_rows.append(row)
+            group.seen_host_outputs["unactionable"].add(host)
+            group.unactionable_rows.append(row)
         audit_row = _audit_row(row, route=route)
         audit_signature = _json_row_signature(audit_row)
         if audit_signature in group.seen_audit_rows:
@@ -258,7 +266,7 @@ class ResultCollectorWriter:
     def _write_group_files(
         self,
         filtered_path: Path,
-        dead_path: Path,
+        unactionable_path: Path,
         audit_path: Path,
         review_path: Path,
         group: _BufferedOutputGroup,
@@ -270,16 +278,24 @@ class ResultCollectorWriter:
             filtered_path.open("w", encoding="utf-8", newline="") as filtered_handle,
             audit_path.open("w", encoding="utf-8", newline="") as audit_handle,
         ):
-            for row in sorted(group.filtered_rows, key=lambda current: current["host"]):
-                filtered_handle.write(f"{row['host']}\n")
+            for row in sorted(
+                group.filtered_rows,
+                key=lambda current: (_txt_output_value(current), current["host"]),
+            ):
+                filtered_handle.write(f"{_txt_output_value(row)}\n")
             for row in sorted(group.audit_rows, key=lambda current: current["host"]):
                 json.dump(row, audit_handle)
                 audit_handle.write("\n")
-        if group.dead_rows:
-            dead_path.parent.mkdir(parents=True, exist_ok=True)
-            with dead_path.open("w", encoding="utf-8", newline="") as dead_handle:
-                for row in sorted(group.dead_rows, key=lambda current: current["host"]):
-                    dead_handle.write(f"{row['host']}\n")
+        if group.unactionable_rows:
+            unactionable_path.parent.mkdir(parents=True, exist_ok=True)
+            with unactionable_path.open(
+                "w", encoding="utf-8", newline=""
+            ) as unactionable_handle:
+                for row in sorted(
+                    group.unactionable_rows,
+                    key=lambda current: (_txt_output_value(current), current["host"]),
+                ):
+                    unactionable_handle.write(f"{_txt_output_value(row)}\n")
         if group.review_rows:
             write_review_rows(review_path, group.review_rows)
             logger.debug(
@@ -292,22 +308,22 @@ class ResultCollectorWriter:
         """Write collected results to their final output files."""
         for (
             filtered_path,
-            dead_path,
+            unactionable_path,
             audit_path,
             review_path,
         ), group in self.groups.items():
             logger.debug(
-                "Writing output group for source=%s filtered_rows=%d dead_rows=%d "
+                "Writing output group for source=%s filtered_rows=%d unactionable_rows=%d "
                 "audit_rows=%d review_rows=%d",
                 group.job.source_id,
                 len(group.filtered_rows),
-                len(group.dead_rows),
+                len(group.unactionable_rows),
                 len(group.audit_rows),
                 len(group.review_rows),
             )
             self._write_group_files(
                 filtered_path,
-                dead_path,
+                unactionable_path,
                 audit_path,
                 review_path,
                 group,
@@ -332,19 +348,21 @@ class ResultCollectorWriter:
         debug_paths: list[Path] = []
         for (
             filtered_path,
-            dead_path,
+            unactionable_path,
             audit_path,
             review_path,
         ), group in self.groups.items():
             target_filtered = publish_root / _publish_snapshot_relative_path(
                 filtered_path
             )
-            target_dead = publish_root / _publish_snapshot_relative_path(dead_path)
+            target_unactionable = publish_root / _publish_snapshot_relative_path(
+                unactionable_path
+            )
             target_audit = debug_root / _debug_snapshot_relative_path(audit_path)
             target_review = publish_root / _publish_snapshot_relative_path(review_path)
             self._write_group_files(
                 target_filtered,
-                target_dead,
+                target_unactionable,
                 target_audit,
                 target_review,
                 group,
@@ -352,7 +370,7 @@ class ResultCollectorWriter:
             state_paths.extend(
                 [
                     path
-                    for path in [target_filtered, target_dead, target_review]
+                    for path in [target_filtered, target_unactionable, target_review]
                     if path.is_file()
                 ]
             )

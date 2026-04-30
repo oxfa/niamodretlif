@@ -17,13 +17,12 @@ permissions:
 # Optional per-config manual files:
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
-# manual_filter_pass is intentionally unsupported for this RDAP-only config.
+# manual_filter_pass is allowed and still requires DNS delegation.
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml
     with:
       config_name: block
       config_path: config/block.yaml
-      global_config_path: config/global.yaml
       worker_count: 18
     secrets: inherit

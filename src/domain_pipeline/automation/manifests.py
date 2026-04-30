@@ -31,7 +31,7 @@ class WorkerOutputSpec(AutomationModel):
 
     result_root: str
     filtered: str
-    dead: str
+    unactionable: str
     review: str
     terminal_rows: str
     cache: str
@@ -41,7 +41,7 @@ class WorkerOutputSpec(AutomationModel):
         return {
             "result_root": state_root / Path(self.result_root),
             "filtered": state_root / Path(self.filtered),
-            "dead": state_root / Path(self.dead),
+            "unactionable": state_root / Path(self.unactionable),
             "review": state_root / Path(self.review),
             "terminal_rows": state_root / Path(self.terminal_rows),
             "cache": state_root / Path(self.cache),
@@ -52,7 +52,7 @@ class AggregateOutputSpec(AutomationModel):
     """Repo-relative aggregate output/cache/log paths."""
 
     filtered: str
-    dead: str
+    unactionable: str
     review: str
     audit: str
     log: str
@@ -64,7 +64,7 @@ class AggregateOutputSpec(AutomationModel):
         publish_root = publish_worktree_root(state_root)
         return {
             "filtered": publish_root / Path(self.filtered),
-            "dead": publish_root / Path(self.dead),
+            "unactionable": publish_root / Path(self.unactionable),
             "review": publish_root / Path(self.review),
             "audit": state_root / Path(self.audit),
             "log": state_root / Path(self.log),
@@ -78,7 +78,7 @@ class PreparedRuntimeMetadata(AutomationModel):
 
     prepared_source_ids: list[str] = Field(default_factory=list)
     sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    rdap_roots: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    delegation_roots: dict[str, dict[str, Any]] = Field(default_factory=dict)
     terminal_rows: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_runtime_payload(self) -> dict[str, Any]:
@@ -95,7 +95,6 @@ class WorkerRuntimeSpec(AutomationModel):
     output_spec: WorkerOutputSpec
     debug_log_path: str
     runtime_paths: dict[str, str] = Field(default_factory=dict)
-    rdap_global_policy: dict[str, Any] = Field(default_factory=dict)
 
     def to_runtime_payload(
         self,
@@ -112,7 +111,6 @@ class WorkerRuntimeSpec(AutomationModel):
             "cache": copy.deepcopy(self.cache),
             "sources": copy.deepcopy(self.sources),
             "runtime_paths": copy.deepcopy(self.runtime_paths),
-            "rdap_global_policy": copy.deepcopy(self.rdap_global_policy),
         }
         cache_payload = payload["cache"]
         cache_file = str(cache_payload.get("cache_file", "")).strip()

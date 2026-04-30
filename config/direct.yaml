@@ -4,34 +4,36 @@ version: 2
 # - input/manual_filter_pass/direct.txt
 # - input/manual_filter_out/direct.txt
 # - input/manual_add/direct.txt
-# manual_add entries still run through registration checks, always skip
-# DNS/geo, emit registered roots to filtered output, and emit unregistered or
-# unavailable roots to review instead of dead output. manual_filter_pass
-# entries run through RDAP when they have a registrable root, then skip DNS/geo.
-# Public-suffix manual_filter_pass inputs have no registrable root to query, so
-# explicit approval sends them directly to filtered output with RDAP/DNS/geo
-# skipped.
+# manual_filter_pass and manual_add entries still require DNS delegation.
+# manual_add takes precedence over matching source entries for the same host.
+# When delegation is actionable they bypass host-resolution and geo checks and
+# emit filtered output. Public-suffix manual inputs route to review because
+# they have no registrable domain for delegation.
 
 defaults:
   fetch:
     request_timeout: 30.0
 
-  rdap:
-    # Trusted automation receives shared RDAP 429 fallback policy from
-    # config/global.yaml. Source-level fallback overrides remain possible but
-    # are not used by default here.
-    timeout: 10.0
+  dns:
+    nameservers: []
+    timeout: 5.0
+    ecs:
+      enabled: true
+      subnet: "140.206.64.0/24"
+      scope_prefix_length: 0
+    delegation:
+      retry_attempts: 3
+    host_resolution:
+      enabled: true
+      retry_attempts: 3
 
   output:
     directory: output
 
 cache:
   classification_ttl_days:
-    rdap_registrable_domain_unregistered: 30
-    rdap_registrable_domain_registered: 7
-    # Applies to reason-specific RDAP-unavailable root cache rows; legacy
-    # broad rdap_lookup_unavailable rows are refreshed.
-    rdap_lookup_unavailable: 7
+    dns_delegation_actionable: 7
+    dns_delegation_unactionable: 1
   dns_ttl_days: 7
 
 sources:
@@ -40,13 +42,6 @@ sources:
     input:
       type: url
       location: https://is.gd/43bKSw
-    dns:
-      enabled: true
-      timeout: 5.0
-      ecs:
-        enabled: true
-        subnet: "140.206.64.0/24"
-        scope_prefix_length: 0
     geo:
       enabled: true
       provider: ipinfo_lite

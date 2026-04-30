@@ -38,10 +38,10 @@ def filtered_output_path_for_job(job: SourceJob) -> Path:
     return output_dir / "filtered" / f"{job.output_stem}.{OUTPUT_SUFFIXES['txt']}"
 
 
-def dead_output_path_for_job(job: SourceJob) -> Path:
-    """Return the dead-output text path for one source job."""
+def unactionable_output_path_for_job(job: SourceJob) -> Path:
+    """Return the unactionable-output text path for one source job."""
     output_dir = Path(job.config["output"].get("directory", "."))
-    return output_dir / "dead" / f"{job.output_stem}.{OUTPUT_SUFFIXES['txt']}"
+    return output_dir / "unactionable" / f"{job.output_stem}.{OUTPUT_SUFFIXES['txt']}"
 
 
 def audit_output_path_for_job(job: SourceJob) -> Path:
@@ -99,7 +99,7 @@ def output_paths_for_job(job: SourceJob) -> dict[str, Path]:
     """Return concrete output paths for one source job."""
     return {
         "filtered": filtered_output_path_for_job(job),
-        "dead": dead_output_path_for_job(job),
+        "unactionable": unactionable_output_path_for_job(job),
         "audit": audit_output_path_for_job(job),
     }
 
@@ -116,7 +116,7 @@ def open_output_files(job: SourceJob) -> dict[str, Any]:
         output_dir,
     )
     output_files: dict[str, Any] = {}
-    for format_name in ["filtered", "dead", "audit"]:
+    for format_name in ["filtered", "unactionable", "audit"]:
         output_path = output_paths[format_name]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         log.debug("Opening %s output file %s", format_name, output_path)

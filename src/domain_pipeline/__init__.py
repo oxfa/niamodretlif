@@ -2,29 +2,24 @@
 
 This package processes host lists in three stages:
 
-1. ``DomainListParser`` extracts and normalizes exact hosts from supported
-   input formats, derives the registrable domain for each host, and removes
-   duplicates within the current input. Inputs with no registrable domain are
-   handled by the public-suffix guard or by explicit manual-pass approval.
-2. RDAP is consulted only at the registrable-domain level to decide whether a
-   registrable domain is unregistered. When a registrable domain is proven
-   unregistered, that domain and every input host under it are written to the
-   dedicated ``output/dead/`` host list instead of continuing through DNS and
-   geo checks.
-3. Hosts under registrable domains that are not proven unregistered either
-   continue through exact-host DNS checks and optional IP geo policy
-   evaluation, or emit directly from the RDAP stage when DNS is disabled in
-   config.
-
-The convenience function ``classify`` exposes the lower-level checker logic for
-single-host workflows. The repository test suite under ``tests/`` contains
-examples that mock RDAP, DNS, and geo responses.
+1. ``DomainListParser`` extracts and normalizes entries from supported input
+   formats, derives the ICANN registrable domain for each entry, and preserves
+   the original input token for final text output.
+2. ``dns.delegation`` performs the mandatory NS lookup for the registrable
+   domain. Inputs whose registrable domain is not delegated are written to
+   ``output/unactionable/`` because they are not currently actionable for
+   blacklist or whitelist output. Timeout and SERVFAIL outcomes are retried
+   and then sent to review without cache writes.
+3. ``dns.host_resolution`` and ``geo`` are review gates when enabled. Host
+   resolution or geo failures route to review; they do not make an entry
+   unactionable. Stable host DNS and successful usable geo results are cached.
 """
 
 from .checking import (
     DomainChecker,
     GeoJSProvider,
     GeoPolicyDecision,
+    HostResolutionResult,
     IPGeoResult,
     IPInfoLiteProvider,
     build_geo_provider,
@@ -32,7 +27,7 @@ from .checking import (
     evaluate_geo_policy,
 )
 from .io.parser import DomainListParser, ParsedDomainEntry
-from .runtime.history import PipelineCache, RootDomainClassificationRecord
+from .runtime.history import DelegationHistoryRecord, PipelineCache
 
 __all__ = [
     "DomainChecker",
@@ -40,11 +35,12 @@ __all__ = [
     "DomainListParser",
     "GeoJSProvider",
     "GeoPolicyDecision",
+    "HostResolutionResult",
     "IPGeoResult",
     "IPInfoLiteProvider",
     "ParsedDomainEntry",
     "PipelineCache",
-    "RootDomainClassificationRecord",
+    "DelegationHistoryRecord",
     "build_geo_provider",
     "evaluate_geo_policy",
 ]

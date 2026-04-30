@@ -9,9 +9,6 @@ on:
       config_path:
         required: true
         type: string
-      global_config_path:
-        required: true
-        type: string
       worker_count:
         required: true
         type: number
@@ -102,7 +99,6 @@ jobs:
               --source-root . \
               --state-root . \
               --config "${{ inputs.config_path }}" \
-              --global-config "${{ inputs.global_config_path }}" \
               --run-id "${GITHUB_RUN_ID}" \
               --run-attempt "${GITHUB_RUN_ATTEMPT}" \
               --worker-count "${{ inputs.worker_count }}" \
@@ -129,7 +125,6 @@ jobs:
           mkdir -p .debug_artifacts/prepare/batch/logs
           cp batch.json .debug_artifacts/prepare/batch/logs/batch.json
           cp prepare-batch.log .debug_artifacts/prepare/batch/logs/prepare-batch.log
-          cp "${{ inputs.global_config_path }}" .debug_artifacts/prepare/batch/logs/global.yaml
       - name: Upload prepared batch debug artifact
         uses: actions/upload-artifact@v7
         with:
@@ -167,15 +162,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Install WHOIS client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y whois
-          command -v whois
       # Prefer the prior attempt from the same workflow run when a rerun needs
-      # to resume cache progress, then fall back to the broader config-wide
-      # lineage. Legacy broad rdap_lookup_unavailable rows may be restored, but
-      # runtime refreshes them into reason-specific RDAP-unavailable cache rows.
+      # to resume DNS-only cache progress, then fall back to the broader
+      # config-wide lineage.
       - name: Restore baseline cache
         id: restore_worker_baseline_cache
         uses: actions/cache/restore@v5
@@ -184,40 +173,10 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            signal-light-sqlite-${{ inputs.config_name }}-
-      - name: Restore legacy worker baseline cache
-        id: restore_worker_legacy_baseline_cache
-        if: ${{ steps.restore_worker_baseline_cache.outputs.cache-hit == '' }}
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            .tmp/runtime/check-cache.sqlite3
-            .tmp/runtime/check-cache.sqlite3-shm
-            .tmp/runtime/check-cache.sqlite3-wal
-          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            signal-light-sqlite-${{ inputs.config_name }}-
-      - name: Hydrate migrated baseline cache
-        if: ${{ steps.restore_worker_baseline_cache.outputs.cache-hit == '' }}
-        run: |
-          set -eo pipefail
-          mkdir -p .workflow_state/runtime/cache
-          if [ -f ".tmp/runtime/check-cache.sqlite3" ]; then
-            cp .tmp/runtime/check-cache.sqlite3 \
-            .workflow_state/runtime/cache/check-cache.sqlite3
-          fi
-          if [ -f ".tmp/runtime/check-cache.sqlite3-shm" ]; then
-            cp .tmp/runtime/check-cache.sqlite3-shm \
-            .workflow_state/runtime/cache/check-cache.sqlite3-shm
-          fi
-          if [ -f ".tmp/runtime/check-cache.sqlite3-wal" ]; then
-            cp .tmp/runtime/check-cache.sqlite3-wal \
-            .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          fi
+            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-
       - name: Log worker baseline cache restore
         run: |
           set -eo pipefail
@@ -246,8 +205,8 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "worker baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
-          echo "worker baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
-          echo "worker baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
+          echo "worker baseline cache primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "worker baseline cache restore_prefixes=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           echo "worker baseline cache cache-hit=${cache_hit}"
           echo "worker baseline cache restore_result=${restore_result}"
           echo "worker baseline cache restored_paths=${summary}"
@@ -258,7 +217,7 @@ jobs:
         run: |
           set -eo pipefail
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="signal-light-sqlite-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -372,12 +331,6 @@ jobs:
               ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" \
               ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
           fi
-          if [ -d ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/rdap-rate-limit" ]; then
-            mkdir -p ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}"
-            cp -R \
-              ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/rdap-rate-limit" \
-              ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/"
-          fi
       - name: Upload worker debug artifact
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         uses: actions/upload-artifact@v7
@@ -436,9 +389,8 @@ jobs:
             --state-root . \
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
-      # Keep aggregate reruns on the same per-run cache lineage before falling
-      # back to any newer config-wide cache generation. Reason-specific
-      # RDAP-unavailable rows remain reusable; legacy broad rows are refreshed.
+      # Keep aggregate reruns on the same DNS-only per-run cache lineage before
+      # falling back to any newer config-wide cache generation.
       - name: Restore aggregate baseline cache
         id: restore_aggregate_baseline_cache
         uses: actions/cache/restore@v5
@@ -447,40 +399,10 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            signal-light-sqlite-${{ inputs.config_name }}-
-      - name: Restore legacy aggregate baseline cache
-        id: restore_aggregate_legacy_baseline_cache
-        if: ${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit == '' }}
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            .tmp/runtime/check-cache.sqlite3
-            .tmp/runtime/check-cache.sqlite3-shm
-            .tmp/runtime/check-cache.sqlite3-wal
-          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            signal-light-sqlite-${{ inputs.config_name }}-
-      - name: Hydrate migrated aggregate baseline cache
-        if: ${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit == '' }}
-        run: |
-          set -eo pipefail
-          mkdir -p .workflow_state/runtime/cache
-          if [ -f ".tmp/runtime/check-cache.sqlite3" ]; then
-            cp .tmp/runtime/check-cache.sqlite3 \
-            .workflow_state/runtime/cache/check-cache.sqlite3
-          fi
-          if [ -f ".tmp/runtime/check-cache.sqlite3-shm" ]; then
-            cp .tmp/runtime/check-cache.sqlite3-shm \
-            .workflow_state/runtime/cache/check-cache.sqlite3-shm
-          fi
-          if [ -f ".tmp/runtime/check-cache.sqlite3-wal" ]; then
-            cp .tmp/runtime/check-cache.sqlite3-wal \
-            .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          fi
+            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-
       - name: Log aggregate baseline cache restore
         run: |
           set -eo pipefail
@@ -509,8 +431,8 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "aggregate baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}"
-          echo "aggregate baseline cache primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
-          echo "aggregate baseline cache restore_prefixes=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,signal-light-sqlite-${{ inputs.config_name }}-"
+          echo "aggregate baseline cache primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "aggregate baseline cache restore_prefixes=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           echo "aggregate baseline cache cache-hit=${cache_hit}"
           echo "aggregate baseline cache restore_result=${restore_result}"
           echo "aggregate baseline cache restored_paths=${summary}"
@@ -521,7 +443,7 @@ jobs:
         run: |
           set -eo pipefail
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="signal-light-sqlite-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -633,9 +555,6 @@ jobs:
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs"
-          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/events"
-          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/summaries"
-          mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/recommendations"
           cp .tmp/downloads/validation-settings/logs/settings.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/settings.json"
           cp .tmp/downloads/validation-settings/logs/validate-settings.log \
@@ -644,8 +563,6 @@ jobs:
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/batch.json"
           cp .tmp/downloads/prepared-batch-debug/logs/prepare-batch.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/prepare-batch.log"
-          cp .tmp/downloads/prepared-batch-debug/logs/global.yaml \
-            ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/global.yaml"
           cp \
             ".debug_artifacts/runtime/raw/${{ steps.config.outputs.config_name }}.jsonl" \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log/${{ steps.config.outputs.config_name }}.jsonl"
@@ -662,16 +579,6 @@ jobs:
             worker_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/worker.log"
             if [ -f "${worker_log_path}" ]; then
               cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
-            fi
-            rdap_debug_root="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/rdap-rate-limit"
-            if [ -f "${rdap_debug_root}/events.jsonl" ]; then
-              cp "${rdap_debug_root}/events.jsonl" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/events/${worker_id}.jsonl"
-            fi
-            if [ -f "${rdap_debug_root}/summary.json" ]; then
-              cp "${rdap_debug_root}/summary.json" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/summaries/${worker_id}.json"
-            fi
-            if [ -f "${rdap_debug_root}/recommendations.json" ]; then
-              cp "${rdap_debug_root}/recommendations.json" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/rdap-rate-limit/recommendations/${worker_id}.json"
             fi
           done
           echo "=== Aggregate artifact staging complete ===" | tee -a "${AGGREGATE_LOG_PATH}"
@@ -706,7 +613,7 @@ jobs:
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
           set -eo pipefail
-          echo "aggregate baseline cache save primary_key=signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "aggregate baseline cache save primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "aggregate baseline cache save should_save=${{ steps.inspect_aggregate_cache_bundle.outputs.should_save }}"
           echo "aggregate baseline cache save bundle_summary=${{ steps.inspect_aggregate_cache_bundle.outputs.bundle_summary }}"
       - name: Save aggregate baseline cache
@@ -717,7 +624,7 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: signal-light-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Remove workflow-local automation state before publish
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed' }}
         run: |
@@ -748,7 +655,7 @@ jobs:
               --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
-              --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.unactionable' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee publish-size-check.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
@@ -766,7 +673,7 @@ jobs:
               --message "automation(${{ needs.prepare_run.outputs.batch_id }}): aggregate outputs" \
               --log-level "${{ inputs.aggregate_log_level }}" \
               --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
-              --path "$(jq -r '.final_output_paths.dead' aggregate.json)" \
+              --path "$(jq -r '.final_output_paths.unactionable' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee aggregate-commit.json
           } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"

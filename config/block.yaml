@@ -1,37 +1,39 @@
 version: 2
 
 # Optional per-config manual files:
+# - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
-# manual_filter_pass is intentionally unsupported for this RDAP-only config.
-# manual_add entries are allowed for this RDAP-only config because they only do
-# RDAP. They bypass DNS/geo and never emit dead-output rows.
+# manual_filter_pass and manual_add entries still require DNS delegation.
+# manual_add takes precedence over matching source entries for the same host.
+# When delegation is actionable they bypass host-resolution and geo checks and
+# emit filtered output. manual_filter_out skips DNS/geo and emits one review
+# row per host.
 
 defaults:
   fetch:
     request_timeout: 30.0
 
-  rdap:
-    # Trusted automation receives shared RDAP 429 fallback policy from
-    # config/global.yaml. Source-level fallback overrides remain possible but
-    # are not used by default here.
-    timeout: 10.0
-    whois_fallback:
-      enabled: true
-      command: whois
-      timeout: 20.0
-      max_concurrency: 2
+  dns:
+    nameservers: []
+    timeout: 5.0
+    ecs:
+      enabled: false
+      subnet: ""
+      scope_prefix_length: 0
+    delegation:
+      retry_attempts: 3
+    host_resolution:
+      enabled: false
+      retry_attempts: 3
 
   output:
     directory: output
 
 cache:
   classification_ttl_days:
-    rdap_registrable_domain_unregistered: 30
-    rdap_registrable_domain_registered: 7
-    # Applies to reason-specific RDAP-unavailable root cache rows; legacy
-    # broad rdap_lookup_unavailable rows are refreshed.
-    rdap_lookup_unavailable: 7
+    dns_delegation_actionable: 7
+    dns_delegation_unactionable: 1
   dns_ttl_days: 7
 
 sources:
@@ -40,7 +42,5 @@ sources:
     input:
       type: url
       location: https://is.gd/vQFXgT
-    dns:
-      enabled: false
     geo:
       enabled: false
