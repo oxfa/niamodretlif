@@ -561,7 +561,6 @@ def _choose_balanced_worker(
 def _log_prepared_assignment_summary(
     *,
     worker_ids: list[str],
-    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
     worker_entry_counts: Counter,
 ) -> None:
@@ -571,13 +570,6 @@ def _log_prepared_assignment_summary(
             "worker_id": worker_id,
             "entry_count": worker_entry_counts[worker_id],
             "delegation_root_count": len(worker_root_plans[worker_id]),
-            "public_suffix_entry_count": sum(
-                1
-                for source_entries in worker_source_entries[worker_id].values()
-                for prepared_entry in source_entries
-                if prepared_entry.entry.is_public_suffix_input
-                or not prepared_entry.entry.registrable_domain
-            ),
         }
         for worker_id in worker_ids
     ]
@@ -673,26 +665,8 @@ def _assign_prepared_entries_to_workers(
         )
         assign_root(worker_id, registrable_domain)
 
-    for prepared_entry in sorted(
-        planning_inputs.public_suffix_entries,
-        key=_entry_sort_key,
-    ):
-        worker_id = _choose_balanced_worker(
-            worker_ids=worker_ids,
-            entry_counts=worker_entry_counts,
-        )
-        worker_source_entries[worker_id][prepared_entry.source_id].append(
-            prepared_entry
-        )
-        worker_entry_counts[worker_id] += 1
-        logger.debug(
-            "Batch preparation assigned public-suffix input host=%s worker=%s",
-            prepared_entry.entry.host,
-            worker_id,
-        )
     _log_prepared_assignment_summary(
         worker_ids=worker_ids,
-        worker_source_entries=worker_source_entries,
         worker_root_plans=worker_root_plans,
         worker_entry_counts=worker_entry_counts,
     )
@@ -749,9 +723,7 @@ def prepare_batch(
     )
     config_name = str(prepared_inputs.config["config_name"])
     planning_inputs = _planning_inputs_from_prepared(prepared_inputs)
-    total_work_units = len(planning_inputs.root_plans) + len(
-        planning_inputs.public_suffix_entries
-    )
+    total_work_units = len(planning_inputs.root_plans)
     if total_work_units < 1 and not prepared_inputs.preparation_review_rows:
         raise ValueError("config produced no input lines to process")
     participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]

@@ -203,9 +203,12 @@ class AsyncCacheWriter:
         try:
             while True:
                 request = await self.queue.get()
-                if request is None:
-                    return
-                await asyncio.to_thread(self.handler, cache, request)
+                try:
+                    if request is None:
+                        return
+                    await asyncio.to_thread(self.handler, cache, request)
+                finally:
+                    self.queue.task_done()
         finally:
             cache.close()
 

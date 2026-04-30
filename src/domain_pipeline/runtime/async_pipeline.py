@@ -1,4 +1,4 @@
-"""Workflow-owned DNS actionability runtime."""
+"""Worker-local async DNS actionability runtime."""
 
 from __future__ import annotations
 
@@ -23,9 +23,23 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_MANUAL_FILTER_PASSED,
 )
 from domain_pipeline.io.parser import DomainListParser, ParsedDomainEntry
-from domain_pipeline.runtime.cache_async import CacheHitSource, AsyncCacheReadFacade
-from domain_pipeline.runtime.contracts import CompletedHostResult
+from domain_pipeline.runtime.cache_async import CacheHitSource
+from domain_pipeline.runtime.contracts import (
+    CompletedHostResult,
+    DelegationCacheWriteRequest,
+    GeoCacheWriteRequest,
+    GeoWorkItem,
+    HostResolutionCacheWriteRequest,
+    HostResolutionWorkItem,
+    ParsedHostItem,
+)
 from domain_pipeline.runtime.history import PipelineCache, utc_now
+from domain_pipeline.runtime.orchestrator import (
+    CacheBundle,
+    QueueBundle,
+    build_cache_bundle,
+    build_queue_bundle,
+)
 from domain_pipeline.runtime.pipeline_runner import build_checker, build_source_jobs
 from domain_pipeline.runtime.pure_helpers import (
     build_base_row,
@@ -35,8 +49,18 @@ from domain_pipeline.runtime.pure_helpers import (
     host_resolution_skipped_classification,
     route_for_classification,
 )
+from domain_pipeline.runtime.transports import (
+    AsyncDelegationTransport,
+    AsyncGeoTransport,
+    AsyncHostResolutionTransport,
+)
 from domain_pipeline.runtime.writer import ResultCollectorWriter
 from domain_pipeline.shared import SourceJob
+from .async_constants import (
+    DELEGATION_STAGE_WORKERS,
+    GEO_STAGE_WORKERS,
+    HOST_RESOLUTION_STAGE_WORKERS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +97,7 @@ def _prepared_entries(
 
 
 class AsyncPipelineRuntime:
-    """Small sequential runtime with an async-compatible public entrypoint."""
+    """Worker-local async DAG for prepared and config-sourced runtime payloads."""
 
     def __init__(
         self,
@@ -91,11 +115,13 @@ class AsyncPipelineRuntime:
         cache_path = Path(cache_file) if cache_file else Path(".cache.sqlite3")
         baseline_cache_file = str(cache_payload.get("baseline_cache_file", "")).strip()
         baseline_cache_path = Path(baseline_cache_file) if baseline_cache_file else None
-        self.cache = PipelineCache.load(cache_path)
-        self.cache_reader = AsyncCacheReadFacade(
+        cache = PipelineCache.load(cache_path)
+        cache.close()
+        self.cache_bundle = build_cache_bundle(
             cache_path,
-            baseline_path=baseline_cache_path,
+            baseline_cache_path=baseline_cache_path,
         )
+        self.cache_reader = self.cache_bundle.reader
         self.cache_stats: Counter[str] = Counter()
 
     @classmethod
@@ -115,7 +141,7 @@ class AsyncPipelineRuntime:
 
     def close(self) -> None:
         """Close runtime resources."""
-        self.cache.close()
+        return
 
     def _delegation_from_cache_record(self, record: Any) -> DelegationResult:
         return DelegationResult(
@@ -171,20 +197,22 @@ class AsyncPipelineRuntime:
         if prefix == "host_resolution":
             self.cache_stats["dns_cache_misses"] += 1
 
-    def _lookup_delegation(
+    async def _lookup_delegation(
         self, job: SourceJob, entry: ParsedDomainEntry
     ) -> DelegationResult:
         checker = build_checker(job.config)
         resolver_key = checker.resolver_key()
         now = utc_now()
-        cached, source = self.cache_reader.get_fresh_delegation_sync_with_source(
+        cached, source = await self.cache_reader.get_fresh_delegation_with_source(
             entry.registrable_domain, resolver_key, now
         )
         if cached is not None:
             self._record_cache_hit("delegation", source)
             return self._delegation_from_cache_record(cached)
         self._record_cache_miss("delegation")
-        result = checker.delegation_lookup(entry.registrable_domain)
+        result = await AsyncDelegationTransport(checker).lookup(
+            entry.registrable_domain
+        )
         if result.status in {"timeout", "servfail"}:
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
@@ -193,55 +221,59 @@ class AsyncPipelineRuntime:
             if result.actionable
             else int(ttl_config["dns_delegation_unactionable"])
         )
-        self.cache.put_delegation(
-            domain=result.domain,
-            resolver_key=resolver_key,
-            ns_exists=result.ns_exists,
-            ns_nodata=result.ns_nodata,
-            ns_nxdomain=result.ns_nxdomain,
-            ns_timeout=result.ns_timeout,
-            ns_servfail=result.ns_servfail,
-            no_nameservers=result.no_nameservers,
-            nameservers=result.nameservers,
-            checked_at=now,
-            ttl_days=ttl_days,
+        await self.cache_bundle.writers[0].queue.put(
+            DelegationCacheWriteRequest(
+                domain=result.domain,
+                resolver_key=resolver_key,
+                ns_exists=result.ns_exists,
+                ns_nodata=result.ns_nodata,
+                ns_nxdomain=result.ns_nxdomain,
+                ns_timeout=result.ns_timeout,
+                ns_servfail=result.ns_servfail,
+                no_nameservers=result.no_nameservers,
+                nameservers=result.nameservers,
+                checked_at=now,
+                ttl_days=ttl_days,
+            )
         )
         return result
 
-    def _lookup_host_resolution(
+    async def _lookup_host_resolution(
         self, job: SourceJob, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional dns.host_resolution stage."""
         checker = build_checker(job.config)
         resolver_key = checker.resolver_key()
         now = utc_now()
-        cached, source = self.cache_reader.get_fresh_dns_sync_with_source(
+        cached, source = await self.cache_reader.get_fresh_dns_with_source(
             entry.host, resolver_key, now
         )
         if cached is not None:
             self._record_cache_hit("host_resolution", source)
             return self._host_resolution_from_cache_record(cached)
         self._record_cache_miss("host_resolution")
-        result = checker.host_resolution_lookup(entry.host)
+        result = await AsyncHostResolutionTransport(checker).lookup(entry.host)
         if result.status in {"timeout", "servfail"}:
             return result
-        self.cache.put_dns(
-            host=result.host,
-            resolver_key=resolver_key,
-            a_exists=result.a_exists,
-            a_nodata=result.a_nodata,
-            a_nxdomain=result.a_nxdomain,
-            a_timeout=result.a_timeout,
-            a_servfail=result.a_servfail,
-            canonical_name=result.canonical_name or "",
-            ipv4_addresses=result.ipv4_addresses,
-            ipv6_addresses=result.ipv6_addresses,
-            checked_at=now,
-            ttl_days=int(self.config["cache"].get("dns_ttl_days", 1)),
+        await self.cache_bundle.writers[1].queue.put(
+            HostResolutionCacheWriteRequest(
+                host=result.host,
+                resolver_key=resolver_key,
+                a_exists=result.a_exists,
+                a_nodata=result.a_nodata,
+                a_nxdomain=result.a_nxdomain,
+                a_timeout=result.a_timeout,
+                a_servfail=result.a_servfail,
+                canonical_name=result.canonical_name or "",
+                ipv4_addresses=result.ipv4_addresses,
+                ipv6_addresses=result.ipv6_addresses,
+                checked_at=now,
+                ttl_days=int(self.config["cache"].get("dns_ttl_days", 1)),
+            )
         )
         return result
 
-    def _lookup_geo(
+    async def _lookup_geo(
         self, job: SourceJob, host_resolution_result: HostResolutionResult
     ) -> tuple[str, list[IPGeoResult], Any | None]:
         geo_config = job.config["geo"]
@@ -253,7 +285,7 @@ class AsyncPipelineRuntime:
         missing_ips: list[str] = []
         seen_missing_ips: set[str] = set()
         for ip in host_resolution_result.resolved_ips:
-            cached, source = self.cache_reader.get_fresh_geo_sync_with_source(
+            cached, source = await self.cache_reader.get_fresh_geo_with_source(
                 provider_name, ip, now
             )
             if cached is not None:
@@ -272,19 +304,23 @@ class AsyncPipelineRuntime:
                     timeout=float(geo_config.get("timeout", 5.0)),
                     token=str(geo_config.get("token", "")),
                 )
-                fetched_results = provider.lookup_ips(missing_ips)
+                fetched_results = await AsyncGeoTransport(provider).lookup_ips(
+                    missing_ips
+                )
             fetched_by_ip = {result.ip: result for result in fetched_results}
             for result in fetched_results:
                 if not result.usable or result.status == GEO_STATUS_CACHE_HIT:
                     continue
-                self.cache.put_geo(
-                    provider=provider_name,
-                    ip=result.ip,
-                    country_code=result.country_code,
-                    region_code=result.region_code,
-                    region_name=result.region_name,
-                    checked_at=now,
-                    ttl_days=int(geo_config.get("cache_ttl_days", 7)),
+                await self.cache_bundle.writers[2].queue.put(
+                    GeoCacheWriteRequest(
+                        provider=provider_name,
+                        ip=result.ip,
+                        country_code=result.country_code,
+                        region_code=result.region_code,
+                        region_name=result.region_name,
+                        checked_at=now,
+                        ttl_days=int(geo_config.get("cache_ttl_days", 7)),
+                    )
                 )
             results = [
                 cached_results[ip] if ip in cached_results else fetched_by_ip[ip]
@@ -303,7 +339,7 @@ class AsyncPipelineRuntime:
             policy,
         )
 
-    def _complete(
+    def _completed_result(
         self,
         *,
         job: SourceJob,
@@ -314,7 +350,7 @@ class AsyncPipelineRuntime:
         geo_results: list[IPGeoResult] | None = None,
         geo_policy: Any | None = None,
         provenance: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> CompletedHostResult:
         provenance = provenance or {}
         row = build_base_row(
             job=job,
@@ -329,110 +365,204 @@ class AsyncPipelineRuntime:
             source_ids=tuple(provenance.get("source_ids", ())),
             source_input_labels=tuple(provenance.get("source_input_labels", ())),
         )
-        self.writer.add(
-            CompletedHostResult(
-                job=job,
-                entry=entry,
-                classification=classification,
-                route=route_for_classification(classification),
-                row=row,
-                delegation_result=delegation_result,
-                host_resolution_result=host_resolution_result,
-                geo_results=geo_results or [],
-                geo_policy=geo_policy,
-            )
-        )
-
-    def _process_entry(
-        self, job: SourceJob, entry: ParsedDomainEntry, provenance: dict[str, Any]
-    ) -> None:
-        if entry.is_public_suffix_input or not entry.registrable_domain:
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
-                provenance=provenance,
-            )
-            return
-        delegation_result = self._lookup_delegation(job, entry)
-        delegation_classification = classify_delegation(delegation_result)
-        if not delegation_result.actionable:
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=delegation_classification,
-                delegation_result=delegation_result,
-                provenance=provenance,
-            )
-            return
-        if provenance.get("manual_filter_pass"):
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
-                delegation_result=delegation_result,
-                provenance=provenance,
-            )
-            return
-        if provenance.get("manual_add"):
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=CLASSIFICATION_MANUAL_ADD_ACTIONABLE,
-                delegation_result=delegation_result,
-                provenance=provenance,
-            )
-            return
-        dns_config = job.config["dns"]
-        if not bool(dns_config.get("host_resolution", {}).get("enabled", False)):
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=host_resolution_skipped_classification(),
-                delegation_result=delegation_result,
-                provenance=provenance,
-            )
-            return
-        host_resolution_result = self._lookup_host_resolution(job, entry)
-        host_classification = classify_host_resolution(host_resolution_result)
-        if route_for_classification(host_classification) == "review":
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=host_classification,
-                delegation_result=delegation_result,
-                host_resolution_result=host_resolution_result,
-                provenance=provenance,
-            )
-            return
-        if not bool(job.config["geo"].get("enabled", False)):
-            self._complete(
-                job=job,
-                entry=entry,
-                classification=host_classification,
-                delegation_result=delegation_result,
-                host_resolution_result=host_resolution_result,
-                provenance=provenance,
-            )
-            return
-        geo_classification, geo_results, geo_policy = self._lookup_geo(
-            job, host_resolution_result
-        )
-        self._complete(
+        return CompletedHostResult(
             job=job,
             entry=entry,
-            classification=geo_classification,
+            classification=classification,
+            route=route_for_classification(classification),
+            row=row,
             delegation_result=delegation_result,
             host_resolution_result=host_resolution_result,
-            geo_results=geo_results,
+            geo_results=geo_results or [],
             geo_policy=geo_policy,
-            provenance=provenance,
         )
 
-    def run(self) -> int:
-        """Run the prepared or config-sourced pipeline."""
+    async def _put_completed(
+        self,
+        queue_bundle: QueueBundle,
+        parsed: ParsedHostItem,
+        *,
+        classification: str,
+        delegation_result: DelegationResult | None = None,
+        host_resolution_result: HostResolutionResult | None = None,
+        geo_results: list[IPGeoResult] | None = None,
+        geo_policy: Any | None = None,
+    ) -> None:
+        await queue_bundle.result_queue.put(
+            self._completed_result(
+                job=parsed.job,
+                entry=parsed.entry,
+                classification=classification,
+                delegation_result=delegation_result,
+                host_resolution_result=host_resolution_result,
+                geo_results=geo_results,
+                geo_policy=geo_policy,
+                provenance={
+                    "source_id_override": parsed.source_id_override,
+                    "source_input_label_override": parsed.source_input_label_override,
+                    "source_ids": parsed.source_ids,
+                    "source_input_labels": parsed.source_input_labels,
+                },
+            )
+        )
+
+    async def _delegation_worker(self, queue_bundle: QueueBundle) -> None:
+        """Consume worker-local delegation input and route each result."""
+        while True:
+            parsed = await queue_bundle.delegation_input.get()
+            try:
+                if parsed is None:
+                    return
+                if (
+                    parsed.entry.is_public_suffix_input
+                    or not parsed.entry.registrable_domain
+                ):
+                    await self._put_completed(
+                        queue_bundle,
+                        parsed,
+                        classification=CLASSIFICATION_INPUT_PUBLIC_SUFFIX,
+                    )
+                    continue
+                delegation_result = await self._lookup_delegation(
+                    parsed.job, parsed.entry
+                )
+                await self._route_delegation_result(
+                    queue_bundle, parsed, delegation_result
+                )
+            finally:
+                queue_bundle.delegation_input.task_done()
+
+    async def _route_delegation_result(
+        self,
+        queue_bundle: QueueBundle,
+        parsed: ParsedHostItem,
+        delegation_result: DelegationResult,
+    ) -> None:
+        delegation_classification = classify_delegation(delegation_result)
+        if not delegation_result.actionable:
+            await self._put_completed(
+                queue_bundle,
+                parsed,
+                classification=delegation_classification,
+                delegation_result=delegation_result,
+            )
+            return
+        if parsed.manual_filter_pass:
+            await self._put_completed(
+                queue_bundle,
+                parsed,
+                classification=CLASSIFICATION_MANUAL_FILTER_PASSED,
+                delegation_result=delegation_result,
+            )
+            return
+        if parsed.manual_add:
+            await self._put_completed(
+                queue_bundle,
+                parsed,
+                classification=CLASSIFICATION_MANUAL_ADD_ACTIONABLE,
+                delegation_result=delegation_result,
+            )
+            return
+        dns_config = parsed.job.config["dns"]
+        if not bool(dns_config.get("host_resolution", {}).get("enabled", False)):
+            await self._put_completed(
+                queue_bundle,
+                parsed,
+                classification=host_resolution_skipped_classification(),
+                delegation_result=delegation_result,
+            )
+            return
+        await queue_bundle.delegation_to_host_resolution.put(
+            HostResolutionWorkItem(parsed=parsed, delegation_result=delegation_result)
+        )
+
+    async def _host_resolution_worker(self, queue_bundle: QueueBundle) -> None:
+        """Consume host-resolution work and route review, filtered, or geo cases."""
+        while True:
+            work_item = await queue_bundle.delegation_to_host_resolution.get()
+            try:
+                if work_item is None:
+                    return
+                host_resolution_result = await self._lookup_host_resolution(
+                    work_item.parsed.job, work_item.parsed.entry
+                )
+                await self._route_host_resolution_result(
+                    queue_bundle, work_item, host_resolution_result
+                )
+            finally:
+                queue_bundle.delegation_to_host_resolution.task_done()
+
+    async def _route_host_resolution_result(
+        self,
+        queue_bundle: QueueBundle,
+        work_item: HostResolutionWorkItem,
+        host_resolution_result: HostResolutionResult,
+    ) -> None:
+        host_classification = classify_host_resolution(host_resolution_result)
+        if route_for_classification(host_classification) == "review":
+            await self._put_completed(
+                queue_bundle,
+                work_item.parsed,
+                classification=host_classification,
+                delegation_result=work_item.delegation_result,
+                host_resolution_result=host_resolution_result,
+            )
+            return
+        if not bool(work_item.parsed.job.config["geo"].get("enabled", False)):
+            await self._put_completed(
+                queue_bundle,
+                work_item.parsed,
+                classification=host_classification,
+                delegation_result=work_item.delegation_result,
+                host_resolution_result=host_resolution_result,
+            )
+            return
+        await queue_bundle.host_resolution_to_geo.put(
+            GeoWorkItem(
+                parsed=work_item.parsed,
+                delegation_result=work_item.delegation_result,
+                host_resolution_result=host_resolution_result,
+                classification=host_classification,
+            )
+        )
+
+    async def _geo_worker(self, queue_bundle: QueueBundle) -> None:
+        """Consume geo work and emit terminal policy results."""
+        while True:
+            work_item = await queue_bundle.host_resolution_to_geo.get()
+            try:
+                if work_item is None:
+                    return
+                geo_classification, geo_results, geo_policy = await self._lookup_geo(
+                    work_item.parsed.job, work_item.host_resolution_result
+                )
+                await self._put_completed(
+                    queue_bundle,
+                    work_item.parsed,
+                    classification=geo_classification,
+                    delegation_result=work_item.delegation_result,
+                    host_resolution_result=work_item.host_resolution_result,
+                    geo_results=geo_results,
+                    geo_policy=geo_policy,
+                )
+            finally:
+                queue_bundle.host_resolution_to_geo.task_done()
+
+    async def _result_writer(self, queue_bundle: QueueBundle) -> None:
+        """Drain terminal results into the deterministic writer buffer."""
+        while True:
+            result = await queue_bundle.result_queue.get()
+            try:
+                if result is None:
+                    return
+                self.writer.add(result)
+            finally:
+                queue_bundle.result_queue.task_done()
+
+    def _source_jobs(self) -> list[SourceJob]:
+        """Return source jobs for prepared workflow or direct runtime modes."""
         if self.prepared_metadata:
-            jobs = [
+            return [
                 SourceJob(
                     source_id=str(source["id"]),
                     input_label=str(
@@ -446,14 +576,17 @@ class AsyncPipelineRuntime:
                 for source in self.config["sources"]
                 if source.get("enabled", True)
             ]
-        else:
-            jobs = build_source_jobs(self.config)
+        return build_source_jobs(self.config)
+
+    def _runtime_items(self) -> list[ParsedHostItem]:
+        """Build worker-local items that seed the delegation input queue."""
         parser = DomainListParser()
-        for job in jobs:
+        item_payloads: list[tuple[SourceJob, ParsedDomainEntry, dict[str, Any]]] = []
+        for job in self._source_jobs():
             prepared_entries = _prepared_entries(job, self.prepared_metadata)
             if prepared_entries:
                 for entry, provenance in prepared_entries:
-                    self._process_entry(job, entry, provenance)
+                    item_payloads.append((job, entry, provenance))
                 continue
             forced_format = job.config.get("input", {}).get("format", "auto")
             for entry in parser.process_entries(
@@ -461,14 +594,134 @@ class AsyncPipelineRuntime:
                 source_name=job.input_label,
                 forced_format=None if forced_format == "auto" else forced_format,
             ):
-                self._process_entry(job, entry, {})
-        writer_result = self.writer.write()
-        logger.info(
-            "Pipeline emitted counts=%s outputs=%s",
-            dict(writer_result.counts),
-            writer_result.output_paths,
-        )
-        return 0
+                item_payloads.append((job, entry, {}))
+        total = len(item_payloads)
+        return [
+            ParsedHostItem(
+                job=job,
+                entry=entry,
+                sequence=index,
+                total=total,
+                manual_filter_pass=bool(provenance.get("manual_filter_pass", False)),
+                manual_add=bool(provenance.get("manual_add", False)),
+                source_id_override=provenance.get("source_id_override"),
+                source_input_label_override=provenance.get(
+                    "source_input_label_override"
+                ),
+                source_ids=tuple(provenance.get("source_ids", ())),
+                source_input_labels=tuple(provenance.get("source_input_labels", ())),
+            )
+            for index, (job, entry, provenance) in enumerate(item_payloads)
+        ]
+
+    async def _load_delegation_input(self, queue_bundle: QueueBundle) -> None:
+        """Seed the first worker-local queue from runtime payload entries."""
+        for item in self._runtime_items():
+            await queue_bundle.delegation_input.put(item)
+        for _ in range(DELEGATION_STAGE_WORKERS):
+            await queue_bundle.delegation_input.put(None)
+
+    async def _join_or_raise(
+        self,
+        queue: asyncio.Queue[Any],
+        watched_tasks: list[asyncio.Task[Any]],
+    ) -> None:
+        """Wait for a queue to drain while surfacing worker task failures."""
+        join_task = asyncio.create_task(queue.join())
+        try:
+            while not join_task.done():
+                active_tasks = [task for task in watched_tasks if not task.done()]
+                done, _pending = await asyncio.wait(
+                    [join_task, *active_tasks],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    if task is join_task:
+                        continue
+                    exception = task.exception()
+                    if exception is not None:
+                        raise exception
+            await join_task
+        finally:
+            if not join_task.done():
+                join_task.cancel()
+
+    async def _stop_cache_writers(
+        self,
+        cache_bundle: CacheBundle,
+        cache_tasks: list[asyncio.Task[Any]],
+    ) -> None:
+        """Drain and stop cache writers after all stage workers have stopped."""
+        for writer in cache_bundle.writers:
+            await writer.queue.join()
+        for writer in cache_bundle.writers:
+            await writer.queue.put(None)
+        await asyncio.gather(*cache_tasks)
+
+    async def run_async(self) -> int:
+        """Run the prepared or config-sourced pipeline through async stage queues."""
+        queue_bundle = build_queue_bundle()
+        loader_task = asyncio.create_task(self._load_delegation_input(queue_bundle))
+        delegation_tasks = [
+            asyncio.create_task(self._delegation_worker(queue_bundle))
+            for _ in range(DELEGATION_STAGE_WORKERS)
+        ]
+        host_resolution_tasks = [
+            asyncio.create_task(self._host_resolution_worker(queue_bundle))
+            for _ in range(HOST_RESOLUTION_STAGE_WORKERS)
+        ]
+        geo_tasks = [
+            asyncio.create_task(self._geo_worker(queue_bundle))
+            for _ in range(GEO_STAGE_WORKERS)
+        ]
+        result_task = asyncio.create_task(self._result_writer(queue_bundle))
+        cache_tasks = [
+            asyncio.create_task(writer.run()) for writer in self.cache_bundle.writers
+        ]
+        all_tasks = [
+            loader_task,
+            *delegation_tasks,
+            *host_resolution_tasks,
+            *geo_tasks,
+            result_task,
+            *cache_tasks,
+        ]
+        try:
+            await loader_task
+            await self._join_or_raise(queue_bundle.delegation_input, delegation_tasks)
+            await asyncio.gather(*delegation_tasks)
+            for _ in range(HOST_RESOLUTION_STAGE_WORKERS):
+                await queue_bundle.delegation_to_host_resolution.put(None)
+            await self._join_or_raise(
+                queue_bundle.delegation_to_host_resolution,
+                host_resolution_tasks,
+            )
+            await asyncio.gather(*host_resolution_tasks)
+            for _ in range(GEO_STAGE_WORKERS):
+                await queue_bundle.host_resolution_to_geo.put(None)
+            await self._join_or_raise(queue_bundle.host_resolution_to_geo, geo_tasks)
+            await asyncio.gather(*geo_tasks)
+            await self._join_or_raise(queue_bundle.result_queue, [result_task])
+            await queue_bundle.result_queue.put(None)
+            await result_task
+            await self._stop_cache_writers(self.cache_bundle, cache_tasks)
+            writer_result = self.writer.write()
+            logger.info(
+                "Pipeline emitted counts=%s outputs=%s",
+                dict(writer_result.counts),
+                writer_result.output_paths,
+            )
+            return 0
+        except Exception:
+            for task in all_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+            raise
+
+    def run(self) -> int:
+        """Run the async DAG from synchronous compatibility callers."""
+        return asyncio.run(self.run_async())
 
 
 async def run_prepared_pipeline_async(
@@ -486,9 +739,7 @@ async def run_prepared_pipeline_async(
     )
     try:
         if max_runtime_seconds is None:
-            return await asyncio.to_thread(runtime.run)
-        return await asyncio.wait_for(
-            asyncio.to_thread(runtime.run), timeout=max_runtime_seconds
-        )
+            return await runtime.run_async()
+        return await asyncio.wait_for(runtime.run_async(), timeout=max_runtime_seconds)
     finally:
         runtime.close()
