@@ -85,7 +85,7 @@ jobs:
       - name: Upload validation artifact
         uses: actions/upload-artifact@v7
         with:
-          name: validation-settings
+          name: debug-validation-settings
           path: .debug_artifacts/prepare/validation
           include-hidden-files: true
           if-no-files-found: error
@@ -115,7 +115,7 @@ jobs:
       - name: Upload prepared batch artifact
         uses: actions/upload-artifact@v7
         with:
-          name: prepared-batch
+          name: workflow-internal-prepared-batch
           path: .tmp/prepared_batch
           include-hidden-files: true
           if-no-files-found: error
@@ -128,7 +128,7 @@ jobs:
       - name: Upload prepared batch debug artifact
         uses: actions/upload-artifact@v7
         with:
-          name: prepared-batch-debug
+          name: debug-prepared-batch
           path: .debug_artifacts/prepare/batch
           include-hidden-files: true
           if-no-files-found: error
@@ -235,7 +235,7 @@ jobs:
       - name: Download prepared batch artifact
         uses: actions/download-artifact@v8
         with:
-          name: prepared-batch
+          name: workflow-internal-prepared-batch
           path: .tmp/prepared_batch
       - name: Restore prepared batch state
         run: |
@@ -316,7 +316,7 @@ jobs:
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: worker-${{ matrix.worker_id }}
+          name: workflow-internal-worker-bundle-${{ matrix.worker_id }}
           path: .tmp/worker_bundle
           include-hidden-files: true
           if-no-files-found: error
@@ -335,7 +335,7 @@ jobs:
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: worker-debug-${{ matrix.worker_id }}
+          name: debug-worker-log-${{ matrix.worker_id }}
           path: .tmp/worker_debug_bundle
           include-hidden-files: true
           if-no-files-found: error
@@ -472,9 +472,9 @@ jobs:
           set -eo pipefail
           mkdir -p .workflow_state
           cp -R \
-            ".tmp/downloads/prepared-batch/.workflow_state/." \
+            ".tmp/downloads/workflow-internal-prepared-batch/.workflow_state/." \
             .workflow_state/
-          for worker_dir in .tmp/downloads/worker-*; do
+          for worker_dir in .tmp/downloads/workflow-internal-worker-bundle-*; do
             [ -d "${worker_dir}" ] || continue
             if [ -d "${worker_dir}/.workflow_state/workers" ]; then
               mkdir -p .workflow_state/workers
@@ -484,6 +484,9 @@ jobs:
               mkdir -p .workflow_state/status
               cp -R "${worker_dir}/.workflow_state/status/." .workflow_state/status/
             fi
+          done
+          for worker_dir in .tmp/downloads/debug-worker-log-*; do
+            [ -d "${worker_dir}" ] || continue
             # aggregate_batch merges worker logs from .debug_artifacts/workers.
             if [ -d "${worker_dir}/.debug_artifacts/workers" ]; then
               echo "restoring worker debug logs from ${worker_dir}"
@@ -561,13 +564,13 @@ jobs:
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/jsonl-log"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs"
           mkdir -p ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs"
-          cp .tmp/downloads/validation-settings/logs/settings.json \
+          cp .tmp/downloads/debug-validation-settings/logs/settings.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/settings.json"
-          cp .tmp/downloads/validation-settings/logs/validate-settings.log \
+          cp .tmp/downloads/debug-validation-settings/logs/validate-settings.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/validation-settings/logs/validate-settings.log"
-          cp .tmp/downloads/prepared-batch-debug/logs/batch.json \
+          cp .tmp/downloads/debug-prepared-batch/logs/batch.json \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/batch.json"
-          cp .tmp/downloads/prepared-batch-debug/logs/prepare-batch.log \
+          cp .tmp/downloads/debug-prepared-batch/logs/prepare-batch.log \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/prepared-batch/logs/prepare-batch.log"
           cp \
             ".debug_artifacts/runtime/raw/${{ steps.config.outputs.config_name }}.jsonl" \
@@ -578,10 +581,10 @@ jobs:
           cp \
             ".debug_artifacts/runtime/logs/${{ steps.config.outputs.config_name }}--aggregate.log" \
             ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ steps.config.outputs.config_name }}--aggregate.log"
-          for worker_dir in .tmp/downloads/worker-debug-*; do
+          for worker_dir in .tmp/downloads/debug-worker-log-*; do
             [ -d "${worker_dir}" ] || continue
             artifact_name="${worker_dir##*/}"
-            worker_id="${artifact_name#worker-debug-}"
+            worker_id="${artifact_name#debug-worker-log-}"
             worker_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/worker.log"
             if [ -f "${worker_log_path}" ]; then
               cp "${worker_log_path}" ".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/worker-logs/${worker_id}.log"
@@ -717,7 +720,7 @@ jobs:
         if: ${{ always() && (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') }}
         uses: actions/upload-artifact@v7
         with:
-          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
+          name: debug-automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
           path: .debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
           if-no-files-found: ignore
       - name: Fail failed aggregate runs
