@@ -256,6 +256,26 @@ jobs:
             --worker-id "${{ matrix.worker_id }}" \
             | tee init.json
           echo "participates=$(jq -r '.participates' init.json)" >> "$GITHUB_OUTPUT"
+      - name: Log runner public network addresses
+        if: ${{ steps.init.outputs.participates == 'true' }}
+        run: |
+          set -eo pipefail
+          mkdir -p .tmp
+          address_log_path=".tmp/runner-public-addresses.log"
+          : > "${address_log_path}"
+
+          capture_public_address() {
+            label="$1"
+            shift
+            if address="$(curl -fsS --max-time 10 "$@")"; then
+              echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ${label}=${address}" | tee -a "${address_log_path}"
+            else
+              echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ${label}=unavailable" | tee -a "${address_log_path}"
+            fi
+          }
+
+          capture_public_address "ipv4" -4 "https://api.ipify.org"
+          capture_public_address "ipv6" -6 "https://api6.ipify.org"
       - name: Process worker assignment
         id: process
         if: ${{ steps.init.outputs.participates == 'true' }}
@@ -295,6 +315,21 @@ jobs:
             --push-retry-count 0 \
             --fallback-conclusion failure \
             --fallback-failure-reason "worker job failed before terminal statuses were written"
+      - name: Append runner public network addresses to worker log
+        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        run: |
+          set -eo pipefail
+          worker_log_path=".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
+          mkdir -p "$(dirname "${worker_log_path}")"
+          {
+            echo "=== Runner public network addresses ==="
+            if [ -f ".tmp/runner-public-addresses.log" ]; then
+              cat ".tmp/runner-public-addresses.log"
+            else
+              echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ipv4=unavailable"
+              echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ipv6=unavailable"
+            fi
+          } >> "${worker_log_path}"
       - name: Stage worker artifact
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         run: |
