@@ -136,6 +136,7 @@ apcta.com
 api-vod-qcloud.com
 apigwtencent.com
 aqtwpc.com
+aqyun.com
 as01271kkp.xyz
 asia-cdn.com
 asit.cc
@@ -235,6 +236,7 @@ cloudstudio.club
 cloudstudio.net
 cloudstudio.run
 cloudstudio.work
+clqctxc.com
 cn0-6.com
 cnb.cool
 cnjournals.com
@@ -493,7 +495,6 @@ gyqqd.com
 gzap.net
 gzjpad.com
 gzweicai.com
-gzzoo.com
 h12.net
 h5cn.com
 hacker5t2ohub.com
@@ -510,6 +511,7 @@ hbynet.net
 hechangshipin.com
 heclife.com
 heeeepin.com
+heistbeer.com
 helmicro.com
 henanbojin.com
 hgs001.com
@@ -697,6 +699,7 @@ mjxpay.com
 mmatch.tech
 mmbang.com
 mmbang.net
+mopair-erm.net
 moraex.com
 moziqing.com
 mps.live
@@ -879,7 +882,6 @@ sddcp.com
 sdxietong.com
 sea-group.org
 seehu.net
-semsay.com
 servicewechat.com
 sh-azjiadeli.com
 shanghaiconcerthall.org
@@ -952,6 +954,7 @@ tadsim.net
 taicent.com
 tairos.net
 tairos.tech
+tamlab.net
 tan14.net
 tanlive.com
 taurusxin.com
@@ -962,7 +965,9 @@ tcdnlp.com
 tcdnos.com
 tcdnvod.com
 tchy.net
+tcloudbaseapi.com
 tcloudbasegateway.com
+tcloudbi.com
 tcloudedu.com
 tcloudscdn.com
 tcloudscdn.net
@@ -1003,6 +1008,7 @@ tdnsv6.net
 tdnsv7.com
 tdnsv7.net
 tdnsv8.com
+tdnsv8.net
 tdnsv9.com
 tdnsv9.net
 tdnsvodovs1.com
@@ -1102,6 +1108,7 @@ tlbsbigdata.com
 tlinkaccess2.com
 tliveapi2.com
 tliveauth2.com
+tlivecdn.com
 tlivecdnv3.com
 tlivecdnv4.com
 tlivecontroller2.com
@@ -1129,6 +1136,7 @@ tmecd.com
 tmigrate.com
 tnebula.net
 tongbusj.com
+tongmengguo.com
 tonki-tpms.com
 totren.com
 touxiang88.com
@@ -1227,6 +1235,7 @@ vvhan.com
 vzidc.com
 w333.com
 w3h5.com
+w4vwizxrvepq.com
 wangzherongyao.com
 wansf.com
 wapone.net
@@ -1382,6 +1391,7 @@ zhaolaobanla.com
 zhaoqianwang.com
 zhelin.me
 zhengxinonly.com
+zhengzhaopai.com
 zhiqi.info
 zhongguose.com
 zhuoyue78.com
