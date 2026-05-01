@@ -16,12 +16,19 @@ defaults:
     request_timeout: 30.0
 
   dns:
+    # Empty nameservers keep the platform resolver for delegation-only block
+    # checks. Worker-local rate limiting still protects this resolver path.
     nameservers: []
     timeout: 5.0
     ecs:
       enabled: false
       subnet: ""
       scope_prefix_length: 0
+    query_rate_limit:
+      enabled: true
+    query_balancer:
+      enabled: true
+      strategy: round_robin
     delegation:
       retry_attempts: 3
     host_resolution:
@@ -36,6 +43,11 @@ cache:
     dns_delegation_actionable: 7
     dns_delegation_unactionable: 1
   dns_ttl_days: 7
+  dns_host_resolution_ttl_days:
+    resolved: 7
+    nodata: 1
+    nxdomain: 1
+    unknown: 0
 
 sources:
   - id: block

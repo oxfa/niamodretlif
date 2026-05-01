@@ -172,6 +172,14 @@ def public_review_classification(row: dict[str, Any]) -> str:
 def review_reason_for_row(row: dict[str, Any]) -> str:
     """Return a user-facing reason for why one row landed in review output."""
     classification = str(row.get("classification", ""))
+    host_resolution_reason = str(row.get("host_resolution_reason", ""))
+    host_resolution_status = str(row.get("host_resolution_status", ""))
+    if (
+        classification in HOST_RESOLUTION_REVIEW_CLASSIFICATIONS
+        and host_resolution_reason
+        and host_resolution_reason != host_resolution_status
+    ):
+        return host_resolution_reason
     reason_by_classification = {
         CLASSIFICATION_INPUT_PUBLIC_SUFFIX: (
             "input is a public suffix rather than a registrable host"
@@ -268,7 +276,7 @@ def build_base_row(
             else "skipped"
         ),
         "host_resolution_reason": (
-            host_resolution_result.status
+            host_resolution_result.reason
             if host_resolution_result is not None
             else "skipped"
         ),
