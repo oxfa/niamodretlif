@@ -556,7 +556,7 @@ jobs:
           set -eo pipefail
           mkdir -p "$(dirname "${AGGREGATE_LOG_PATH}")"
           : >> "${AGGREGATE_LOG_PATH}"
-          artifact_root=".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}"
+          artifact_root=".debug_artifacts/upload_bundle/debug-automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}"
           copy_if_present() {
             source_path="$1"
             target_path="$2"
@@ -728,7 +728,7 @@ jobs:
           : >> "${AGGREGATE_LOG_PATH}"
           # Refresh the staged artifact from the final aggregate log after the
           # later publish/upload-intent steps have appended to AGGREGATE_LOG_PATH.
-          staged_aggregate_log_path=".debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ inputs.config_name }}--aggregate.log"
+          staged_aggregate_log_path=".debug_artifacts/upload_bundle/debug-automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}/runtime-logs/${{ inputs.config_name }}--aggregate.log"
           mkdir -p "$(dirname "${staged_aggregate_log_path}")"
           echo "refreshing staged aggregate job log source=${AGGREGATE_LOG_PATH} target=${staged_aggregate_log_path}" | tee -a "${AGGREGATE_LOG_PATH}"
           cp "${AGGREGATE_LOG_PATH}" "${staged_aggregate_log_path}"
@@ -736,8 +736,8 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
-          path: .debug_artifacts/upload_bundle/automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
+          name: debug-automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
+          path: .debug_artifacts/upload_bundle/debug-automation-log-${{ inputs.config_name }}-${{ needs.prepare_run.outputs.batch_id }}
           include-hidden-files: true
           if-no-files-found: error
       - name: Fail failed aggregate runs
