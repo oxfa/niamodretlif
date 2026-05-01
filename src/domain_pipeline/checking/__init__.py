@@ -22,8 +22,10 @@ from .dns_query_coordinator import (
     PROVIDER_CLOUDFLARE_PUBLIC_DNS,
     PROVIDER_CUSTOM,
     PROVIDER_GOOGLE_PUBLIC_DNS,
+    PROVIDER_OPENDNS_PUBLIC_DNS,
     PROVIDER_QUAD9_ECS,
-    PROVIDER_SYSTEM,
+    PROVIDER_SYSTEM_RESOLVER,
+    SYSTEM_NAMESERVER,
     provider_for_nameserver,
 )
 from .ip_geo import (
@@ -69,8 +71,10 @@ __all__ = [
     "PROVIDER_CLOUDFLARE_PUBLIC_DNS",
     "PROVIDER_CUSTOM",
     "PROVIDER_GOOGLE_PUBLIC_DNS",
+    "PROVIDER_OPENDNS_PUBLIC_DNS",
     "PROVIDER_QUAD9_ECS",
-    "PROVIDER_SYSTEM",
+    "PROVIDER_SYSTEM_RESOLVER",
+    "SYSTEM_NAMESERVER",
     "RetryableDNSLookupError",
     "build_geo_provider",
     "classify",

@@ -39,8 +39,9 @@ defaults:
 
   dns:
     # Resolver pool settings for both DNS stages.
-    # Entries must be literal IPv4 or IPv6 resolver addresses. Leave empty to
-    # use the platform resolver unless ECS forces a verified public resolver.
+    # Entries must be literal IPv4/IPv6 resolver addresses or the literal
+    # "system_resolver" to include the platform resolver. Leave empty to use
+    # only the platform resolver unless ECS forces a verified public resolver.
     # ECS-enabled public pools should use resolvers that preserve ECS behavior,
     # such as Google Public DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS
     # (9.9.9.11, 149.112.112.11). Cloudflare 1.1.1.1 and Cisco Umbrella are
@@ -59,17 +60,23 @@ defaults:
       # specific resolver-side requirement.
       scope_prefix_length: 0
     # Worker-local DNS safety limits. These defaults are intentionally below
-    # documented public provider limits because GitHub Actions worker_count can
-    # multiply aggregate traffic and standard hosted runners do not guarantee a
-    # stable dedicated egress IP. Official limits referenced by these defaults:
+    # documented public provider limits where a numeric public limit exists
+    # because GitHub Actions worker_count can multiply aggregate traffic and
+    # standard hosted runners do not guarantee a stable dedicated egress IP.
+    # Official data inspected on 2026-05-01:
     # Azure platform resolver: 1000 QPS and 200 pending queries per VM.
     # Google Public DNS: rate-increase guidance starts above 1500 QPS per
     # client IPv4 address or IPv6 /64. Quad9 asks organizations to contact
-    # support above 500 QPS from one egress IP.
+    # support above 500 QPS from one egress IP. Cloudflare publishes no numeric
+    # public QPS limit and warns high-rate/proxied/high-SERVFAIL traffic may be
+    # rate limited. Cisco Umbrella/OpenDNS documents 5000 DNS queries per
+    # Covered User per day as a monthly DNS Security average, not a public
+    # per-client QPS ceiling. Cloudflare/OpenDNS values below are conservative
+    # project caps, not official numeric QPS limits.
     query_rate_limit:
       enabled: true
       providers:
-        system:
+        system_resolver:
           qps_per_worker: 50.0
           burst: 50
           max_pending: 100
@@ -82,9 +89,13 @@ defaults:
           burst: 25
           max_pending: 50
         cloudflare_public_dns:
-          qps_per_worker: 50.0
-          burst: 50
-          max_pending: 100
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
+        opendns_public_dns:
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
         custom:
           qps_per_worker: 25.0
           burst: 25
@@ -95,13 +106,29 @@ defaults:
     query_balancer:
       enabled: true
       strategy: round_robin
-    # Mandatory NS lookup for the parsed registrable domain. Timeout/SERVFAIL
-    # are retried up to this stage-specific attempt count and are not cached
-    # after retry exhaustion.
+    # Mandatory NS lookup for the parsed registrable domain. Stage-level
+    # nameservers/timeout/ecs/query_rate_limit/query_balancer override the
+    # top-level DNS resolver profile when present. This lets delegation use a
+    # non-ECS resolver profile while host resolution keeps ECS-capable resolvers.
+    # Timeout/SERVFAIL are retried up to this stage-specific attempt count and
+    # are not cached after retry exhaustion.
     delegation:
+      # Example non-ECS delegation pool:
+      # nameservers:
+      #   - system_resolver
+      #   - 1.1.1.1
+      #   - 1.0.0.1
+      #   - 208.67.222.222
+      #   - 208.67.220.220
+      # ecs:
+      #   enabled: false
+      #   subnet: ""
+      #   scope_prefix_length: 0
       retry_attempts: 3
-    # Optional exact-host A/AAAA/CNAME resolution. If enabled is omitted, the
-    # runtime defaults it to true when geo.enabled=true and false otherwise.
+    # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
+    # coordinator from delegation and inherits the top-level DNS resolver profile
+    # unless stage-level resolver fields are provided. If enabled is omitted,
+    # the runtime defaults it to true when geo.enabled=true and false otherwise.
     # Timeout/SERVFAIL use this stage-specific retry budget and are not cached
     # after retry exhaustion.
     host_resolution:

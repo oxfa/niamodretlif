@@ -223,7 +223,7 @@ class AsyncPipelineRuntime:
         self, job: SourceJob, entry: ParsedDomainEntry
     ) -> DelegationResult:
         checker = build_checker(job.config)
-        resolver_key = checker.resolver_key()
+        resolver_key = checker.delegation_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_delegation_with_source(
             entry.registrable_domain, resolver_key, now
@@ -265,7 +265,7 @@ class AsyncPipelineRuntime:
     ) -> HostResolutionResult:
         """Run or cache-read the optional dns.host_resolution stage."""
         checker = build_checker(job.config)
-        resolver_key = checker.resolver_key()
+        resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_dns_with_source(
             entry.host, resolver_key, now

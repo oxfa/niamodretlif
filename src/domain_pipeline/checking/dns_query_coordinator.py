@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import dns.edns
 import dns.exception
 import dns.resolver
 
-PROVIDER_SYSTEM = "system"
+logger = logging.getLogger(__name__)
+
+PROVIDER_SYSTEM_RESOLVER = "system_resolver"
 PROVIDER_GOOGLE_PUBLIC_DNS = "google_public_dns"
 PROVIDER_QUAD9_ECS = "quad9_ecs"
 PROVIDER_CLOUDFLARE_PUBLIC_DNS = "cloudflare_public_dns"
+PROVIDER_OPENDNS_PUBLIC_DNS = "opendns_public_dns"
 PROVIDER_CUSTOM = "custom"
+SYSTEM_NAMESERVER = "system_resolver"
 
 GOOGLE_PUBLIC_DNS_NAMESERVERS = frozenset({"8.8.8.8", "8.8.4.4"})
 QUAD9_ECS_NAMESERVERS = frozenset({"9.9.9.11", "149.112.112.11"})
 CLOUDFLARE_PUBLIC_DNS_NAMESERVERS = frozenset({"1.1.1.1", "1.0.0.1"})
+OPENDNS_NAMESERVERS = frozenset({"208.67.222.222", "208.67.220.220"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,8 +68,9 @@ class TokenBucketRateLimiter:
         self._updated_at = time.monotonic()
         self._lock = threading.Lock()
 
-    def acquire(self) -> None:
-        """Block until one query token is available."""
+    def acquire(self) -> float:
+        """Block until one query token is available and return wait seconds."""
+        total_wait_seconds = 0.0
         while True:
             with self._lock:
                 now = time.monotonic()
@@ -70,8 +79,9 @@ class TokenBucketRateLimiter:
                 self._updated_at = now
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
-                    return
+                    return total_wait_seconds
                 wait_seconds = (1.0 - self._tokens) / self.qps
+                total_wait_seconds += wait_seconds
             time.sleep(wait_seconds)
 
 
@@ -81,12 +91,12 @@ class PendingQueryLimiter:
     def __init__(self, max_pending: int) -> None:
         self._semaphore = threading.BoundedSemaphore(max(1, int(max_pending)))
 
-    def __enter__(self) -> "PendingQueryLimiter":
-        self._semaphore.acquire()
-        return self
-
-    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
-        self._semaphore.release()
+    @contextmanager
+    def slot(self) -> Iterator[float]:
+        """Hold one pending-query slot and yield wait seconds."""
+        started_at = time.monotonic()
+        with self._semaphore:
+            yield max(time.monotonic() - started_at, 0.0)
 
 
 class DNSQueryBalancer:
@@ -166,27 +176,97 @@ class DNSQueryCoordinator:
                 record_type=record_type,
                 attempt_index=attempt_index,
             )
+            logger.debug(
+                "DNS query balancer selected endpoint stage=%s record_type=%s "
+                "attempt=%d provider=%s nameserver=%s resolver_key=%s",
+                stage,
+                record_type,
+                attempt_index + 1,
+                endpoint.provider,
+                endpoint.address or SYSTEM_NAMESERVER,
+                self._resolver_key,
+            )
             try:
                 return self._resolve_once(endpoint, name, record_type)
             except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
                 last_error = exc
+                self._log_retryable_failure(
+                    endpoint, name, record_type, stage, attempt_index, exc
+                )
                 continue
             except dns.exception.Timeout as exc:
                 last_error = exc
+                self._log_retryable_failure(
+                    endpoint, name, record_type, stage, attempt_index, exc
+                )
                 continue
         if last_error is not None:
+            logger.debug(
+                "DNS query retry exhausted stage=%s record_type=%s name=%s "
+                "attempts=%d resolver_key=%s error_type=%s",
+                stage,
+                record_type,
+                name,
+                max(1, int(attempts)),
+                self._resolver_key,
+                type(last_error).__name__,
+            )
             raise last_error
         raise dns.exception.Timeout(f"{record_type} lookup for {name} failed")
+
+    def _log_retryable_failure(
+        self,
+        endpoint: DNSEndpoint,
+        name: str,
+        record_type: str,
+        stage: str,
+        attempt_index: int,
+        exc: Exception,
+    ) -> None:
+        """Log one retryable DNS query failure."""
+        logger.debug(
+            "DNS query retryable failure stage=%s record_type=%s name=%s "
+            "attempt=%d provider=%s nameserver=%s error_type=%s",
+            stage,
+            record_type,
+            name,
+            attempt_index + 1,
+            endpoint.provider,
+            endpoint.address or SYSTEM_NAMESERVER,
+            type(exc).__name__,
+        )
 
     def _resolve_once(self, endpoint: DNSEndpoint, name: str, record_type: str) -> Any:
         provider = endpoint.provider
         if self._config.rate_limit_enabled:
             rate_limiter = self._rate_limiters.get(provider)
             if rate_limiter is not None:
-                rate_limiter.acquire()
+                wait_seconds = rate_limiter.acquire()
+                if wait_seconds > 0:
+                    logger.debug(
+                        "DNS rate limiter waited provider=%s wait_seconds=%.6f "
+                        "qps=%.3f burst=%d record_type=%s name=%s nameserver=%s",
+                        provider,
+                        wait_seconds,
+                        rate_limiter.qps,
+                        rate_limiter.capacity,
+                        record_type,
+                        name,
+                        endpoint.address or SYSTEM_NAMESERVER,
+                    )
             pending_limiter = self._pending_limiters.get(provider)
             if pending_limiter is not None:
-                with pending_limiter:
+                with pending_limiter.slot() as wait_seconds:
+                    if wait_seconds > 0.001:
+                        logger.debug(
+                            "DNS pending limiter waited provider=%s wait_seconds=%.6f "
+                            "record_type=%s name=%s nameserver=%s",
+                            provider,
+                            wait_seconds,
+                            record_type,
+                            name,
+                            endpoint.address or SYSTEM_NAMESERVER,
+                        )
                     return endpoint.resolver.resolve(name, record_type)
         return endpoint.resolver.resolve(name, record_type)
 
@@ -227,14 +307,16 @@ class DNSQueryCoordinatorRegistry:
 
 def provider_for_nameserver(nameserver: str | None) -> str:
     """Return the normalized provider id for one resolver address."""
-    if nameserver is None:
-        return PROVIDER_SYSTEM
+    if nameserver is None or nameserver == SYSTEM_NAMESERVER:
+        return PROVIDER_SYSTEM_RESOLVER
     if nameserver in GOOGLE_PUBLIC_DNS_NAMESERVERS:
         return PROVIDER_GOOGLE_PUBLIC_DNS
     if nameserver in QUAD9_ECS_NAMESERVERS:
         return PROVIDER_QUAD9_ECS
     if nameserver in CLOUDFLARE_PUBLIC_DNS_NAMESERVERS:
         return PROVIDER_CLOUDFLARE_PUBLIC_DNS
+    if nameserver in OPENDNS_NAMESERVERS:
+        return PROVIDER_OPENDNS_PUBLIC_DNS
     return PROVIDER_CUSTOM
 
 
@@ -246,7 +328,7 @@ def build_dns_resolver(
 ) -> dns.resolver.Resolver:
     """Build a dnspython resolver for one endpoint."""
     resolver = dns.resolver.Resolver(configure=True)
-    if nameserver is not None:
+    if nameserver is not None and nameserver != SYSTEM_NAMESERVER:
         resolver.nameservers = [nameserver]
     resolver.timeout = timeout
     resolver.lifetime = timeout
@@ -274,8 +356,9 @@ def build_dns_endpoint(
     ecs: dict[str, Any],
 ) -> DNSEndpoint:
     """Build one resolver endpoint from normalized DNS settings."""
+    endpoint_address = None if nameserver == SYSTEM_NAMESERVER else nameserver
     return DNSEndpoint(
         provider=provider_for_nameserver(nameserver),
-        address=nameserver,
+        address=endpoint_address,
         resolver=build_dns_resolver(nameserver=nameserver, timeout=timeout, ecs=ecs),
     )

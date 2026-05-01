@@ -31,8 +31,9 @@ from domain_pipeline.checking.dns_query_coordinator import (
     PROVIDER_CLOUDFLARE_PUBLIC_DNS,
     PROVIDER_CUSTOM,
     PROVIDER_GOOGLE_PUBLIC_DNS,
+    PROVIDER_OPENDNS_PUBLIC_DNS,
     PROVIDER_QUAD9_ECS,
-    PROVIDER_SYSTEM,
+    PROVIDER_SYSTEM_RESOLVER,
     build_dns_endpoint,
 )
 
@@ -44,8 +45,28 @@ VERIFIED_ECS_NAMESERVERS = frozenset(
     [*DEFAULT_ECS_FALLBACK_NAMESERVERS, *QUAD9_ECS_NAMESERVERS]
 )
 CNAME_CHAIN_LIMIT = 8
+DNS_PROFILE_KEYS = (
+    "nameservers",
+    "timeout",
+    "ecs",
+    "query_rate_limit",
+    "query_balancer",
+)
+# Official provider data inspected from primary docs on 2026-05-01:
+# - Azure default resolver: 1000 QPS and 200 pending DNS queries per VM.
+# - Google Public DNS: rate-limit increase guidance starts above 1500 QPS per
+#   client IPv4 address or IPv6 /64.
+# - Quad9: contact support above 500 QPS from a single egress IP.
+# - Cloudflare 1.1.1.1: no numeric public QPS limit published; docs warn that
+#   high-rate single-IP, proxied, and high-SERVFAIL traffic may be rate limited.
+# - Cisco Umbrella/OpenDNS: public resolver IPs are documented; DNS Security
+#   packages document 5000 DNS queries per Covered User per day as a monthly
+#   average, not a public per-client QPS ceiling.
+# Project caps below are worker-local and intentionally below published numeric
+# thresholds; Cloudflare/OpenDNS use conservative project caps because their
+# public docs do not publish per-client QPS ceilings.
 DEFAULT_DNS_PROVIDER_LIMITS = {
-    PROVIDER_SYSTEM: DNSProviderRateLimit(
+    PROVIDER_SYSTEM_RESOLVER: DNSProviderRateLimit(
         qps_per_worker=50.0, burst=50, max_pending=100
     ),
     PROVIDER_GOOGLE_PUBLIC_DNS: DNSProviderRateLimit(
@@ -55,7 +76,10 @@ DEFAULT_DNS_PROVIDER_LIMITS = {
         qps_per_worker=25.0, burst=25, max_pending=50
     ),
     PROVIDER_CLOUDFLARE_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=50.0, burst=50, max_pending=100
+        qps_per_worker=25.0, burst=25, max_pending=50
+    ),
+    PROVIDER_OPENDNS_PUBLIC_DNS: DNSProviderRateLimit(
+        qps_per_worker=25.0, burst=25, max_pending=50
     ),
     PROVIDER_CUSTOM: DNSProviderRateLimit(
         qps_per_worker=25.0, burst=25, max_pending=50
@@ -79,7 +103,7 @@ def effective_dns_nameservers(dns_config: dict[str, Any]) -> list[str]:
 def dns_resolver_key(dns_config: dict[str, Any]) -> str:
     """Return a deterministic cache key for one DNS resolver profile."""
     nameservers = effective_dns_nameservers(dns_config)
-    nameserver_key = ",".join(nameservers) if nameservers else "system"
+    nameserver_key = ",".join(nameservers) if nameservers else "system_resolver"
     ecs_payload = dict(dns_config.get("ecs") or {})
     if not ecs_payload.get("enabled"):
         return f"{nameserver_key}|ecs=off"
@@ -149,6 +173,28 @@ def dns_query_coordinator_key(
     """Return a process-local key for sharing one DNS query coordinator."""
     resolver_key = dns_resolver_key({"nameservers": nameservers, "ecs": ecs})
     return f"{resolver_key}|timeout={timeout}|{_coordinator_config_key(query_config)}"
+
+
+def stage_dns_profile(
+    base_dns_config: dict[str, Any], stage_config: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Return one DNS resolver profile after applying stage-level overrides."""
+    profile = {
+        "nameservers": list(base_dns_config.get("nameservers") or []),
+        "timeout": float(base_dns_config.get("timeout", 5.0)),
+        "ecs": dict(base_dns_config.get("ecs") or {}),
+        "query_rate_limit": dict(base_dns_config.get("query_rate_limit") or {}),
+        "query_balancer": dict(base_dns_config.get("query_balancer") or {}),
+    }
+    for key, value in dict(stage_config or {}).items():
+        if key in DNS_PROFILE_KEYS and value is not None:
+            profile[key] = value
+    profile["nameservers"] = effective_dns_nameservers(profile)
+    profile["timeout"] = float(profile["timeout"])
+    profile["ecs"] = dict(profile.get("ecs") or {})
+    profile["query_rate_limit"] = dict(profile.get("query_rate_limit") or {})
+    profile["query_balancer"] = dict(profile.get("query_balancer") or {})
+    return profile
 
 
 @dataclasses.dataclass(frozen=True)
@@ -298,19 +344,31 @@ class DomainChecker:
         query_rate_limit: dict[str, Any] | None = None,
         query_balancer: dict[str, Any] | None = None,
         query_coordinator: DNSQueryCoordinator | None = None,
+        delegation_dns: dict[str, Any] | None = None,
+        host_resolution_dns: dict[str, Any] | None = None,
         retry_attempts: int = 3,
         delegation_retry_attempts: int | None = None,
         host_retry_attempts: int | None = None,
     ) -> None:
         dns_config = {
             "nameservers": list(nameservers or self.DEFAULT_NAMESERVERS),
+            "timeout": float(timeout),
             "ecs": ecs or {},
+            "query_rate_limit": query_rate_limit or {},
+            "query_balancer": query_balancer or {},
         }
-        self.nameservers = effective_dns_nameservers(dns_config)
+        self.delegation_dns_profile = stage_dns_profile(dns_config, delegation_dns)
+        self.host_resolution_dns_profile = stage_dns_profile(
+            dns_config, host_resolution_dns
+        )
+        self.delegation_nameservers = list(self.delegation_dns_profile["nameservers"])
+        self.nameservers = list(self.host_resolution_dns_profile["nameservers"])
         self.timeout = timeout
-        self.ecs = dict(ecs or {})
-        self.query_rate_limit = dict(query_rate_limit or {})
-        self.query_balancer = dict(query_balancer or {})
+        self.ecs = dict(self.host_resolution_dns_profile["ecs"])
+        self.query_rate_limit = dict(
+            self.host_resolution_dns_profile["query_rate_limit"]
+        )
+        self.query_balancer = dict(self.host_resolution_dns_profile["query_balancer"])
         self.retry_attempts = max(1, int(retry_attempts))
         self.delegation_retry_attempts = max(
             1,
@@ -328,7 +386,17 @@ class DomainChecker:
                 else self.retry_attempts
             ),
         )
-        self.query_coordinator = query_coordinator or self._build_query_coordinator()
+        if query_coordinator is not None:
+            self.delegation_query_coordinator = query_coordinator
+            self.host_resolution_query_coordinator = query_coordinator
+        else:
+            self.delegation_query_coordinator = self._build_query_coordinator(
+                "delegation", self.delegation_dns_profile
+            )
+            self.host_resolution_query_coordinator = self._build_query_coordinator(
+                "host_resolution", self.host_resolution_dns_profile
+            )
+        self.query_coordinator = self.host_resolution_query_coordinator
 
     @property
     def resolver(self) -> Any:
@@ -344,7 +412,7 @@ class DomainChecker:
             balancer_strategy="round_robin",
             provider_limits={},
         )
-        self.query_coordinator = DNSQueryCoordinator(
+        coordinator = DNSQueryCoordinator(
             endpoints=[
                 DNSEndpoint(
                     provider=PROVIDER_CUSTOM,
@@ -355,42 +423,57 @@ class DomainChecker:
             resolver_key=self.resolver_key(),
             config=query_config,
         )
+        self.delegation_query_coordinator = coordinator
+        self.host_resolution_query_coordinator = coordinator
+        self.query_coordinator = coordinator
 
-    def _build_query_coordinator(self) -> DNSQueryCoordinator:
+    def _build_query_coordinator(
+        self, stage: str, dns_profile: dict[str, Any]
+    ) -> DNSQueryCoordinator:
         """Build or retrieve the shared DNS query coordinator for this checker."""
         query_config = dns_query_coordinator_config(
-            query_rate_limit=self.query_rate_limit,
-            query_balancer=self.query_balancer,
+            query_rate_limit=dns_profile.get("query_rate_limit", {}),
+            query_balancer=dns_profile.get("query_balancer", {}),
         )
-        endpoint_nameservers: list[str | None] = list(self.nameservers) or [None]
+        endpoint_nameservers: list[str | None] = list(
+            dns_profile.get("nameservers") or []
+        ) or [None]
         endpoints = [
             build_dns_endpoint(
                 nameserver=nameserver,
-                timeout=self.timeout,
-                ecs=self.ecs,
+                timeout=float(dns_profile.get("timeout", 5.0)),
+                ecs=dict(dns_profile.get("ecs") or {}),
             )
             for nameserver in endpoint_nameservers
         ]
         resolver_key = (
-            f"{dns_resolver_key({'nameservers': self.nameservers, 'ecs': self.ecs})}"
-            f"|timeout={self.timeout}"
+            f"{dns_resolver_key(dns_profile)}"
+            f"|timeout={float(dns_profile.get('timeout', 5.0))}"
         )
         registry_key = dns_query_coordinator_key(
-            nameservers=self.nameservers,
-            timeout=self.timeout,
-            ecs=self.ecs,
+            nameservers=list(dns_profile.get("nameservers") or []),
+            timeout=float(dns_profile.get("timeout", 5.0)),
+            ecs=dict(dns_profile.get("ecs") or {}),
             query_config=query_config,
         )
         return DNSQueryCoordinatorRegistry.get_or_create(
-            registry_key=registry_key,
+            registry_key=f"stage={stage}|{registry_key}",
             endpoints=endpoints,
             resolver_key=resolver_key,
             config=query_config,
         )
 
     def resolver_key(self) -> str:
-        """Return a deterministic cache key for the resolver profile."""
-        return self.query_coordinator.resolver_key()
+        """Return the host-resolution resolver profile key for compatibility."""
+        return self.host_resolution_resolver_key()
+
+    def delegation_resolver_key(self) -> str:
+        """Return a deterministic cache key for the delegation resolver profile."""
+        return self.delegation_query_coordinator.resolver_key()
+
+    def host_resolution_resolver_key(self) -> str:
+        """Return a deterministic cache key for the host-resolution resolver profile."""
+        return self.host_resolution_query_coordinator.resolver_key()
 
     def _sleep_before_retry(self, attempt_index: int) -> None:
         if attempt_index <= 0:
@@ -404,12 +487,18 @@ class DomainChecker:
         last_error: Exception | None = None
         for attempt_index in range(retry_attempts):
             self._sleep_before_retry(attempt_index)
+            stage = "delegation" if record_type == "NS" else "host_resolution"
+            coordinator = (
+                self.delegation_query_coordinator
+                if stage == "delegation"
+                else self.host_resolution_query_coordinator
+            )
             try:
-                return self.query_coordinator.resolve_with_retries(
+                return coordinator.resolve_with_retries(
                     name,
                     record_type,
                     attempts=1,
-                    stage="delegation" if record_type == "NS" else "host_resolution",
+                    stage=stage,
                 )
             except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
                 last_error = exc
