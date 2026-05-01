@@ -44,6 +44,8 @@ sources:
       location: https://is.gd/43bKSw
     geo:
       enabled: true
+      # Country-only ipinfo_lite lookups read GEO_IPINFO_TOKEN at runtime when
+      # geo.token is blank. Provide it through workflow/env secrets, not config.
       provider: ipinfo_lite
       timeout: 5.0
       cache_ttl_days: 7

@@ -484,6 +484,12 @@ jobs:
               mkdir -p .workflow_state/status
               cp -R "${worker_dir}/.workflow_state/status/." .workflow_state/status/
             fi
+            # aggregate_batch merges worker logs from .debug_artifacts/workers.
+            if [ -d "${worker_dir}/.debug_artifacts/workers" ]; then
+              echo "restoring worker debug logs from ${worker_dir}"
+              mkdir -p .debug_artifacts/workers
+              cp -R "${worker_dir}/.debug_artifacts/workers/." .debug_artifacts/workers/
+            fi
           done
       - name: Initialize aggregate job log
         run: |
