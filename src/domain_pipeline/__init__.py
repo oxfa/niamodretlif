@@ -8,8 +8,8 @@ This package processes host lists in three stages:
 2. ``dns.delegation`` performs the mandatory NS lookup for the registrable
    domain. Inputs whose registrable domain is not delegated are written to
    ``output/unactionable/`` because they are not currently actionable for
-   blacklist or whitelist output. Timeout and SERVFAIL outcomes are retried
-   and then sent to review without cache writes.
+   positive output. Timeout and SERVFAIL outcomes are retried and then sent to
+   review without cache writes.
 3. ``dns.host_resolution`` and ``geo`` are review gates when enabled. Host
    resolution or geo failures route to review; they do not make an entry
    unactionable. Stable host DNS and successful usable geo results are cached.

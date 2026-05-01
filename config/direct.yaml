@@ -4,11 +4,12 @@ version: 2
 # - input/manual_filter_pass/direct.txt
 # - input/manual_filter_out/direct.txt
 # - input/manual_add/direct.txt
-# manual_filter_pass and manual_add entries still require DNS delegation.
-# manual_add takes precedence over matching source entries for the same host.
-# When delegation is actionable they bypass host-resolution and geo checks and
-# emit filtered output. Public-suffix inputs are prepare-owned review/audit rows
-# because they have no registrable domain for delegation.
+# manual_filter_pass and manual_add entries still require DNS delegation. When
+# delegation is actionable they bypass host-resolution and geo checks and emit
+# filtered output. manual_add takes precedence over matching source entries for
+# the same host. manual_filter_out skips DNS/geo and emits one review row per
+# host. Public-suffix inputs are prepare-owned review/audit rows because they
+# have no registrable domain for delegation.
 
 defaults:
   fetch:

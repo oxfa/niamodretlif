@@ -104,6 +104,11 @@ class HTTPSession(Protocol):
     ) -> Any:
         """Return a response-like object for one GET request."""
 
+    def post(
+        self, url: str | bytes, *, timeout: float | None = None, **kwargs: Any
+    ) -> Any:
+        """Return a response-like object for one POST request."""
+
 
 def normalize_country_code(value: str) -> str:
     """Normalize a country code for comparisons."""
