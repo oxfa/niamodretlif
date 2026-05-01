@@ -745,6 +745,10 @@ def evaluate_geo_policy(
     ]
     if not comparable_results:
         raise ValueError("evaluate_geo_policy requires at least one usable geo result")
+    if match_scope == "all_ips" and len(comparable_results) != len(geo_results):
+        raise ValueError(
+            "all_ips geo policy requires usable geo results for every resolved IP"
+        )
 
     matched_ips: list[str] = []
     rejected_ips: list[str] = []

@@ -102,6 +102,8 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
         ecs=dns_config.get("ecs", {}),
         query_rate_limit=dns_config.get("query_rate_limit", {}),
         query_balancer=dns_config.get("query_balancer", {}),
+        delegation_dns=dns_config.get("delegation", {}),
+        host_resolution_dns=dns_config.get("host_resolution", {}),
         delegation_retry_attempts=int(
             dns_config.get("delegation", {}).get("retry_attempts", 3)
         ),

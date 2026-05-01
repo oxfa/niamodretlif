@@ -16,9 +16,13 @@ defaults:
     request_timeout: 30.0
 
   dns:
-    # ECS-enabled direct checks use Google Public DNS plus Quad9 ECS endpoints.
+    # Host-resolution uses Google Public DNS plus Quad9 ECS endpoints.
+    # Delegation overrides below keep NS lookups on the platform resolver plus
+    # Cloudflare Public DNS and Cisco Umbrella/OpenDNS with ECS disabled.
     # Worker-local query balancing and per-provider rate limits spread retries
-    # across the pool, but total QPS still scales with workflow worker_count.
+    # inside each stage pool. The Cloudflare/OpenDNS defaults cap each provider
+    # at 25 QPS per worker, burst 25, max_pending 50; total QPS still scales
+    # with workflow worker_count.
     nameservers:
       - 8.8.8.8
       - 8.8.4.4
@@ -35,6 +39,16 @@ defaults:
       enabled: true
       strategy: round_robin
     delegation:
+      nameservers:
+        - system_resolver
+        - 1.1.1.1
+        - 1.0.0.1
+        - 208.67.222.222
+        - 208.67.220.220
+      ecs:
+        enabled: false
+        subnet: ""
+        scope_prefix_length: 0
       retry_attempts: 3
     host_resolution:
       enabled: true

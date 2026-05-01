@@ -36,6 +36,7 @@ LEGACY_CACHE_TTL_KEYS = {
     "dead",
     "alive",
 }
+SYSTEM_DNS_NAMESERVER = "system_resolver"
 
 
 class StrictModel(BaseModel):
@@ -95,25 +96,6 @@ class FetchConfig(StrictModel):
     request_timeout: float = 30.0
 
 
-class DNSStageConfig(StrictModel):
-    """Retry settings for one DNS stage."""
-
-    retry_attempts: int = 3
-
-    @field_validator("retry_attempts", mode="after")
-    @classmethod
-    def _validate_retry_attempts(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("dns stage retry_attempts must be >= 1")
-        return value
-
-
-class DNSHostResolutionConfig(DNSStageConfig):
-    """Optional host-resolution stage settings."""
-
-    enabled: bool | None = None
-
-
 class DNSProviderRateLimitConfig(StrictModel):
     """Worker-local DNS query limit for one resolver provider."""
 
@@ -139,7 +121,16 @@ class DNSProviderRateLimitConfig(StrictModel):
 class DNSRateLimitProvidersConfig(StrictModel):
     """Provider-specific worker-local DNS rate limit defaults."""
 
-    system: DNSProviderRateLimitConfig = Field(
+    # Official provider data inspected from primary docs on 2026-05-01:
+    # Azure default resolver: 1000 QPS/200 pending queries per VM.
+    # Google Public DNS: rate-limit increase guidance above 1500 QPS per client.
+    # Quad9: contact support above 500 QPS from one egress IP.
+    # Cloudflare 1.1.1.1: no numeric public QPS limit; high-rate/proxied and
+    # high-SERVFAIL traffic may be rate limited.
+    # Cisco Umbrella/OpenDNS: documents 5000 DNS queries per Covered User per
+    # day as a monthly DNS Security average, not a public per-client QPS cap.
+    # Cloudflare/OpenDNS defaults are therefore conservative project caps.
+    system_resolver: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=50.0, burst=50, max_pending=100
         )
@@ -156,7 +147,12 @@ class DNSRateLimitProvidersConfig(StrictModel):
     )
     cloudflare_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
-            qps_per_worker=50.0, burst=50, max_pending=100
+            qps_per_worker=25.0, burst=25, max_pending=50
+        )
+    )
+    opendns_public_dns: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=25.0, burst=25, max_pending=50
         )
     )
     custom: DNSProviderRateLimitConfig = Field(
@@ -182,44 +178,113 @@ class DNSQueryBalancerConfig(StrictModel):
     strategy: Literal["round_robin"] = "round_robin"
 
 
+class DNSECSConfig(StrictModel):
+    """EDNS Client Subnet settings."""
+
+    enabled: bool = False
+    subnet: str = ""
+    scope_prefix_length: int = 0
+
+    @field_validator("subnet", mode="after")
+    @classmethod
+    def _normalize_subnet(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        try:
+            network = ipaddress.ip_network(stripped, strict=False)
+        except ValueError as exc:
+            raise ValueError("dns.ecs.subnet must be a valid CIDR subnet") from exc
+        return network.with_prefixlen
+
+    @model_validator(mode="after")
+    def _validate_ecs(self) -> "DNSECSConfig":
+        if not self.enabled:
+            return self
+        if not self.subnet:
+            raise ValueError("dns.ecs.enabled=true requires dns.ecs.subnet")
+        network = ipaddress.ip_network(self.subnet, strict=False)
+        if not 0 <= self.scope_prefix_length <= network.max_prefixlen:
+            raise ValueError(
+                "dns.ecs.scope_prefix_length must be within the subnet address family range"
+            )
+        return self
+
+
+class DNSStageConfig(StrictModel):
+    """Retry and optional resolver overrides for one DNS stage."""
+
+    retry_attempts: int = 3
+    nameservers: list[str] | None = None
+    timeout: float | None = None
+    ecs: DNSECSConfig | None = None
+    query_rate_limit: DNSQueryRateLimitConfig | None = None
+    query_balancer: DNSQueryBalancerConfig | None = None
+
+    @field_validator("retry_attempts", mode="after")
+    @classmethod
+    def _validate_retry_attempts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("dns stage retry_attempts must be >= 1")
+        return value
+
+    @field_validator("nameservers", mode="after")
+    @classmethod
+    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return _normalize_dns_nameservers(values)
+
+    @field_validator("timeout", mode="after")
+    @classmethod
+    def _validate_timeout(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return _validate_dns_timeout(value)
+
+
+class DNSHostResolutionConfig(DNSStageConfig):
+    """Optional host-resolution stage settings."""
+
+    enabled: bool | None = None
+
+
+def _normalize_dns_nameservers(values: list[str]) -> list[str]:
+    """Return normalized DNS resolver endpoint literals."""
+    normalized: list[str] = []
+    for value in values:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(
+                "dns.nameservers entries must be non-empty IP addresses or "
+                "'system_resolver'"
+            )
+        if stripped == SYSTEM_DNS_NAMESERVER:
+            normalized.append(SYSTEM_DNS_NAMESERVER)
+            continue
+        try:
+            normalized.append(str(ipaddress.ip_address(stripped)))
+        except ValueError as exc:
+            raise ValueError(
+                "dns.nameservers entries must be valid IPv4/IPv6 addresses "
+                f"or 'system_resolver' (got {value!r})"
+            ) from exc
+    return normalized
+
+
+def _validate_dns_timeout(value: float) -> float:
+    """Return a normalized positive DNS timeout."""
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("dns.timeout must be finite and positive")
+    return float(value)
+
+
 class DNSConfig(StrictModel):
     """DNS resolver pool settings and DNS stages."""
 
-    class ECSConfig(StrictModel):
-        """EDNS Client Subnet settings."""
-
-        enabled: bool = False
-        subnet: str = ""
-        scope_prefix_length: int = 0
-
-        @field_validator("subnet", mode="after")
-        @classmethod
-        def _normalize_subnet(cls, value: str) -> str:
-            stripped = value.strip()
-            if not stripped:
-                return ""
-            try:
-                network = ipaddress.ip_network(stripped, strict=False)
-            except ValueError as exc:
-                raise ValueError("dns.ecs.subnet must be a valid CIDR subnet") from exc
-            return network.with_prefixlen
-
-        @model_validator(mode="after")
-        def _validate_ecs(self) -> "DNSConfig.ECSConfig":
-            if not self.enabled:
-                return self
-            if not self.subnet:
-                raise ValueError("dns.ecs.enabled=true requires dns.ecs.subnet")
-            network = ipaddress.ip_network(self.subnet, strict=False)
-            if not 0 <= self.scope_prefix_length <= network.max_prefixlen:
-                raise ValueError(
-                    "dns.ecs.scope_prefix_length must be within the subnet address family range"
-                )
-            return self
-
     nameservers: list[str] = Field(default_factory=list)
     timeout: float = 5.0
-    ecs: ECSConfig = Field(default_factory=ECSConfig)
+    ecs: DNSECSConfig = Field(default_factory=DNSECSConfig)
     query_rate_limit: DNSQueryRateLimitConfig = Field(
         default_factory=DNSQueryRateLimitConfig
     )
@@ -241,28 +306,12 @@ class DNSConfig(StrictModel):
     @field_validator("nameservers", mode="after")
     @classmethod
     def _normalize_nameservers(cls, values: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for value in values:
-            stripped = value.strip()
-            if not stripped:
-                raise ValueError(
-                    "dns.nameservers entries must be non-empty IP addresses"
-                )
-            try:
-                normalized.append(str(ipaddress.ip_address(stripped)))
-            except ValueError as exc:
-                raise ValueError(
-                    "dns.nameservers entries must be valid IPv4 or IPv6 addresses "
-                    f"(got {value!r})"
-                ) from exc
-        return normalized
+        return _normalize_dns_nameservers(values)
 
     @field_validator("timeout", mode="after")
     @classmethod
     def _validate_timeout(cls, value: float) -> float:
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("dns.timeout must be finite and positive")
-        return float(value)
+        return _validate_dns_timeout(value)
 
 
 class OutputConfig(StrictModel):
