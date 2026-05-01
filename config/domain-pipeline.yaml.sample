@@ -38,9 +38,13 @@ defaults:
     request_timeout: 30.0
 
   dns:
-    # Shared resolver settings for both DNS stages.
+    # Resolver pool settings for both DNS stages.
     # Entries must be literal IPv4 or IPv6 resolver addresses. Leave empty to
     # use the platform resolver unless ECS forces a verified public resolver.
+    # ECS-enabled public pools should use resolvers that preserve ECS behavior,
+    # such as Google Public DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS
+    # (9.9.9.11, 149.112.112.11). Cloudflare 1.1.1.1 and Cisco Umbrella are
+    # not default ECS targets here because their public ECS behavior differs.
     nameservers: []
     # Per-query DNS timeout, in seconds.
     timeout: 5.0
@@ -54,6 +58,43 @@ defaults:
       # Scope to advertise in the ECS option. Leave at 0 unless you have a
       # specific resolver-side requirement.
       scope_prefix_length: 0
+    # Worker-local DNS safety limits. These defaults are intentionally below
+    # documented public provider limits because GitHub Actions worker_count can
+    # multiply aggregate traffic and standard hosted runners do not guarantee a
+    # stable dedicated egress IP. Official limits referenced by these defaults:
+    # Azure platform resolver: 1000 QPS and 200 pending queries per VM.
+    # Google Public DNS: rate-increase guidance starts above 1500 QPS per
+    # client IPv4 address or IPv6 /64. Quad9 asks organizations to contact
+    # support above 500 QPS from one egress IP.
+    query_rate_limit:
+      enabled: true
+      providers:
+        system:
+          qps_per_worker: 50.0
+          burst: 50
+          max_pending: 100
+        google_public_dns:
+          qps_per_worker: 50.0
+          burst: 50
+          max_pending: 100
+        quad9_ecs:
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
+        cloudflare_public_dns:
+          qps_per_worker: 50.0
+          burst: 50
+          max_pending: 100
+        custom:
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
+    # Deterministic endpoint selection across the configured resolver pool.
+    # Retry attempts select through the same round-robin balancer so one
+    # transient resolver failure does not pin all attempts to the same endpoint.
+    query_balancer:
+      enabled: true
+      strategy: round_robin
     # Mandatory NS lookup for the parsed registrable domain. Timeout/SERVFAIL
     # are retried up to this stage-specific attempt count and are not cached
     # after retry exhaustion.
@@ -115,10 +156,17 @@ cache:
     # delegation. Transient timeout/SERVFAIL delegation results are not cached.
     dns_delegation_unactionable: 1
   # Cache retention, in days, for stable exact-host dns.host_resolution results.
-  # Transient timeout/SERVFAIL host-resolution results are not cached.
-  # This does not control delegation cache retention; delegation uses the two
-  # dns_delegation_* TTLs above.
+  # This legacy scalar remains the fallback for resolved host-resolution rows.
   dns_ttl_days: 1
+  # Cache retention, in days, by final exact-host dns.host_resolution outcome.
+  # CNAME aliases are followed before the final outcome is chosen. Transient
+  # timeout/SERVFAIL and inconsistent unknown host-resolution results are not
+  # cached after retry exhaustion.
+  dns_host_resolution_ttl_days:
+    resolved: 1
+    nodata: 1
+    nxdomain: 1
+    unknown: 0
 
 sources:
   - id: local-default
@@ -139,6 +187,11 @@ sources:
         enabled: false
         subnet: ""
         scope_prefix_length: 0
+      query_rate_limit:
+        enabled: true
+      query_balancer:
+        enabled: true
+        strategy: round_robin
       delegation:
         retry_attempts: 3
       host_resolution:

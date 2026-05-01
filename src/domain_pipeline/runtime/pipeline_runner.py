@@ -100,6 +100,8 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
         nameservers=effective_dns_nameservers(dns_config),
         timeout=float(dns_config.get("timeout", 5.0)),
         ecs=dns_config.get("ecs", {}),
+        query_rate_limit=dns_config.get("query_rate_limit", {}),
+        query_balancer=dns_config.get("query_balancer", {}),
         delegation_retry_attempts=int(
             dns_config.get("delegation", {}).get("retry_attempts", 3)
         ),

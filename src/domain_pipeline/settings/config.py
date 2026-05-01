@@ -114,8 +114,76 @@ class DNSHostResolutionConfig(DNSStageConfig):
     enabled: bool | None = None
 
 
+class DNSProviderRateLimitConfig(StrictModel):
+    """Worker-local DNS query limit for one resolver provider."""
+
+    qps_per_worker: float
+    burst: int
+    max_pending: int
+
+    @field_validator("qps_per_worker", mode="after")
+    @classmethod
+    def _validate_qps_per_worker(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("dns provider qps_per_worker must be finite and positive")
+        return float(value)
+
+    @field_validator("burst", "max_pending", mode="after")
+    @classmethod
+    def _validate_positive_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("dns provider burst and max_pending must be >= 1")
+        return value
+
+
+class DNSRateLimitProvidersConfig(StrictModel):
+    """Provider-specific worker-local DNS rate limit defaults."""
+
+    system: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=50.0, burst=50, max_pending=100
+        )
+    )
+    google_public_dns: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=50.0, burst=50, max_pending=100
+        )
+    )
+    quad9_ecs: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=25.0, burst=25, max_pending=50
+        )
+    )
+    cloudflare_public_dns: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=50.0, burst=50, max_pending=100
+        )
+    )
+    custom: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=25.0, burst=25, max_pending=50
+        )
+    )
+
+
+class DNSQueryRateLimitConfig(StrictModel):
+    """Worker-local DNS query rate limiting settings."""
+
+    enabled: bool = True
+    providers: DNSRateLimitProvidersConfig = Field(
+        default_factory=DNSRateLimitProvidersConfig
+    )
+
+
+class DNSQueryBalancerConfig(StrictModel):
+    """DNS endpoint balancing settings."""
+
+    enabled: bool = True
+    strategy: Literal["round_robin"] = "round_robin"
+
+
 class DNSConfig(StrictModel):
-    """Shared DNS resolver settings and DNS stages."""
+    """DNS resolver pool settings and DNS stages."""
 
     class ECSConfig(StrictModel):
         """EDNS Client Subnet settings."""
@@ -152,6 +220,12 @@ class DNSConfig(StrictModel):
     nameservers: list[str] = Field(default_factory=list)
     timeout: float = 5.0
     ecs: ECSConfig = Field(default_factory=ECSConfig)
+    query_rate_limit: DNSQueryRateLimitConfig = Field(
+        default_factory=DNSQueryRateLimitConfig
+    )
+    query_balancer: DNSQueryBalancerConfig = Field(
+        default_factory=DNSQueryBalancerConfig
+    )
     delegation: DNSStageConfig = Field(default_factory=DNSStageConfig)
     host_resolution: DNSHostResolutionConfig = Field(
         default_factory=DNSHostResolutionConfig
@@ -249,6 +323,22 @@ class ClassificationTTLConfig(StrictModel):
         return value
 
 
+class DNSHostResolutionTTLConfig(StrictModel):
+    """Cache TTLs for stable exact-host resolution outcomes."""
+
+    resolved: int | None = None
+    nodata: int = 1
+    nxdomain: int = 1
+    unknown: int = 0
+
+    @field_validator("resolved", "nodata", "nxdomain", "unknown", mode="after")
+    @classmethod
+    def _validate_ttl_days(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("host-resolution cache TTL values must be >= 0")
+        return value
+
+
 class CacheConfig(StrictModel):
     """Global cache configuration."""
 
@@ -256,6 +346,9 @@ class CacheConfig(StrictModel):
         default_factory=ClassificationTTLConfig
     )
     dns_ttl_days: int = 1
+    dns_host_resolution_ttl_days: DNSHostResolutionTTLConfig = Field(
+        default_factory=DNSHostResolutionTTLConfig
+    )
 
 
 class DefaultsConfig(StrictModel):
@@ -453,6 +546,13 @@ def _finalize_dns_stage_defaults(source_payload: dict[str, Any]) -> None:
         host_resolution["enabled"] = bool(source_payload["geo"]["enabled"])
 
 
+def _finalize_cache_defaults(cache_payload: dict[str, Any]) -> None:
+    """Apply legacy host-resolution TTL fallback to the normalized cache payload."""
+    host_ttls = cache_payload["dns_host_resolution_ttl_days"]
+    if host_ttls.get("resolved") is None:
+        host_ttls["resolved"] = int(cache_payload.get("dns_ttl_days", 1))
+
+
 def _load_yaml_payload(path: Path) -> dict[str, Any]:
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -513,6 +613,8 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
         _finalize_dns_stage_defaults(source_dict)
         normalized_sources.append(source_dict)
 
+    cache_payload = raw_config.cache.model_dump()
+    _finalize_cache_defaults(cache_payload)
     try:
         normalized_config = NormalizedPipelineConfig.model_validate(
             {
@@ -520,7 +622,7 @@ def _load_config(path: Path, *, validate_runtime_credentials: bool) -> dict[str,
                 "config_name": config_namespace,
                 "config_path": str(path),
                 "defaults": defaults_payload,
-                "cache": raw_config.cache.model_dump(),
+                "cache": cache_payload,
                 "sources": normalized_sources,
             }
         )

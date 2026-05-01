@@ -461,6 +461,9 @@ def _build_worker_runtime_spec(
             "classification_ttl_days": json.loads(
                 json.dumps(config["cache"]["classification_ttl_days"])
             ),
+            "dns_host_resolution_ttl_days": json.loads(
+                json.dumps(config["cache"]["dns_host_resolution_ttl_days"])
+            ),
             "dns_ttl_days": config["cache"]["dns_ttl_days"],
         },
         sources=source_configs,

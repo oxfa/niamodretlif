@@ -196,6 +196,13 @@ class AsyncPipelineRuntime:
             status=GEO_STATUS_CACHE_HIT,
         )
 
+    def _host_resolution_ttl_days(self, result: HostResolutionResult) -> int:
+        """Return cache retention for one stable host-resolution outcome."""
+        ttl_config = self.config["cache"].get("dns_host_resolution_ttl_days", {})
+        return int(
+            ttl_config.get(result.status, self.config["cache"].get("dns_ttl_days", 1))
+        )
+
     def _record_cache_hit(self, prefix: str, source: CacheHitSource | None) -> None:
         """Record cache hit counters, including overlay/baseline source."""
         self.cache_stats[f"{prefix}_cache_hits"] += 1
@@ -264,11 +271,20 @@ class AsyncPipelineRuntime:
             entry.host, resolver_key, now
         )
         if cached is not None:
-            self._record_cache_hit("host_resolution", source)
-            return self._host_resolution_from_cache_record(cached)
+            cached_result = self._host_resolution_from_cache_record(cached)
+            if cached_result.status != "unknown":
+                self._record_cache_hit("host_resolution", source)
+                return cached_result
+            logger.debug(
+                "Ignoring stale host-resolution cache row for %s with unknown status",
+                entry.host,
+            )
         self._record_cache_miss("host_resolution")
         result = await AsyncHostResolutionTransport(checker).lookup(entry.host)
-        if result.status in {"timeout", "servfail"}:
+        if result.status in {"timeout", "servfail", "unknown"}:
+            return result
+        ttl_days = self._host_resolution_ttl_days(result)
+        if ttl_days <= 0:
             return result
         await self.cache_bundle.writers[1].queue.put(
             HostResolutionCacheWriteRequest(
@@ -283,7 +299,7 @@ class AsyncPipelineRuntime:
                 ipv4_addresses=result.ipv4_addresses,
                 ipv6_addresses=result.ipv6_addresses,
                 checked_at=now,
-                ttl_days=int(self.config["cache"].get("dns_ttl_days", 1)),
+                ttl_days=ttl_days,
             )
         )
         return result
