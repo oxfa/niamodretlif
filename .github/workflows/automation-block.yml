@@ -15,9 +15,11 @@ permissions:
   actions: read
 
 # Optional per-config manual files:
+# - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
-# manual_filter_pass is allowed and still requires DNS delegation.
+# manual_filter_pass and manual_add still require delegation before filtered
+# output; manual_filter_out bypasses DNS/geo and writes review rows.
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml

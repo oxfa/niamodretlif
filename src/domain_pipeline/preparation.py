@@ -212,7 +212,7 @@ def prepare_inputs(
     source_root: Path,
     config_path: Path,
 ) -> PreparedInputSet:
-    """Load config and prepare worker-owned entries."""
+    """Load config and prepare worker entries plus prepare-owned terminal rows."""
     resolved_config_path = _resolve_from_root(source_root, config_path)
     config = load_config_without_runtime_credentials(resolved_config_path)
     config_name = str(config["config_name"])

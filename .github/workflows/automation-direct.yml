@@ -18,6 +18,8 @@ permissions:
 # - input/manual_filter_pass/direct.txt
 # - input/manual_filter_out/direct.txt
 # - input/manual_add/direct.txt
+# manual_filter_pass and manual_add still require delegation before filtered
+# output; manual_filter_out bypasses DNS/geo and writes review rows.
 jobs:
   batch:
     uses: ./.github/workflows/_automation-batch.yml

@@ -1,4 +1,4 @@
-"""Shared HTTP GET retry logic for geo providers."""
+"""Shared HTTP request retry logic for geo providers."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ RetryLogger = Callable[[BaseException, float, int, int], None]
 @dataclasses.dataclass(frozen=True)
 # pylint: disable=too-many-instance-attributes
 class HTTPRetryPolicy:
-    """Policy for retryable HTTP GET behavior."""
+    """Policy for retryable HTTP request behavior."""
 
     max_attempts: int
     retryable_status_codes: frozenset[int]
@@ -62,7 +62,7 @@ RetryObserver = Callable[[HTTPRetryEvent], None]
 
 
 class HTTPRequester:
-    """Execute GET requests with caller-defined retry behavior."""
+    """Execute HTTP requests with caller-defined retry behavior."""
 
     # pylint: disable=too-many-instance-attributes
 

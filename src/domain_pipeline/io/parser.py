@@ -25,7 +25,8 @@ Processing steps applied to each file:
 5. Encode IDN labels to Punycode (IDNA).
 6. Validate structural syntax (RFC 1035 label limits).
 7. Extract the DNS delegation target (ICANN eTLD+1) via ``publicsuffix2``.
-8. Deduplicate exact hosts while preserving their registrable domain.
+8. Deduplicate normalized entries by host, input kind, and apex scope while
+   preserving their registrable domain.
 
 Files that are mixed-format or unrecognized are skipped.
 
@@ -303,8 +304,8 @@ class DomainListParser:
         """Process lines into unique normalized host entries.
 
         Args:
-            lines: Iterable of raw configurations.
-            stats: Optional mutable mapping populated with cache counters.
+            lines: Iterable of raw input lines.
+            stats: Optional mutable mapping populated with detected-format counters.
 
         Yields:
             Unique normalized hosts with their registrable domain.

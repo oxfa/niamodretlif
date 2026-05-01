@@ -39,6 +39,11 @@ def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def suppress_token_bearing_library_debug_logs() -> None:
+    """Keep third-party request URLs with query credentials out of debug logs."""
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.INFO)
+
+
 def _configure_worker_logging(log_level: str) -> None:
     """Configure stderr logging for worker subprocess runs."""
     level_name = str(log_level).upper()
@@ -52,6 +57,7 @@ def _configure_worker_logging(log_level: str) -> None:
         stream=sys.stderr,
         force=True,
     )
+    suppress_token_bearing_library_debug_logs()
 
 
 def _configure_command_logging(log_level: str | None) -> None:
