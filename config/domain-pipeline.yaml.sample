@@ -39,11 +39,12 @@ defaults:
 
   dns:
     # Fallback resolver pool used by DNS stages that do not set their own
-    # nameservers.
-    # Entries must be literal IPv4/IPv6 resolver addresses or the literal
-    # "system_resolver" to include the platform resolver. Leave empty to use
-    # only the platform resolver for stages that inherit this fallback.
-    default_nameservers: []
+    # resolvers. Entries use resolver: <IPv4/IPv6/system_resolver>. Omit
+    # weight on every entry for equal traffic share, or set weight on every
+    # entry for explicit weighted traffic share. Mixed weighted/unweighted
+    # resolver lists are invalid. Leave empty to use only the platform resolver
+    # for stages that inherit this fallback.
+    default_resolvers: []
     # Per-query DNS timeout, in seconds.
     timeout: 5.0
     # Worker-local DNS safety limits. These defaults are intentionally below
@@ -60,8 +61,10 @@ defaults:
     # Covered User per day as a monthly DNS Security average, not a public
     # per-client QPS ceiling. Control D documents free unfiltered anycast
     # resolver endpoints but no numeric public per-client QPS ceiling.
-    # Cloudflare/OpenDNS/Control D values below are conservative project caps,
-    # not official numeric QPS limits.
+    # DNS.SB documents public resolvers with no logging and DNSSEC, but no
+    # numeric public QPS ceiling was found.
+    # Cloudflare/OpenDNS/Control D/DNS.SB values below are conservative project
+    # caps, not official numeric QPS limits.
     query_rate_limit:
       enabled: true
       providers:
@@ -73,7 +76,7 @@ defaults:
           qps_per_worker: 50.0
           burst: 50
           max_pending: 100
-        quad9_ecs:
+        quad9_ecs_public_dns:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
@@ -85,38 +88,43 @@ defaults:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
-        controld_unfiltered_dns:
+        controld_unfiltered_public_dns:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
-        custom:
+        dns_sb_public_dns:
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
+        unrecognized_resolver:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
     # Mandatory NS lookup for the parsed registrable domain. Delegation does
-    # not use ECS. Stage-level nameservers/timeout/query_rate_limit override
+    # not use ECS. Stage-level resolvers/timeout/query_rate_limit override
     # the top-level DNS defaults when present.
     # Timeout/SERVFAIL are retried up to this stage-specific attempt count and
     # are not cached after retry exhaustion.
     delegation:
       # Example non-ECS delegation pool:
-      # nameservers:
-      #   - system_resolver
-      #   - 1.1.1.1
-      #   - 1.0.0.1
-      #   - 76.76.2.0
-      #   - 76.76.10.0
-      # query_balancer:
-      #   enabled: true
-      #   strategy: round_robin
-      #   weights:
-      #     system_resolver: 1
-      #     1.1.1.1: 1
-      #     1.0.0.1: 1
+      # resolvers:
+      #   - resolver: system_resolver
+      #   - resolver: 1.1.1.1
+      #   - resolver: 1.0.0.1
+      #   - resolver: 76.76.2.0
+      #   - resolver: 76.76.10.0
+      #   - resolver: 185.222.222.222
+      #   - resolver: 45.11.45.11
+      # Example weighted delegation pool:
+      # resolvers:
+      #   - resolver: system_resolver
+      #     weight: 2
+      #   - resolver: 1.1.1.1
+      #     weight: 1
       retry_attempts: 3
     # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
-    # coordinator from delegation. It inherits dns.default_nameservers unless
-    # nameservers is provided here. ECS applies only to host resolution; when
+    # coordinator from delegation. It inherits dns.default_resolvers unless
+    # resolvers is provided here. ECS applies only to host resolution; when
     # enabled, use resolvers that preserve ECS behavior, such as Google Public
     # DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS (9.9.9.11, 149.112.112.11).
     # Cloudflare 1.1.1.1 and Cisco Umbrella are not default ECS targets here
@@ -126,9 +134,9 @@ defaults:
     # after retry exhaustion.
     host_resolution:
       enabled: false
-      # nameservers:
-      #   - 8.8.8.8
-      #   - 8.8.4.4
+      # resolvers:
+      #   - resolver: 8.8.8.8
+      #   - resolver: 8.8.4.4
       # Optional EDNS Client Subnet (ECS) settings. Set enabled=true and provide
       # a CIDR subnet when querying a resolver that accepts client-supplied ECS.
       ecs:
@@ -138,15 +146,6 @@ defaults:
         # Scope to advertise in the ECS option. Leave at 0 unless you have a
         # specific resolver-side requirement.
         scope_prefix_length: 0
-      # Stage-local endpoint selection for live uncached host DNS lookups.
-      query_balancer:
-        enabled: true
-        strategy: round_robin
-        weights: {}
-        # Example weighted host-resolution pool:
-        # weights:
-        #   8.8.8.8: 2
-        #   8.8.4.4: 1
       retry_attempts: 3
 
   geo:
@@ -222,7 +221,7 @@ sources:
     fetch:
       request_timeout: 30.0
     dns:
-      default_nameservers: []
+      default_resolvers: []
       timeout: 5.0
       query_rate_limit:
         enabled: true
@@ -234,10 +233,6 @@ sources:
           enabled: false
           subnet: ""
           scope_prefix_length: 0
-        query_balancer:
-          enabled: true
-          strategy: round_robin
-          weights: {}
         retry_attempts: 3
     geo:
       enabled: false

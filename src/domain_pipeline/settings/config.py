@@ -131,7 +131,9 @@ class DNSRateLimitProvidersConfig(StrictModel):
     # day as a monthly DNS Security average, not a public per-client QPS cap.
     # Control D Free DNS: unfiltered endpoints are public anycast resolvers; no
     # numeric public per-client QPS cap found in the official free DNS docs.
-    # Cloudflare/OpenDNS/Control D defaults are conservative project caps.
+    # DNS.SB: public resolvers document no logging and DNSSEC; no numeric public
+    # per-client QPS cap found in the official DNS.SB docs.
+    # Cloudflare/OpenDNS/Control D/DNS.SB defaults are conservative project caps.
     system_resolver: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=50.0, burst=50, max_pending=100
@@ -142,7 +144,7 @@ class DNSRateLimitProvidersConfig(StrictModel):
             qps_per_worker=50.0, burst=50, max_pending=100
         )
     )
-    quad9_ecs: DNSProviderRateLimitConfig = Field(
+    quad9_ecs_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=25.0, burst=25, max_pending=50
         )
@@ -157,16 +159,36 @@ class DNSRateLimitProvidersConfig(StrictModel):
             qps_per_worker=25.0, burst=25, max_pending=50
         )
     )
-    controld_unfiltered_dns: DNSProviderRateLimitConfig = Field(
+    controld_unfiltered_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=25.0, burst=25, max_pending=50
         )
     )
-    custom: DNSProviderRateLimitConfig = Field(
+    dns_sb_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=25.0, burst=25, max_pending=50
         )
     )
+    unrecognized_resolver: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=25.0, burst=25, max_pending=50
+        )
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_custom_provider(cls, data: Any) -> Any:
+        """Accept the legacy custom resolver bucket as unrecognized_resolver."""
+        if not isinstance(data, dict) or "custom" not in data:
+            return data
+        if "unrecognized_resolver" in data:
+            raise ValueError(
+                "dns.query_rate_limit.providers cannot define both custom "
+                "and unrecognized_resolver"
+            )
+        normalized = dict(data)
+        normalized["unrecognized_resolver"] = normalized.pop("custom")
+        return normalized
 
 
 class DNSQueryRateLimitConfig(StrictModel):
@@ -178,41 +200,27 @@ class DNSQueryRateLimitConfig(StrictModel):
     )
 
 
-class DNSQueryBalancerConfig(StrictModel):
-    """DNS endpoint balancing and traffic-share settings."""
+class DNSResolverConfig(StrictModel):
+    """One recursive DNS resolver endpoint and optional traffic weight."""
 
-    enabled: bool = True
-    strategy: Literal["round_robin"] = "round_robin"
-    weights: dict[str, int] = Field(default_factory=dict)
+    resolver: str
+    weight: int | None = None
 
-    @field_validator("weights", mode="before")
+    @field_validator("resolver", mode="after")
     @classmethod
-    def _normalize_weights(cls, value: Any) -> dict[str, int]:
+    def _normalize_resolver(cls, value: str) -> str:
+        return _normalize_dns_resolver_literal(value, field_name="dns resolver")
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _validate_weight(cls, value: Any) -> int | None:
         if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise ValueError("dns stage query_balancer.weights must be a mapping")
-        normalized: dict[str, int] = {}
-        for raw_key, raw_weight in value.items():
-            if not isinstance(raw_key, str):
-                raise ValueError(
-                    "dns stage query_balancer.weights keys must be IP addresses "
-                    "or 'system_resolver'"
-                )
-            key = _normalize_dns_nameserver_literal(
-                raw_key, field_name="dns stage query_balancer.weights"
-            )
-            if isinstance(raw_weight, bool) or not isinstance(raw_weight, int):
-                raise ValueError(
-                    "dns stage query_balancer.weights values must be integers >= 1"
-                )
-            if raw_weight < 1:
-                raise ValueError(
-                    "dns stage query_balancer.weights values must be integers >= 1"
-                )
-            if raw_weight > 1:
-                normalized[key] = raw_weight
-        return normalized
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("dns resolver weight must be an integer >= 1")
+        if value < 1:
+            raise ValueError("dns resolver weight must be an integer >= 1")
+        return value
 
 
 class DNSECSConfig(StrictModel):
@@ -257,10 +265,24 @@ class DNSECSConfig(StrictModel):
 class DNSStageResolverConfig(StrictModel):
     """Optional resolver overrides for one DNS stage."""
 
-    nameservers: list[str] | None = None
+    resolvers: list[DNSResolverConfig] | None = None
     timeout: float | None = None
     query_rate_limit: DNSQueryRateLimitConfig | None = None
-    query_balancer: DNSQueryBalancerConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_resolver_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if "nameservers" in value:
+            raise ValueError(
+                "dns stage nameservers is unsupported; use dns stage resolvers"
+            )
+        if "query_balancer" in value:
+            raise ValueError(
+                "dns stage query_balancer is unsupported; put weight on each resolver"
+            )
+        return value
 
     @field_validator("timeout", mode="after")
     @classmethod
@@ -268,6 +290,15 @@ class DNSStageResolverConfig(StrictModel):
         if value is None:
             return None
         return _validate_dns_timeout(value)
+
+    @field_validator("resolvers", mode="after")
+    @classmethod
+    def _validate_resolver_weights(
+        cls, values: list[DNSResolverConfig] | None
+    ) -> list[DNSResolverConfig] | None:
+        if values is None:
+            return None
+        return _validate_dns_resolver_weights(values, field_name="dns stage resolvers")
 
 
 class DNSDelegationConfig(DNSStageResolverConfig):
@@ -292,15 +323,6 @@ class DNSDelegationConfig(DNSStageResolverConfig):
             raise ValueError("dns.delegation.retry_attempts must be >= 1")
         return value
 
-    @field_validator("nameservers", mode="after")
-    @classmethod
-    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
-        if values is None:
-            return None
-        return _normalize_dns_nameservers(
-            values, field_name="dns.delegation.nameservers"
-        )
-
 
 class DNSHostResolutionConfig(DNSStageResolverConfig):
     """Optional host-resolution stage settings."""
@@ -316,17 +338,8 @@ class DNSHostResolutionConfig(DNSStageResolverConfig):
             raise ValueError("dns.host_resolution.retry_attempts must be >= 1")
         return value
 
-    @field_validator("nameservers", mode="after")
-    @classmethod
-    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
-        if values is None:
-            return None
-        return _normalize_dns_nameservers(
-            values, field_name="dns.host_resolution.nameservers"
-        )
 
-
-def _normalize_dns_nameserver_literal(value: str, *, field_name: str) -> str:
+def _normalize_dns_resolver_literal(value: str, *, field_name: str) -> str:
     """Return one normalized DNS resolver endpoint literal."""
     stripped = value.strip()
     if not stripped:
@@ -345,12 +358,17 @@ def _normalize_dns_nameserver_literal(value: str, *, field_name: str) -> str:
         ) from exc
 
 
-def _normalize_dns_nameservers(values: list[str], *, field_name: str) -> list[str]:
-    """Return normalized DNS resolver endpoint literals."""
-    return [
-        _normalize_dns_nameserver_literal(value, field_name=field_name)
-        for value in values
-    ]
+def _validate_dns_resolver_weights(
+    values: list[DNSResolverConfig], *, field_name: str
+) -> list[DNSResolverConfig]:
+    """Return resolver entries after enforcing all-or-none weight configuration."""
+    weighted_count = sum(entry.weight is not None for entry in values)
+    if weighted_count not in (0, len(values)):
+        raise ValueError(
+            f"{field_name} weight must be provided for every resolver "
+            "or omitted for every resolver"
+        )
+    return values
 
 
 def _validate_dns_timeout(value: float) -> float:
@@ -363,7 +381,7 @@ def _validate_dns_timeout(value: float) -> float:
 class DNSConfig(StrictModel):
     """DNS resolver pool settings and DNS stages."""
 
-    default_nameservers: list[str] = Field(default_factory=list)
+    default_resolvers: list[DNSResolverConfig] = Field(default_factory=list)
     timeout: float = 5.0
     query_rate_limit: DNSQueryRateLimitConfig = Field(
         default_factory=DNSQueryRateLimitConfig
@@ -380,25 +398,32 @@ class DNSConfig(StrictModel):
             return value
         if "enabled" in value:
             raise ValueError("dns.enabled is unsupported; dns.delegation is mandatory")
+        if "default_nameservers" in value:
+            raise ValueError(
+                "dns.default_nameservers is unsupported; use dns.default_resolvers"
+            )
         if "nameservers" in value:
             raise ValueError(
-                "dns.nameservers is unsupported; use dns.default_nameservers or "
-                "stage-specific dns.delegation.nameservers / "
-                "dns.host_resolution.nameservers"
+                "dns.nameservers is unsupported; use dns.default_resolvers or "
+                "stage-specific dns.delegation.resolvers / "
+                "dns.host_resolution.resolvers"
             )
         if "ecs" in value:
             raise ValueError("dns.ecs is unsupported; use dns.host_resolution.ecs")
         if "query_balancer" in value:
             raise ValueError(
-                "dns.query_balancer is unsupported; use "
-                "dns.delegation.query_balancer or dns.host_resolution.query_balancer"
+                "dns.query_balancer is unsupported; put weight on each stage resolver"
             )
         return value
 
-    @field_validator("default_nameservers", mode="after")
+    @field_validator("default_resolvers", mode="after")
     @classmethod
-    def _normalize_nameservers(cls, values: list[str]) -> list[str]:
-        return _normalize_dns_nameservers(values, field_name="dns.default_nameservers")
+    def _validate_default_resolver_weights(
+        cls, values: list[DNSResolverConfig]
+    ) -> list[DNSResolverConfig]:
+        return _validate_dns_resolver_weights(
+            values, field_name="dns.default_resolvers"
+        )
 
     @field_validator("timeout", mode="after")
     @classmethod

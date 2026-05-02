@@ -17,25 +17,31 @@ defaults:
 
   dns:
     # Delegation-only block checks use the platform resolver plus Cloudflare
-    # Public DNS and Control D unfiltered with ECS disabled. Worker-local query
-    # balancing uses per-resolver weights for traffic share, while per-provider
-    # rate limits cap throughput inside the delegation pool. Cloudflare/Control
-    # D publish no numeric public per-client QPS ceiling, so each uses the
+    # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled. Resolver
+    # weights control traffic share, while per-provider rate limits cap
+    # throughput inside the delegation pool. Cloudflare/Control D/DNS.SB
+    # publish no numeric public per-client QPS ceiling, so each uses the
     # conservative project cap of 25 QPS per worker, burst 25, max_pending 50.
-    default_nameservers: []
+    default_resolvers: []
     timeout: 5.0
     query_rate_limit:
       enabled: true
     delegation:
-      nameservers:
-        - system_resolver
-        - 1.1.1.1
-        - 1.0.0.1
-      query_balancer:
-        weights:
-          system_resolver: 1
-          1.1.1.1: 1
-          1.0.0.1: 1
+      resolvers:
+        - resolver: system_resolver
+          weight: 4
+        - resolver: 1.1.1.1
+          weight: 3
+        # - resolver: 1.0.0.1
+        #   weight: 3
+        - resolver: 76.76.2.0
+          weight: 2
+        # - resolver: 76.76.10.0
+        #   weight: 2
+        - resolver: 185.222.222.222
+          weight: 2
+        # - resolver: 45.11.45.11
+        #   weight: 2
       retry_attempts: 3
     host_resolution:
       enabled: false

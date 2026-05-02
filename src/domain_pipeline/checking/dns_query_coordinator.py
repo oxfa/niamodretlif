@@ -18,18 +18,20 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_SYSTEM_RESOLVER = "system_resolver"
 PROVIDER_GOOGLE_PUBLIC_DNS = "google_public_dns"
-PROVIDER_QUAD9_ECS = "quad9_ecs"
+PROVIDER_QUAD9_ECS_PUBLIC_DNS = "quad9_ecs_public_dns"
 PROVIDER_CLOUDFLARE_PUBLIC_DNS = "cloudflare_public_dns"
 PROVIDER_OPENDNS_PUBLIC_DNS = "opendns_public_dns"
-PROVIDER_CONTROLD_UNFILTERED_DNS = "controld_unfiltered_dns"
-PROVIDER_CUSTOM = "custom"
+PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS = "controld_unfiltered_public_dns"
+PROVIDER_DNS_SB_PUBLIC_DNS = "dns_sb_public_dns"
+PROVIDER_UNRECOGNIZED_RESOLVER = "unrecognized_resolver"
 SYSTEM_NAMESERVER = "system_resolver"
 
 GOOGLE_PUBLIC_DNS_NAMESERVERS = frozenset({"8.8.8.8", "8.8.4.4"})
-QUAD9_ECS_NAMESERVERS = frozenset({"9.9.9.11", "149.112.112.11"})
+QUAD9_ECS_PUBLIC_DNS_NAMESERVERS = frozenset({"9.9.9.11", "149.112.112.11"})
 CLOUDFLARE_PUBLIC_DNS_NAMESERVERS = frozenset({"1.1.1.1", "1.0.0.1"})
 OPENDNS_NAMESERVERS = frozenset({"208.67.222.222", "208.67.220.220"})
-CONTROLD_UNFILTERED_NAMESERVERS = frozenset({"76.76.2.0", "76.76.10.0"})
+CONTROLD_UNFILTERED_PUBLIC_DNS_NAMESERVERS = frozenset({"76.76.2.0", "76.76.10.0"})
+DNS_SB_PUBLIC_NAMESERVERS = frozenset({"185.222.222.222", "45.11.45.11"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,8 +48,6 @@ class DNSQueryCoordinatorConfig:
     """Normalized query coordination settings used by the registry key."""
 
     rate_limit_enabled: bool
-    balancer_enabled: bool
-    balancer_strategy: str
     provider_limits: dict[str, DNSProviderRateLimit]
 
 
@@ -105,9 +105,8 @@ class PendingQueryLimiter:
 class DNSQueryBalancer:
     """Thread-safe deterministic weighted round-robin selector for DNS endpoints."""
 
-    def __init__(self, endpoints: list[DNSEndpoint], *, enabled: bool) -> None:
+    def __init__(self, endpoints: list[DNSEndpoint]) -> None:
         self._endpoints = list(endpoints)
-        self._enabled = enabled
         self._total_weight = sum(max(1, endpoint.weight) for endpoint in endpoints)
         self._positions: dict[tuple[str, str], int] = {}
         self._lock = threading.Lock()
@@ -127,7 +126,7 @@ class DNSQueryBalancer:
         """Return the next endpoint for a stage and record type."""
         if not self._endpoints:
             raise RuntimeError("DNS query coordinator requires at least one endpoint")
-        if len(self._endpoints) == 1 or not self._enabled:
+        if len(self._endpoints) == 1:
             return self._endpoints[0]
         key = (stage, record_type)
         with self._lock:
@@ -154,9 +153,7 @@ class DNSQueryCoordinator:
         self.endpoints = list(endpoints)
         self._resolver_key = resolver_key
         self._config = config
-        self._balancer = DNSQueryBalancer(
-            self.endpoints, enabled=config.balancer_enabled
-        )
+        self._balancer = DNSQueryBalancer(self.endpoints)
         self._rate_limiters = {
             provider: TokenBucketRateLimiter(
                 qps=limit.qps_per_worker,
@@ -324,15 +321,17 @@ def provider_for_nameserver(nameserver: str | None) -> str:
         return PROVIDER_SYSTEM_RESOLVER
     if nameserver in GOOGLE_PUBLIC_DNS_NAMESERVERS:
         return PROVIDER_GOOGLE_PUBLIC_DNS
-    if nameserver in QUAD9_ECS_NAMESERVERS:
-        return PROVIDER_QUAD9_ECS
+    if nameserver in QUAD9_ECS_PUBLIC_DNS_NAMESERVERS:
+        return PROVIDER_QUAD9_ECS_PUBLIC_DNS
     if nameserver in CLOUDFLARE_PUBLIC_DNS_NAMESERVERS:
         return PROVIDER_CLOUDFLARE_PUBLIC_DNS
     if nameserver in OPENDNS_NAMESERVERS:
         return PROVIDER_OPENDNS_PUBLIC_DNS
-    if nameserver in CONTROLD_UNFILTERED_NAMESERVERS:
-        return PROVIDER_CONTROLD_UNFILTERED_DNS
-    return PROVIDER_CUSTOM
+    if nameserver in CONTROLD_UNFILTERED_PUBLIC_DNS_NAMESERVERS:
+        return PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS
+    if nameserver in DNS_SB_PUBLIC_NAMESERVERS:
+        return PROVIDER_DNS_SB_PUBLIC_DNS
+    return PROVIDER_UNRECOGNIZED_RESOLVER
 
 
 def build_dns_resolver(
