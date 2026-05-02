@@ -29,6 +29,7 @@ from domain_pipeline.checking.dns_query_coordinator import (
     DNSQueryCoordinatorConfig,
     DNSQueryCoordinatorRegistry,
     PROVIDER_CLOUDFLARE_PUBLIC_DNS,
+    PROVIDER_CONTROLD_UNFILTERED_DNS,
     PROVIDER_CUSTOM,
     PROVIDER_GOOGLE_PUBLIC_DNS,
     PROVIDER_OPENDNS_PUBLIC_DNS,
@@ -62,9 +63,11 @@ DNS_PROFILE_KEYS = (
 # - Cisco Umbrella/OpenDNS: public resolver IPs are documented; DNS Security
 #   packages document 5000 DNS queries per Covered User per day as a monthly
 #   average, not a public per-client QPS ceiling.
+# - Control D Free DNS: unfiltered legacy endpoints are documented on a global
+#   anycast network; no numeric public per-client QPS ceiling was found.
 # Project caps below are worker-local and intentionally below published numeric
-# thresholds; Cloudflare/OpenDNS use conservative project caps because their
-# public docs do not publish per-client QPS ceilings.
+# thresholds; Cloudflare/OpenDNS/Control D use conservative project caps because
+# their public docs do not publish per-client QPS ceilings.
 DEFAULT_DNS_PROVIDER_LIMITS = {
     PROVIDER_SYSTEM_RESOLVER: DNSProviderRateLimit(
         qps_per_worker=50.0, burst=50, max_pending=100
@@ -79,6 +82,9 @@ DEFAULT_DNS_PROVIDER_LIMITS = {
         qps_per_worker=25.0, burst=25, max_pending=50
     ),
     PROVIDER_OPENDNS_PUBLIC_DNS: DNSProviderRateLimit(
+        qps_per_worker=25.0, burst=25, max_pending=50
+    ),
+    PROVIDER_CONTROLD_UNFILTERED_DNS: DNSProviderRateLimit(
         qps_per_worker=25.0, burst=25, max_pending=50
     ),
     PROVIDER_CUSTOM: DNSProviderRateLimit(

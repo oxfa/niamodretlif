@@ -296,6 +296,8 @@ class ResultCollectorWriter:
                     key=lambda current: (_txt_output_value(current), current["host"]),
                 ):
                     unactionable_handle.write(f"{_txt_output_value(row)}\n")
+        elif unactionable_path.exists():
+            unactionable_path.unlink()
         if group.review_rows:
             write_review_rows(review_path, group.review_rows)
             logger.debug(
@@ -303,6 +305,8 @@ class ResultCollectorWriter:
                 len(group.review_rows),
                 review_path,
             )
+        elif review_path.exists():
+            review_path.unlink()
 
     def write(self) -> WriterResult:
         """Write collected results to their final output files."""
