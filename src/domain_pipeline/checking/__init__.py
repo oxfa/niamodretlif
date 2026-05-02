@@ -10,10 +10,13 @@ from .domain_checker import (
     QUAD9_ECS_NAMESERVERS,
     RetryableDNSLookupError,
     classify,
+    delegation_dns_profile,
     dns_query_coordinator_config,
     dns_query_coordinator_key,
     dns_resolver_key,
     effective_dns_nameservers,
+    effective_host_resolution_nameservers,
+    host_resolution_dns_profile,
 )
 from .dns_query_coordinator import (
     DNSQueryCoordinator,
@@ -80,10 +83,13 @@ __all__ = [
     "RetryableDNSLookupError",
     "build_geo_provider",
     "classify",
+    "delegation_dns_profile",
     "dns_query_coordinator_config",
     "dns_query_coordinator_key",
     "dns_resolver_key",
     "effective_dns_nameservers",
+    "effective_host_resolution_nameservers",
+    "host_resolution_dns_profile",
     "evaluate_geo_policy",
     "provider_for_nameserver",
 ]

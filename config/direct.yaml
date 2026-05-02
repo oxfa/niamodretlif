@@ -16,43 +16,46 @@ defaults:
     request_timeout: 30.0
 
   dns:
-    # Host-resolution uses Google Public DNS plus Quad9 ECS endpoints.
-    # Delegation overrides below keep NS lookups on the platform resolver plus
-    # Cloudflare Public DNS and Control D unfiltered with ECS disabled.
-    # Worker-local query balancing and per-provider rate limits spread retries
-    # inside each stage pool. Cloudflare/Control D publish no numeric
-    # public per-client QPS ceiling, so each uses the conservative project cap
-    # of 25 QPS per worker, burst 25, max_pending 50; total QPS still scales
-    # with workflow worker_count.
-    nameservers:
-      - 8.8.8.8
-      - 8.8.4.4
-      - 9.9.9.11
-      - 149.112.112.11
+    # Delegation and host-resolution use separate resolver pools. Worker-local
+    # query balancing uses per-resolver weights for traffic share, while
+    # per-provider rate limits cap throughput. Cloudflare publishes no numeric
+    # public per-client QPS ceiling, so it uses the conservative project cap of
+    # 25 QPS per worker, burst 25, max_pending 50; total QPS still scales with
+    # workflow worker_count.
+    default_nameservers: []
     timeout: 5.0
-    ecs:
-      enabled: true
-      subnet: "140.206.64.0/24"
-      scope_prefix_length: 0
     query_rate_limit:
       enabled: true
-    query_balancer:
-      enabled: true
-      strategy: round_robin
     delegation:
       nameservers:
         - system_resolver
         - 1.1.1.1
-        - 1.0.0.1
-        - 76.76.2.0
-        - 76.76.10.0
-      ecs:
-        enabled: false
-        subnet: ""
-        scope_prefix_length: 0
+        # - 1.0.0.1
+      query_balancer:
+        weights:
+          system_resolver: 1
+          1.1.1.1: 1
+          # 1.0.0.1: 1
       retry_attempts: 3
     host_resolution:
       enabled: true
+      nameservers:
+        - 8.8.8.8
+        - 8.8.4.4
+        - 9.9.9.11
+        - 149.112.112.11
+      ecs:
+        enabled: true
+        subnet: "140.206.64.0/24"
+        scope_prefix_length: 0
+      query_balancer:
+        enabled: true
+        strategy: round_robin
+        weights:
+          8.8.8.8: 1
+          8.8.4.4: 1
+          9.9.9.11: 1
+          149.112.112.11: 1
       retry_attempts: 3
 
   output:

@@ -179,10 +179,40 @@ class DNSQueryRateLimitConfig(StrictModel):
 
 
 class DNSQueryBalancerConfig(StrictModel):
-    """DNS endpoint balancing settings."""
+    """DNS endpoint balancing and traffic-share settings."""
 
     enabled: bool = True
     strategy: Literal["round_robin"] = "round_robin"
+    weights: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("weights", mode="before")
+    @classmethod
+    def _normalize_weights(cls, value: Any) -> dict[str, int]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("dns stage query_balancer.weights must be a mapping")
+        normalized: dict[str, int] = {}
+        for raw_key, raw_weight in value.items():
+            if not isinstance(raw_key, str):
+                raise ValueError(
+                    "dns stage query_balancer.weights keys must be IP addresses "
+                    "or 'system_resolver'"
+                )
+            key = _normalize_dns_nameserver_literal(
+                raw_key, field_name="dns stage query_balancer.weights"
+            )
+            if isinstance(raw_weight, bool) or not isinstance(raw_weight, int):
+                raise ValueError(
+                    "dns stage query_balancer.weights values must be integers >= 1"
+                )
+            if raw_weight < 1:
+                raise ValueError(
+                    "dns stage query_balancer.weights values must be integers >= 1"
+                )
+            if raw_weight > 1:
+                normalized[key] = raw_weight
+        return normalized
 
 
 class DNSECSConfig(StrictModel):
@@ -201,7 +231,9 @@ class DNSECSConfig(StrictModel):
         try:
             network = ipaddress.ip_network(stripped, strict=False)
         except ValueError as exc:
-            raise ValueError("dns.ecs.subnet must be a valid CIDR subnet") from exc
+            raise ValueError(
+                "dns.host_resolution.ecs.subnet must be a valid CIDR subnet"
+            ) from exc
         return network.with_prefixlen
 
     @model_validator(mode="after")
@@ -209,38 +241,26 @@ class DNSECSConfig(StrictModel):
         if not self.enabled:
             return self
         if not self.subnet:
-            raise ValueError("dns.ecs.enabled=true requires dns.ecs.subnet")
+            raise ValueError(
+                "dns.host_resolution.ecs.enabled=true requires "
+                "dns.host_resolution.ecs.subnet"
+            )
         network = ipaddress.ip_network(self.subnet, strict=False)
         if not 0 <= self.scope_prefix_length <= network.max_prefixlen:
             raise ValueError(
-                "dns.ecs.scope_prefix_length must be within the subnet address family range"
+                "dns.host_resolution.ecs.scope_prefix_length must be within "
+                "the subnet address family range"
             )
         return self
 
 
-class DNSStageConfig(StrictModel):
-    """Retry and optional resolver overrides for one DNS stage."""
+class DNSStageResolverConfig(StrictModel):
+    """Optional resolver overrides for one DNS stage."""
 
-    retry_attempts: int = 3
     nameservers: list[str] | None = None
     timeout: float | None = None
-    ecs: DNSECSConfig | None = None
     query_rate_limit: DNSQueryRateLimitConfig | None = None
     query_balancer: DNSQueryBalancerConfig | None = None
-
-    @field_validator("retry_attempts", mode="after")
-    @classmethod
-    def _validate_retry_attempts(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("dns stage retry_attempts must be >= 1")
-        return value
-
-    @field_validator("nameservers", mode="after")
-    @classmethod
-    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
-        if values is None:
-            return None
-        return _normalize_dns_nameservers(values)
 
     @field_validator("timeout", mode="after")
     @classmethod
@@ -250,33 +270,87 @@ class DNSStageConfig(StrictModel):
         return _validate_dns_timeout(value)
 
 
-class DNSHostResolutionConfig(DNSStageConfig):
+class DNSDelegationConfig(DNSStageResolverConfig):
+    """Mandatory delegation-stage DNS resolver settings."""
+
+    retry_attempts: int = 3
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_host_resolution_only_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "ecs" in value:
+            raise ValueError(
+                "dns.delegation.ecs is unsupported; ECS only applies to "
+                "dns.host_resolution.ecs"
+            )
+        return value
+
+    @field_validator("retry_attempts", mode="after")
+    @classmethod
+    def _validate_retry_attempts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("dns.delegation.retry_attempts must be >= 1")
+        return value
+
+    @field_validator("nameservers", mode="after")
+    @classmethod
+    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return _normalize_dns_nameservers(
+            values, field_name="dns.delegation.nameservers"
+        )
+
+
+class DNSHostResolutionConfig(DNSStageResolverConfig):
     """Optional host-resolution stage settings."""
 
     enabled: bool | None = None
+    retry_attempts: int = 3
+    ecs: DNSECSConfig = Field(default_factory=DNSECSConfig)
+
+    @field_validator("retry_attempts", mode="after")
+    @classmethod
+    def _validate_retry_attempts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("dns.host_resolution.retry_attempts must be >= 1")
+        return value
+
+    @field_validator("nameservers", mode="after")
+    @classmethod
+    def _normalize_nameservers(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return _normalize_dns_nameservers(
+            values, field_name="dns.host_resolution.nameservers"
+        )
 
 
-def _normalize_dns_nameservers(values: list[str]) -> list[str]:
+def _normalize_dns_nameserver_literal(value: str, *, field_name: str) -> str:
+    """Return one normalized DNS resolver endpoint literal."""
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(
+            f"{field_name} entries must be non-empty IP addresses or "
+            "'system_resolver'"
+        )
+    if stripped == SYSTEM_DNS_NAMESERVER:
+        return SYSTEM_DNS_NAMESERVER
+    try:
+        return str(ipaddress.ip_address(stripped))
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} entries must be valid IPv4/IPv6 addresses "
+            f"or 'system_resolver' (got {value!r})"
+        ) from exc
+
+
+def _normalize_dns_nameservers(values: list[str], *, field_name: str) -> list[str]:
     """Return normalized DNS resolver endpoint literals."""
-    normalized: list[str] = []
-    for value in values:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError(
-                "dns.nameservers entries must be non-empty IP addresses or "
-                "'system_resolver'"
-            )
-        if stripped == SYSTEM_DNS_NAMESERVER:
-            normalized.append(SYSTEM_DNS_NAMESERVER)
-            continue
-        try:
-            normalized.append(str(ipaddress.ip_address(stripped)))
-        except ValueError as exc:
-            raise ValueError(
-                "dns.nameservers entries must be valid IPv4/IPv6 addresses "
-                f"or 'system_resolver' (got {value!r})"
-            ) from exc
-    return normalized
+    return [
+        _normalize_dns_nameserver_literal(value, field_name=field_name)
+        for value in values
+    ]
 
 
 def _validate_dns_timeout(value: float) -> float:
@@ -289,16 +363,12 @@ def _validate_dns_timeout(value: float) -> float:
 class DNSConfig(StrictModel):
     """DNS resolver pool settings and DNS stages."""
 
-    nameservers: list[str] = Field(default_factory=list)
+    default_nameservers: list[str] = Field(default_factory=list)
     timeout: float = 5.0
-    ecs: DNSECSConfig = Field(default_factory=DNSECSConfig)
     query_rate_limit: DNSQueryRateLimitConfig = Field(
         default_factory=DNSQueryRateLimitConfig
     )
-    query_balancer: DNSQueryBalancerConfig = Field(
-        default_factory=DNSQueryBalancerConfig
-    )
-    delegation: DNSStageConfig = Field(default_factory=DNSStageConfig)
+    delegation: DNSDelegationConfig = Field(default_factory=DNSDelegationConfig)
     host_resolution: DNSHostResolutionConfig = Field(
         default_factory=DNSHostResolutionConfig
     )
@@ -306,14 +376,29 @@ class DNSConfig(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_legacy_enabled(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "enabled" in value:
+        if not isinstance(value, dict):
+            return value
+        if "enabled" in value:
             raise ValueError("dns.enabled is unsupported; dns.delegation is mandatory")
+        if "nameservers" in value:
+            raise ValueError(
+                "dns.nameservers is unsupported; use dns.default_nameservers or "
+                "stage-specific dns.delegation.nameservers / "
+                "dns.host_resolution.nameservers"
+            )
+        if "ecs" in value:
+            raise ValueError("dns.ecs is unsupported; use dns.host_resolution.ecs")
+        if "query_balancer" in value:
+            raise ValueError(
+                "dns.query_balancer is unsupported; use "
+                "dns.delegation.query_balancer or dns.host_resolution.query_balancer"
+            )
         return value
 
-    @field_validator("nameservers", mode="after")
+    @field_validator("default_nameservers", mode="after")
     @classmethod
     def _normalize_nameservers(cls, values: list[str]) -> list[str]:
-        return _normalize_dns_nameservers(values)
+        return _normalize_dns_nameservers(values, field_name="dns.default_nameservers")
 
     @field_validator("timeout", mode="after")
     @classmethod

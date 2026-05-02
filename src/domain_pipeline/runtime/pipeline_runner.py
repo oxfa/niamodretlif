@@ -15,8 +15,11 @@ from domain_pipeline.checking import (
     DomainChecker,
     HostResolutionResult,
     QUAD9_ECS_NAMESERVERS,
+    delegation_dns_profile,
     dns_resolver_key,
     effective_dns_nameservers,
+    effective_host_resolution_nameservers,
+    host_resolution_dns_profile,
 )
 from domain_pipeline.io.parser import (
     DomainListParser,
@@ -45,6 +48,7 @@ __all__ = [
     "classify_entry",
     "dns_resolver_key",
     "effective_dns_nameservers",
+    "effective_host_resolution_nameservers",
 ]
 
 
@@ -97,13 +101,10 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
     """Build a DNS checker from one normalized source config."""
     dns_config = source_config["dns"]
     return DomainChecker(
-        nameservers=effective_dns_nameservers(dns_config),
         timeout=float(dns_config.get("timeout", 5.0)),
-        ecs=dns_config.get("ecs", {}),
         query_rate_limit=dns_config.get("query_rate_limit", {}),
-        query_balancer=dns_config.get("query_balancer", {}),
-        delegation_dns=dns_config.get("delegation", {}),
-        host_resolution_dns=dns_config.get("host_resolution", {}),
+        delegation_dns=delegation_dns_profile(dns_config),
+        host_resolution_dns=host_resolution_dns_profile(dns_config),
         delegation_retry_attempts=int(
             dns_config.get("delegation", {}).get("retry_attempts", 3)
         ),
