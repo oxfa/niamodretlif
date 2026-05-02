@@ -267,7 +267,7 @@ jobs:
           capture_public_address() {
             label="$1"
             shift
-            if address="$(curl -fsS --max-time 10 "$@")"; then
+            if address="$(curl "$@" -fsS --max-time 10)"; then
               echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ${label}=${address}" | tee -a "${address_log_path}"
             else
               echo "worker runner public address worker_id=${{ matrix.worker_id }} batch_id=${{ needs.prepare_run.outputs.batch_id }} ${label}=unavailable" | tee -a "${address_log_path}"

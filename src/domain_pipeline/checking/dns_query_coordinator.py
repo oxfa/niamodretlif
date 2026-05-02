@@ -21,6 +21,7 @@ PROVIDER_GOOGLE_PUBLIC_DNS = "google_public_dns"
 PROVIDER_QUAD9_ECS = "quad9_ecs"
 PROVIDER_CLOUDFLARE_PUBLIC_DNS = "cloudflare_public_dns"
 PROVIDER_OPENDNS_PUBLIC_DNS = "opendns_public_dns"
+PROVIDER_CONTROLD_UNFILTERED_DNS = "controld_unfiltered_dns"
 PROVIDER_CUSTOM = "custom"
 SYSTEM_NAMESERVER = "system_resolver"
 
@@ -28,6 +29,7 @@ GOOGLE_PUBLIC_DNS_NAMESERVERS = frozenset({"8.8.8.8", "8.8.4.4"})
 QUAD9_ECS_NAMESERVERS = frozenset({"9.9.9.11", "149.112.112.11"})
 CLOUDFLARE_PUBLIC_DNS_NAMESERVERS = frozenset({"1.1.1.1", "1.0.0.1"})
 OPENDNS_NAMESERVERS = frozenset({"208.67.222.222", "208.67.220.220"})
+CONTROLD_UNFILTERED_NAMESERVERS = frozenset({"76.76.2.0", "76.76.10.0"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -317,6 +319,8 @@ def provider_for_nameserver(nameserver: str | None) -> str:
         return PROVIDER_CLOUDFLARE_PUBLIC_DNS
     if nameserver in OPENDNS_NAMESERVERS:
         return PROVIDER_OPENDNS_PUBLIC_DNS
+    if nameserver in CONTROLD_UNFILTERED_NAMESERVERS:
+        return PROVIDER_CONTROLD_UNFILTERED_DNS
     return PROVIDER_CUSTOM
 
 

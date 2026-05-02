@@ -17,10 +17,11 @@ defaults:
 
   dns:
     # Delegation-only block checks use the platform resolver plus Cloudflare
-    # Public DNS and Cisco Umbrella/OpenDNS with ECS disabled. Worker-local
-    # query balancing and per-provider rate limits spread retries inside the
-    # delegation pool. The Cloudflare/OpenDNS defaults cap each provider at
-    # 25 QPS per worker, burst 25, max_pending 50.
+    # Public DNS and Control D unfiltered with ECS disabled. Worker-local query
+    # balancing and per-provider rate limits spread retries inside the
+    # delegation pool. Cloudflare/Control D publish no numeric public per-client
+    # QPS ceiling, so each uses the conservative project cap of 25 QPS per
+    # worker, burst 25, max_pending 50.
     nameservers: []
     timeout: 5.0
     ecs:
@@ -37,8 +38,8 @@ defaults:
         - system_resolver
         - 1.1.1.1
         - 1.0.0.1
-        - 208.67.222.222
-        - 208.67.220.220
+        - 76.76.2.0
+        - 76.76.10.0
       retry_attempts: 3
     host_resolution:
       enabled: false

@@ -54,20 +54,18 @@ def audit_output_path_for_job(job: SourceJob) -> Path:
 
 
 def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> None:
-    """Write review rows to the CSV review output in deterministic order."""
+    """Replace the CSV review output with review rows in deterministic order."""
     if not review_rows:
         return
 
     review_path.parent.mkdir(parents=True, exist_ok=True)
-    should_write_header = not review_path.exists() or review_path.stat().st_size == 0
-    with review_path.open("a", encoding="utf-8", newline="") as review_handle:
+    with review_path.open("w", encoding="utf-8", newline="") as review_handle:
         writer = csv.DictWriter(
             review_handle,
             fieldnames=REVIEW_OUTPUT_COLUMNS,
             extrasaction="ignore",
         )
-        if should_write_header:
-            writer.writeheader()
+        writer.writeheader()
         for row in sorted(
             review_rows,
             key=lambda current: (

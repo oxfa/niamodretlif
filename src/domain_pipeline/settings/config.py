@@ -129,7 +129,9 @@ class DNSRateLimitProvidersConfig(StrictModel):
     # high-SERVFAIL traffic may be rate limited.
     # Cisco Umbrella/OpenDNS: documents 5000 DNS queries per Covered User per
     # day as a monthly DNS Security average, not a public per-client QPS cap.
-    # Cloudflare/OpenDNS defaults are therefore conservative project caps.
+    # Control D Free DNS: unfiltered endpoints are public anycast resolvers; no
+    # numeric public per-client QPS cap found in the official free DNS docs.
+    # Cloudflare/OpenDNS/Control D defaults are conservative project caps.
     system_resolver: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=50.0, burst=50, max_pending=100
@@ -151,6 +153,11 @@ class DNSRateLimitProvidersConfig(StrictModel):
         )
     )
     opendns_public_dns: DNSProviderRateLimitConfig = Field(
+        default_factory=lambda: DNSProviderRateLimitConfig(
+            qps_per_worker=25.0, burst=25, max_pending=50
+        )
+    )
+    controld_unfiltered_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=25.0, burst=25, max_pending=50
         )

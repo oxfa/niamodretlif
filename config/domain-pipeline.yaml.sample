@@ -71,8 +71,10 @@ defaults:
     # public QPS limit and warns high-rate/proxied/high-SERVFAIL traffic may be
     # rate limited. Cisco Umbrella/OpenDNS documents 5000 DNS queries per
     # Covered User per day as a monthly DNS Security average, not a public
-    # per-client QPS ceiling. Cloudflare/OpenDNS values below are conservative
-    # project caps, not official numeric QPS limits.
+    # per-client QPS ceiling. Control D documents free unfiltered anycast
+    # resolver endpoints but no numeric public per-client QPS ceiling.
+    # Cloudflare/OpenDNS/Control D values below are conservative project caps,
+    # not official numeric QPS limits.
     query_rate_limit:
       enabled: true
       providers:
@@ -93,6 +95,10 @@ defaults:
           burst: 25
           max_pending: 50
         opendns_public_dns:
+          qps_per_worker: 25.0
+          burst: 25
+          max_pending: 50
+        controld_unfiltered_dns:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
@@ -118,8 +124,8 @@ defaults:
       #   - system_resolver
       #   - 1.1.1.1
       #   - 1.0.0.1
-      #   - 208.67.222.222
-      #   - 208.67.220.220
+      #   - 76.76.2.0
+      #   - 76.76.10.0
       # ecs:
       #   enabled: false
       #   subnet: ""
