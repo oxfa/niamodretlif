@@ -14,10 +14,12 @@ from domain_pipeline.checking import (
     DelegationResult,
     DomainChecker,
     HostResolutionResult,
-    QUAD9_ECS_NAMESERVERS,
+    QUAD9_ECS_PUBLIC_DNS_NAMESERVERS,
     delegation_dns_profile,
     dns_resolver_key,
+    effective_dns_resolvers,
     effective_dns_nameservers,
+    effective_host_resolution_resolvers,
     effective_host_resolution_nameservers,
     host_resolution_dns_profile,
 )
@@ -41,13 +43,15 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_ECS_FALLBACK_NAMESERVERS",
-    "QUAD9_ECS_NAMESERVERS",
+    "QUAD9_ECS_PUBLIC_DNS_NAMESERVERS",
     "build_checker",
     "build_source_jobs",
     "classify_and_write_source",
     "classify_entry",
     "dns_resolver_key",
+    "effective_dns_resolvers",
     "effective_dns_nameservers",
+    "effective_host_resolution_resolvers",
     "effective_host_resolution_nameservers",
 ]
 
