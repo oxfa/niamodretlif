@@ -120,10 +120,12 @@ class AsyncPipelineRuntime:
         *,
         runtime_identity: dict[str, str] | None = None,
         prepared_metadata: dict[str, Any] | None = None,
+        effective_parallel_workers: int = 1,
     ) -> None:
+        _ = runtime_identity
         self.config = config
-        self.runtime_identity = runtime_identity or {}
         self.prepared_metadata = prepared_metadata or {}
+        self.effective_parallel_workers = max(1, int(effective_parallel_workers))
         self.writer = ResultCollectorWriter()
         cache_payload = config.get("cache", {})
         cache_file = str(cache_payload.get("cache_file", "")).strip()
@@ -146,12 +148,14 @@ class AsyncPipelineRuntime:
         *,
         runtime_identity: dict[str, str] | None = None,
         prepared_metadata: dict[str, Any] | None = None,
+        effective_parallel_workers: int = 1,
     ) -> "AsyncPipelineRuntime":
         """Build a runtime from a manifest-owned payload."""
         return cls(
             runtime_config,
             runtime_identity=runtime_identity,
             prepared_metadata=prepared_metadata,
+            effective_parallel_workers=effective_parallel_workers,
         )
 
     def close(self) -> None:
@@ -222,7 +226,10 @@ class AsyncPipelineRuntime:
     async def _lookup_delegation(
         self, job: SourceJob, entry: ParsedDomainEntry
     ) -> DelegationResult:
-        checker = build_checker(job.config)
+        checker = build_checker(
+            job.config,
+            effective_parallel_workers=self.effective_parallel_workers,
+        )
         resolver_key = checker.delegation_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_delegation_with_source(
@@ -264,7 +271,10 @@ class AsyncPipelineRuntime:
         self, job: SourceJob, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional dns.host_resolution stage."""
-        checker = build_checker(job.config)
+        checker = build_checker(
+            job.config,
+            effective_parallel_workers=self.effective_parallel_workers,
+        )
         resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_dns_with_source(
@@ -800,12 +810,14 @@ async def run_prepared_pipeline_async(
     runtime_identity: dict[str, str] | None = None,
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
+    effective_parallel_workers: int = 1,
 ) -> int:
     """Run one workflow-owned runtime payload."""
     runtime = AsyncPipelineRuntime.from_runtime_payload(
         runtime_config,
         runtime_identity=runtime_identity,
         prepared_metadata=prepared_metadata,
+        effective_parallel_workers=effective_parallel_workers,
     )
     try:
         if max_runtime_seconds is None:

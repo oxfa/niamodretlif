@@ -36,11 +36,12 @@ DNS_SB_PUBLIC_NAMESERVERS = frozenset({"185.222.222.222", "45.11.45.11"})
 
 @dataclasses.dataclass(frozen=True)
 class DNSProviderRateLimit:
-    """Provider-specific worker-local DNS query limits."""
+    """Provider-specific effective DNS query limits."""
 
     qps_per_worker: float
     burst: int
     max_pending: int
+    aggregate_qps_target: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,6 +60,48 @@ class DNSEndpoint:
     address: str | None
     resolver: Any
     weight: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSQueryAttemptFailure:
+    """One retryable failure observed while resolving a single DNS query."""
+
+    attempt: int
+    provider: str
+    nameserver: str
+    error_type: str
+
+
+class DNSQueryExhaustedError(Exception):
+    """Raised after one DNS query exhausts its retry budget."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        record_type: str,
+        attempts: int,
+        last_error: Exception,
+        failures: list[DNSQueryAttemptFailure],
+    ) -> None:
+        super().__init__(str(last_error))
+        self.name = name
+        self.record_type = record_type
+        self.attempts = attempts
+        self.last_error = last_error
+        self.failures = list(failures)
+
+
+@dataclasses.dataclass
+class DNSQuerySelectionState:
+    """Mutable selection state shared across queries in one coordinator."""
+
+    weighted_endpoint_indices: list[int]
+    positions: dict[tuple[str, str], int]
+    position_lock: threading.Lock
+    query_counter: int
+    query_counter_lock: threading.Lock
+    provider_count: int
 
 
 class TokenBucketRateLimiter:
@@ -102,42 +145,6 @@ class PendingQueryLimiter:
             yield max(time.monotonic() - started_at, 0.0)
 
 
-class DNSQueryBalancer:
-    """Thread-safe deterministic weighted round-robin selector for DNS endpoints."""
-
-    def __init__(self, endpoints: list[DNSEndpoint]) -> None:
-        self._endpoints = list(endpoints)
-        self._total_weight = sum(max(1, endpoint.weight) for endpoint in endpoints)
-        self._positions: dict[tuple[str, str], int] = {}
-        self._lock = threading.Lock()
-
-    def _select_weighted_endpoint(self, position: int) -> DNSEndpoint:
-        offset = position % self._total_weight
-        cumulative_weight = 0
-        for endpoint in self._endpoints:
-            cumulative_weight += max(1, endpoint.weight)
-            if offset < cumulative_weight:
-                return endpoint
-        return self._endpoints[-1]
-
-    def select(
-        self, *, stage: str, record_type: str, attempt_index: int
-    ) -> DNSEndpoint:
-        """Return the next endpoint for a stage and record type."""
-        if not self._endpoints:
-            raise RuntimeError("DNS query coordinator requires at least one endpoint")
-        if len(self._endpoints) == 1:
-            return self._endpoints[0]
-        key = (stage, record_type)
-        with self._lock:
-            position = self._positions.get(key, 0)
-            endpoint = self._select_weighted_endpoint(position)
-            self._positions[key] = position + 1
-        if attempt_index <= 0:
-            return endpoint
-        return endpoint
-
-
 class DNSQueryCoordinator:
     """Resolve DNS queries through a shared balanced and rate-limited endpoint pool."""
 
@@ -153,7 +160,14 @@ class DNSQueryCoordinator:
         self.endpoints = list(endpoints)
         self._resolver_key = resolver_key
         self._config = config
-        self._balancer = DNSQueryBalancer(self.endpoints)
+        self._selection = DNSQuerySelectionState(
+            weighted_endpoint_indices=self._build_weighted_endpoint_indices(),
+            positions={},
+            position_lock=threading.Lock(),
+            query_counter=0,
+            query_counter_lock=threading.Lock(),
+            provider_count=len({endpoint.provider for endpoint in self.endpoints}),
+        )
         self._rate_limiters = {
             provider: TokenBucketRateLimiter(
                 qps=limit.qps_per_worker,
@@ -175,23 +189,84 @@ class DNSQueryCoordinator:
         """Return the first resolver for compatibility-oriented tests."""
         return self.endpoints[0].resolver
 
-    def resolve_with_retries(
-        self, name: str, record_type: str, attempts: int, stage: str
-    ) -> Any:
-        """Resolve one query, rotating endpoints across retryable failures."""
+    def _build_weighted_endpoint_indices(self) -> list[int]:
+        """Return endpoint indexes repeated by their configured first-attempt weight."""
+        indices: list[int] = []
+        for index, endpoint in enumerate(self.endpoints):
+            indices.extend([index] * max(1, int(endpoint.weight)))
+        return indices
+
+    def _next_query_id(self) -> str:
+        """Return a process-local identifier for one coordinator-owned query."""
+        with self._selection.query_counter_lock:
+            self._selection.query_counter += 1
+            return f"dnsq-{self._selection.query_counter}"
+
+    def _select_first_endpoint_index(self, *, stage: str, record_type: str) -> int:
+        """Return the weighted first endpoint index for one query."""
+        if not self._selection.weighted_endpoint_indices:
+            raise RuntimeError("DNS query coordinator requires at least one endpoint")
+        if len(self._selection.weighted_endpoint_indices) == 1:
+            return self._selection.weighted_endpoint_indices[0]
+        key = (stage, record_type)
+        with self._selection.position_lock:
+            position = self._selection.positions.get(key, 0)
+            endpoint_index = self._selection.weighted_endpoint_indices[
+                position % len(self._selection.weighted_endpoint_indices)
+            ]
+            self._selection.positions[key] = position + 1
+            return endpoint_index
+
+    def _endpoint_indices_after(self, previous_index: int) -> Iterator[int]:
+        """Yield endpoint indexes after a previous endpoint, wrapping once."""
+        endpoint_count = len(self.endpoints)
+        for offset in range(1, endpoint_count + 1):
+            yield (previous_index + offset) % endpoint_count
+
+    def _select_retry_endpoint_index(
+        self, *, previous_index: int, failed_providers: set[str]
+    ) -> int:
+        """Return a retry endpoint, avoiding already-failed providers when possible."""
+        if self._selection.provider_count > len(failed_providers):
+            for endpoint_index in self._endpoint_indices_after(previous_index):
+                if self.endpoints[endpoint_index].provider not in failed_providers:
+                    return endpoint_index
+        return next(self._endpoint_indices_after(previous_index))
+
+    def _sleep_before_retry(self, attempt_index: int) -> None:
+        """Apply bounded retry backoff after the first failed attempt."""
+        if attempt_index <= 0:
+            return
+        time.sleep(min(0.25 * (2 ** (attempt_index - 1)), 2.0))
+
+    def resolve(self, name: str, record_type: str, attempts: int, stage: str) -> Any:
+        """Resolve one query with provider-aware retries and truthful telemetry."""
+        query_id = self._next_query_id()
+        attempt_budget = max(1, int(attempts))
         last_error: Exception | None = None
-        for attempt_index in range(max(1, int(attempts))):
-            endpoint = self._balancer.select(
-                stage=stage,
-                record_type=record_type,
-                attempt_index=attempt_index,
-            )
+        failures: list[DNSQueryAttemptFailure] = []
+        failed_providers: set[str] = set()
+        endpoint_index = self._select_first_endpoint_index(
+            stage=stage, record_type=record_type
+        )
+        for attempt_index in range(attempt_budget):
+            self._sleep_before_retry(attempt_index)
+            if attempt_index > 0:
+                endpoint_index = self._select_retry_endpoint_index(
+                    previous_index=endpoint_index,
+                    failed_providers=failed_providers,
+                )
+            endpoint = self.endpoints[endpoint_index]
             logger.debug(
-                "DNS query balancer selected endpoint stage=%s record_type=%s "
-                "attempt=%d provider=%s nameserver=%s resolver_key=%s",
+                "DNS query selected endpoint query_id=%s stage=%s record_type=%s "
+                "name=%s attempt=%d attempts=%d provider=%s nameserver=%s "
+                "resolver_key=%s",
+                query_id,
                 stage,
                 record_type,
+                name,
                 attempt_index + 1,
+                attempt_budget,
                 endpoint.provider,
                 endpoint.address or SYSTEM_NAMESERVER,
                 self._resolver_key,
@@ -200,28 +275,65 @@ class DNSQueryCoordinator:
                 return self._resolve_once(endpoint, name, record_type)
             except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
                 last_error = exc
+                failed_providers.add(endpoint.provider)
                 self._log_retryable_failure(
-                    endpoint, name, record_type, stage, attempt_index, exc
+                    endpoint,
+                    name,
+                    record_type,
+                    stage,
+                    attempt_index,
+                    query_id,
+                    exc,
+                )
+                failures.append(
+                    DNSQueryAttemptFailure(
+                        attempt=attempt_index + 1,
+                        provider=endpoint.provider,
+                        nameserver=endpoint.address or SYSTEM_NAMESERVER,
+                        error_type=type(exc).__name__,
+                    )
                 )
                 continue
             except dns.exception.Timeout as exc:
                 last_error = exc
+                failed_providers.add(endpoint.provider)
                 self._log_retryable_failure(
-                    endpoint, name, record_type, stage, attempt_index, exc
+                    endpoint,
+                    name,
+                    record_type,
+                    stage,
+                    attempt_index,
+                    query_id,
+                    exc,
+                )
+                failures.append(
+                    DNSQueryAttemptFailure(
+                        attempt=attempt_index + 1,
+                        provider=endpoint.provider,
+                        nameserver=endpoint.address or SYSTEM_NAMESERVER,
+                        error_type=type(exc).__name__,
+                    )
                 )
                 continue
         if last_error is not None:
             logger.debug(
-                "DNS query retry exhausted stage=%s record_type=%s name=%s "
-                "attempts=%d resolver_key=%s error_type=%s",
+                "DNS query retry exhausted query_id=%s stage=%s record_type=%s "
+                "name=%s attempts=%d resolver_key=%s error_type=%s",
+                query_id,
                 stage,
                 record_type,
                 name,
-                max(1, int(attempts)),
+                attempt_budget,
                 self._resolver_key,
                 type(last_error).__name__,
             )
-            raise last_error
+            raise DNSQueryExhaustedError(
+                name=name,
+                record_type=record_type,
+                attempts=attempt_budget,
+                last_error=last_error,
+                failures=failures,
+            ) from last_error
         raise dns.exception.Timeout(f"{record_type} lookup for {name} failed")
 
     def _log_retryable_failure(
@@ -231,12 +343,14 @@ class DNSQueryCoordinator:
         record_type: str,
         stage: str,
         attempt_index: int,
+        query_id: str,
         exc: Exception,
     ) -> None:
         """Log one retryable DNS query failure."""
         logger.debug(
-            "DNS query retryable failure stage=%s record_type=%s name=%s "
+            "DNS query retryable failure query_id=%s stage=%s record_type=%s name=%s "
             "attempt=%d provider=%s nameserver=%s error_type=%s",
+            query_id,
             stage,
             record_type,
             name,

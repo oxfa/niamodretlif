@@ -12,6 +12,10 @@ on:
       worker_count:
         required: true
         type: number
+      max_parallel_workers_default:
+        required: false
+        type: string
+        default: ""
       worker_log_level:
         required: false
         type: string
@@ -67,6 +71,7 @@ jobs:
             python -m domain_pipeline.automation.cli validate-run-settings \
               --worker-count "${{ inputs.worker_count }}" \
               --max-parallel-workers "${AUTOMATION_MAX_PARALLEL_WORKERS:-}" \
+              --max-parallel-workers-default "${{ inputs.max_parallel_workers_default }}" \
               --worker-runtime-seconds "${PIPELINE_MAX_RUNTIME_SECONDS:-}" \
               | tee settings.json
           } 2>&1 | tee validate-settings.log
@@ -288,6 +293,7 @@ jobs:
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --log-level "${{ inputs.worker_log_level }}" \
+            --effective-parallel-workers "${{ needs.prepare_run.outputs.max_parallel_workers }}" \
             --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
             | tee worker.json
           echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"

@@ -106,6 +106,7 @@ def _handle_validate_run_settings(args: argparse.Namespace) -> int:
     payload = validate_run_settings(
         worker_count=args.worker_count,
         max_parallel_workers_raw=args.max_parallel_workers,
+        max_parallel_workers_default_raw=args.max_parallel_workers_default,
         worker_runtime_seconds_raw=args.worker_runtime_seconds,
     )
     _print_json(payload)
@@ -136,6 +137,7 @@ def _handle_worker(
         source_root=source_root,
         state_root=state_root,
         max_runtime_seconds=args.max_runtime_seconds,
+        effective_parallel_workers=args.effective_parallel_workers,
     )
     _print_json(payload)
     return 0
@@ -326,6 +328,7 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         [
             ("--worker-count", {"type": int, "default": 18}),
             ("--max-parallel-workers", {"default": ""}),
+            ("--max-parallel-workers-default", {"default": ""}),
             ("--worker-runtime-seconds", {"default": ""}),
         ],
     )
@@ -367,6 +370,7 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
                 },
             ),
             ("--max-runtime-seconds", {"type": float, "default": None}),
+            ("--effective-parallel-workers", {"type": int, "default": 1}),
         ],
     )
 

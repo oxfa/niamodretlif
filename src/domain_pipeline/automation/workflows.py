@@ -144,18 +144,27 @@ def validate_run_settings(
     worker_count: int,
     max_parallel_workers_raw: str | None,
     worker_runtime_seconds_raw: str | None,
+    max_parallel_workers_default_raw: str | None = None,
 ) -> dict[str, Any]:
     """Validate and normalize workflow settings used by the trusted automation run."""
     worker_ids = default_worker_ids(worker_count)
+    max_parallel_workers_source = "AUTOMATION_MAX_PARALLEL_WORKERS"
     max_parallel_workers = _parse_optional_positive_int(
         max_parallel_workers_raw,
         field_name="AUTOMATION_MAX_PARALLEL_WORKERS",
     )
     if max_parallel_workers is None:
+        max_parallel_workers_source = "max_parallel_workers_default"
+        max_parallel_workers = _parse_optional_positive_int(
+            max_parallel_workers_default_raw,
+            field_name=max_parallel_workers_source,
+        )
+    if max_parallel_workers is None:
+        max_parallel_workers_source = "worker_count"
         max_parallel_workers = worker_count
     if max_parallel_workers > worker_count:
         raise ValueError(
-            "AUTOMATION_MAX_PARALLEL_WORKERS must not exceed worker_count "
+            f"{max_parallel_workers_source} must not exceed worker_count "
             f"({max_parallel_workers} > {worker_count})"
         )
     worker_runtime_budget_seconds = _parse_optional_positive_int(
@@ -950,6 +959,7 @@ def run_worker(
     source_root: Path,
     state_root: Path,
     max_runtime_seconds: float | None = None,
+    effective_parallel_workers: int = 1,
 ) -> dict[str, Any]:
     """Process one worker entirely from its persisted manifest-owned runtime state."""
     bundle = _load_worker_bundle(
@@ -996,6 +1006,7 @@ def run_worker(
                     mode="json"
                 ),
                 max_runtime_seconds=max_runtime_seconds,
+                effective_parallel_workers=effective_parallel_workers,
                 prepared_metadata=bundle.prepared_metadata.to_runtime_payload(),
             )
         if exit_code != 0:

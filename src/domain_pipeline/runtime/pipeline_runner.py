@@ -101,7 +101,9 @@ def build_source_jobs(
     return jobs
 
 
-def build_checker(source_config: dict[str, Any]) -> DomainChecker:
+def build_checker(
+    source_config: dict[str, Any], *, effective_parallel_workers: int = 1
+) -> DomainChecker:
     """Build a DNS checker from one normalized source config."""
     dns_config = source_config["dns"]
     return DomainChecker(
@@ -115,6 +117,7 @@ def build_checker(source_config: dict[str, Any]) -> DomainChecker:
         host_retry_attempts=int(
             dns_config.get("host_resolution", {}).get("retry_attempts", 3)
         ),
+        effective_parallel_workers=effective_parallel_workers,
     )
 
 

@@ -8,7 +8,6 @@ import dataclasses
 import ipaddress
 import logging
 import socket
-import time
 from typing import Any
 
 import dns.exception
@@ -27,6 +26,7 @@ from domain_pipeline.checking.dns_query_coordinator import (
     DNSProviderRateLimit,
     DNSQueryCoordinator,
     DNSQueryCoordinatorConfig,
+    DNSQueryExhaustedError,
     DNSQueryCoordinatorRegistry,
     PROVIDER_CLOUDFLARE_PUBLIC_DNS,
     PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS,
@@ -48,47 +48,33 @@ VERIFIED_ECS_NAMESERVERS = frozenset(
     [*DEFAULT_ECS_FALLBACK_NAMESERVERS, *QUAD9_ECS_PUBLIC_DNS_NAMESERVERS]
 )
 CNAME_CHAIN_LIMIT = 8
-# Official provider data inspected from primary docs on 2026-05-01:
-# - Azure default resolver: 1000 QPS and 200 pending DNS queries per VM.
-# - Google Public DNS: rate-limit increase guidance starts above 1500 QPS per
-#   client IPv4 address or IPv6 /64.
-# - Quad9: contact support above 500 QPS from a single egress IP.
-# - Cloudflare 1.1.1.1: no numeric public QPS limit published; docs warn that
-#   high-rate single-IP, proxied, and high-SERVFAIL traffic may be rate limited.
-# - Cisco Umbrella/OpenDNS: public resolver IPs are documented; DNS Security
-#   packages document 5000 DNS queries per Covered User per day as a monthly
-#   average, not a public per-client QPS ceiling.
-# - Control D Free DNS: unfiltered legacy endpoints are documented on a global
-#   anycast network; no numeric public per-client QPS ceiling was found.
-# - DNS.SB: public resolvers document no logging and DNSSEC; no numeric public
-#   per-client QPS ceiling was found.
-# Project caps below are worker-local and intentionally below published numeric
-# thresholds; Cloudflare/OpenDNS/Control D/DNS.SB use conservative project caps
-# because their public docs do not publish per-client QPS ceilings.
+# Project safety caps, not provider-published guarantees. aggregate_qps_target
+# bounds one provider's intended total traffic across effective parallel workers;
+# qps_per_worker is the single-worker fallback when no aggregate target is set.
 DEFAULT_DNS_PROVIDER_LIMITS = {
     PROVIDER_SYSTEM_RESOLVER: DNSProviderRateLimit(
-        qps_per_worker=50.0, burst=50, max_pending=100
+        qps_per_worker=60.0, burst=10, max_pending=32, aggregate_qps_target=60.0
     ),
     PROVIDER_GOOGLE_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=50.0, burst=50, max_pending=100
+        qps_per_worker=30.0, burst=5, max_pending=16, aggregate_qps_target=30.0
     ),
     PROVIDER_QUAD9_ECS_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=30.0, burst=5, max_pending=16, aggregate_qps_target=30.0
     ),
     PROVIDER_CLOUDFLARE_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
     ),
     PROVIDER_OPENDNS_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
     ),
     PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
     ),
     PROVIDER_DNS_SB_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
     ),
     PROVIDER_UNRECOGNIZED_RESOLVER: DNSProviderRateLimit(
-        qps_per_worker=25.0, burst=25, max_pending=50
+        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
     ),
 }
 
@@ -135,21 +121,46 @@ def dns_resolver_key(dns_config: dict[str, Any]) -> str:
 
 
 def _provider_limit_from_config(
-    payload: dict[str, Any], fallback: DNSProviderRateLimit
+    payload: dict[str, Any],
+    fallback: DNSProviderRateLimit,
+    *,
+    effective_parallel_workers: int,
 ) -> DNSProviderRateLimit:
-    qps = float(payload.get("qps_per_worker", fallback.qps_per_worker))
+    if "aggregate_qps_target" in payload:
+        aggregate_payload = payload["aggregate_qps_target"]
+        aggregate_qps_target = (
+            None if aggregate_payload is None else float(aggregate_payload)
+        )
+    elif "qps_per_worker" in payload:
+        aggregate_qps_target = None
+    else:
+        aggregate_qps_target = fallback.aggregate_qps_target
+    qps_payload = payload.get("qps_per_worker")
+    configured_qps = (
+        fallback.qps_per_worker if qps_payload is None else float(qps_payload)
+    )
+    if aggregate_qps_target is not None:
+        qps = aggregate_qps_target / max(1, int(effective_parallel_workers))
+    else:
+        qps = configured_qps
     burst = int(payload.get("burst", fallback.burst))
     max_pending = int(payload.get("max_pending", fallback.max_pending))
     return DNSProviderRateLimit(
         qps_per_worker=max(qps, 0.001),
         burst=max(burst, 1),
         max_pending=max(max_pending, 1),
+        aggregate_qps_target=(
+            max(float(aggregate_qps_target), 0.001)
+            if aggregate_qps_target is not None
+            else None
+        ),
     )
 
 
 def dns_query_coordinator_config(
     *,
     query_rate_limit: dict[str, Any] | None,
+    effective_parallel_workers: int = 1,
 ) -> DNSQueryCoordinatorConfig:
     """Return normalized DNS query coordination settings."""
     rate_payload = dict(query_rate_limit or {})
@@ -161,7 +172,9 @@ def dns_query_coordinator_config(
         provider_payloads["unrecognized_resolver"] = provider_payloads.pop("custom")
     provider_limits = {
         provider: _provider_limit_from_config(
-            dict(provider_payloads.get(provider) or {}), fallback
+            dict(provider_payloads.get(provider) or {}),
+            fallback,
+            effective_parallel_workers=effective_parallel_workers,
         )
         for provider, fallback in DEFAULT_DNS_PROVIDER_LIMITS.items()
     }
@@ -193,8 +206,14 @@ def _coordinator_config_key(config: DNSQueryCoordinatorConfig) -> str:
     provider_parts = []
     for provider in sorted(config.provider_limits):
         limit = config.provider_limits[provider]
+        aggregate = (
+            "none"
+            if limit.aggregate_qps_target is None
+            else f"{limit.aggregate_qps_target:g}"
+        )
         provider_parts.append(
-            f"{provider}:{limit.qps_per_worker:g}:{limit.burst}:{limit.max_pending}"
+            f"{provider}:{limit.qps_per_worker:g}:{aggregate}:"
+            f"{limit.burst}:{limit.max_pending}"
         )
     return (
         f"rate={int(config.rate_limit_enabled)}"
@@ -418,6 +437,20 @@ class HostResolutionResult:
 class RetryableDNSLookupError(RuntimeError):
     """Raised for transient DNS failures that should be retried."""
 
+    def __init__(self, message: str, *, last_error: Exception | None = None) -> None:
+        super().__init__(message)
+        self.last_error = last_error
+
+    @property
+    def is_timeout(self) -> bool:
+        """Return whether the exhausted retry budget ended on a timeout."""
+        if isinstance(
+            self.last_error,
+            (dns.resolver.LifetimeTimeout, dns.exception.Timeout),
+        ):
+            return True
+        return "time" in str(self).lower()
+
 
 DNSResult = HostResolutionResult
 """Backward-compatible alias for host-resolution results.
@@ -462,6 +495,7 @@ class DomainChecker:
         retry_attempts: int = 3,
         delegation_retry_attempts: int | None = None,
         host_retry_attempts: int | None = None,
+        effective_parallel_workers: int = 1,
     ) -> None:
         delegation_payload = dict(delegation_dns or {})
         host_resolution_payload = dict(host_resolution_dns or {})
@@ -491,6 +525,7 @@ class DomainChecker:
             self.host_resolution_dns_profile["query_rate_limit"]
         )
         self.retry_attempts = max(1, int(retry_attempts))
+        self.effective_parallel_workers = max(1, int(effective_parallel_workers))
         self.delegation_retry_attempts = max(
             1,
             int(
@@ -552,6 +587,7 @@ class DomainChecker:
         """Build or retrieve the shared DNS query coordinator for this checker."""
         query_config = dns_query_coordinator_config(
             query_rate_limit=dns_profile.get("query_rate_limit", {}),
+            effective_parallel_workers=self.effective_parallel_workers,
         )
         endpoint_resolvers: list[str | None] = list(
             dns_profile.get("resolvers") or []
@@ -596,54 +632,36 @@ class DomainChecker:
         """Return a deterministic cache key for the host-resolution resolver profile."""
         return self.host_resolution_query_coordinator.resolver_key()
 
-    def _sleep_before_retry(self, attempt_index: int) -> None:
-        if attempt_index <= 0:
-            return
-        time.sleep(min(0.25 * (2 ** (attempt_index - 1)), 2.0))
-
-    def _resolve_with_retries(
-        self, name: str, record_type: str, retry_attempts: int
-    ) -> Any:
-        """Resolve one DNS record type, retrying transient timeout/SERVFAIL errors."""
-        last_error: Exception | None = None
-        for attempt_index in range(retry_attempts):
-            self._sleep_before_retry(attempt_index)
-            stage = "delegation" if record_type == "NS" else "host_resolution"
-            coordinator = (
-                self.delegation_query_coordinator
-                if stage == "delegation"
-                else self.host_resolution_query_coordinator
+    def _resolve_record(self, name: str, record_type: str, retry_attempts: int) -> Any:
+        """Resolve one DNS record type through the coordinator-owned retry budget."""
+        stage = "delegation" if record_type == "NS" else "host_resolution"
+        coordinator = (
+            self.delegation_query_coordinator
+            if stage == "delegation"
+            else self.host_resolution_query_coordinator
+        )
+        try:
+            return coordinator.resolve(
+                name,
+                record_type,
+                attempts=retry_attempts,
+                stage=stage,
             )
-            try:
-                return coordinator.resolve_with_retries(
-                    name,
-                    record_type,
-                    attempts=1,
-                    stage=stage,
-                )
-            except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
-                last_error = exc
-                continue
-            except dns.exception.Timeout as exc:
-                last_error = exc
-                continue
-        if last_error is not None:
-            raise RetryableDNSLookupError(str(last_error)) from last_error
-        raise RetryableDNSLookupError(f"{record_type} lookup for {name} failed")
+        except DNSQueryExhaustedError as exc:
+            raise RetryableDNSLookupError(
+                str(exc.last_error), last_error=exc.last_error
+            ) from exc
 
     def delegation_lookup(self, domain: str) -> DelegationResult:
         """Query NS records for one registrable domain."""
         try:
-            answer = self._resolve_with_retries(
-                domain, "NS", self.delegation_retry_attempts
-            )
+            answer = self._resolve_record(domain, "NS", self.delegation_retry_attempts)
         except dns.resolver.NXDOMAIN:
             return DelegationResult(domain=domain, ns_nxdomain=True)
         except dns.resolver.NoAnswer:
             return DelegationResult(domain=domain, ns_nodata=True)
         except RetryableDNSLookupError as exc:
-            text = str(exc).lower()
-            if "time" in text:
+            if exc.is_timeout:
                 return DelegationResult(domain=domain, ns_timeout=True)
             return DelegationResult(domain=domain, ns_servfail=True)
         except (dns.exception.DNSException, socket.gaierror):
@@ -666,9 +684,7 @@ class DomainChecker:
         cname: str | None = None
         addresses: list[str] = []
         try:
-            answer = self._resolve_with_retries(
-                host, record_type, self.host_retry_attempts
-            )
+            answer = self._resolve_record(host, record_type, self.host_retry_attempts)
             for rr in answer:
                 if record_type in {"A", "AAAA"}:
                     address = str(rr)
@@ -687,7 +703,7 @@ class DomainChecker:
         except dns.resolver.NoAnswer:
             nodata = True
         except RetryableDNSLookupError as exc:
-            if "time" in str(exc).lower():
+            if exc.is_timeout:
                 timeout = True
             else:
                 servfail = True
