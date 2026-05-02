@@ -19,6 +19,7 @@ def run_prepared_pipeline(
     runtime_identity: dict[str, str],
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
+    effective_parallel_workers: int = 1,
 ) -> int:
     """Run one workflow-owned runtime payload from a prepared automation manifest."""
     try:
@@ -28,6 +29,7 @@ def run_prepared_pipeline(
                 runtime_identity=runtime_identity,
                 max_runtime_seconds=max_runtime_seconds,
                 prepared_metadata=prepared_metadata,
+                effective_parallel_workers=effective_parallel_workers,
             )
         )
     except ValueError as exc:
