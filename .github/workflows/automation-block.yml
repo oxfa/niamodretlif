@@ -26,7 +26,8 @@ jobs:
     with:
       config_name: block
       config_path: config/block.yaml
-      # DNS query rate limits are enforced inside each worker process. Raising
-      # worker_count still increases aggregate DNS QPS across GitHub runners.
+      # Stage-specific resolver weights control live traffic share inside each
+      # worker. DNS query rate limits are enforced per worker process, so
+      # raising worker_count still increases aggregate DNS QPS across runners.
       worker_count: 18
     secrets: inherit

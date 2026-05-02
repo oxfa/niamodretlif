@@ -35,6 +35,7 @@ from domain_pipeline.checking.dns_query_coordinator import (
     PROVIDER_OPENDNS_PUBLIC_DNS,
     PROVIDER_QUAD9_ECS,
     PROVIDER_SYSTEM_RESOLVER,
+    SYSTEM_NAMESERVER,
     build_dns_endpoint,
 )
 
@@ -46,13 +47,6 @@ VERIFIED_ECS_NAMESERVERS = frozenset(
     [*DEFAULT_ECS_FALLBACK_NAMESERVERS, *QUAD9_ECS_NAMESERVERS]
 )
 CNAME_CHAIN_LIMIT = 8
-DNS_PROFILE_KEYS = (
-    "nameservers",
-    "timeout",
-    "ecs",
-    "query_rate_limit",
-    "query_balancer",
-)
 # Official provider data inspected from primary docs on 2026-05-01:
 # - Azure default resolver: 1000 QPS and 200 pending DNS queries per VM.
 # - Google Public DNS: rate-limit increase guidance starts above 1500 QPS per
@@ -93,10 +87,10 @@ DEFAULT_DNS_PROVIDER_LIMITS = {
 }
 
 
-def effective_dns_nameservers(dns_config: dict[str, Any]) -> list[str]:
-    """Return resolver nameservers after applying ECS compatibility fallback."""
-    nameservers = list(dns_config.get("nameservers") or [])
-    ecs_payload = dict(dns_config.get("ecs") or {})
+def effective_host_resolution_nameservers(dns_profile: dict[str, Any]) -> list[str]:
+    """Return host-resolution nameservers after applying ECS compatibility fallback."""
+    nameservers = list(dns_profile.get("nameservers") or [])
+    ecs_payload = dict(dns_profile.get("ecs") or {})
     if not ecs_payload.get("enabled"):
         return nameservers
     if not nameservers:
@@ -106,9 +100,14 @@ def effective_dns_nameservers(dns_config: dict[str, Any]) -> list[str]:
     return list(DEFAULT_ECS_FALLBACK_NAMESERVERS)
 
 
+def effective_dns_nameservers(dns_config: dict[str, Any]) -> list[str]:
+    """Compatibility wrapper for host-resolution resolver fallback."""
+    return effective_host_resolution_nameservers(dns_config)
+
+
 def dns_resolver_key(dns_config: dict[str, Any]) -> str:
     """Return a deterministic cache key for one DNS resolver profile."""
-    nameservers = effective_dns_nameservers(dns_config)
+    nameservers = list(dns_config.get("nameservers") or [])
     nameserver_key = ",".join(nameservers) if nameservers else "system_resolver"
     ecs_payload = dict(dns_config.get("ecs") or {})
     if not ecs_payload.get("enabled"):
@@ -155,6 +154,26 @@ def dns_query_coordinator_config(
     )
 
 
+def _endpoint_weight_key(nameserver: str | None) -> str:
+    """Return the query-balancer weight key for one effective endpoint."""
+    return SYSTEM_NAMESERVER if nameserver is None else nameserver
+
+
+def _query_balancer_weights_key(weights: dict[str, int] | None) -> str:
+    """Return the process-local key fragment for non-default endpoint weights."""
+    normalized = {
+        str(nameserver): int(weight)
+        for nameserver, weight in dict(weights or {}).items()
+        if int(weight) > 1
+    }
+    if not normalized:
+        return "weights=default"
+    parts = [
+        f"{nameserver}:{normalized[nameserver]}" for nameserver in sorted(normalized)
+    ]
+    return "weights=" + ",".join(parts)
+
+
 def _coordinator_config_key(config: DNSQueryCoordinatorConfig) -> str:
     provider_parts = []
     for provider in sorted(config.provider_limits):
@@ -175,31 +194,117 @@ def dns_query_coordinator_key(
     timeout: float,
     ecs: dict[str, Any],
     query_config: DNSQueryCoordinatorConfig,
+    weights: dict[str, int] | None = None,
 ) -> str:
     """Return a process-local key for sharing one DNS query coordinator."""
     resolver_key = dns_resolver_key({"nameservers": nameservers, "ecs": ecs})
-    return f"{resolver_key}|timeout={timeout}|{_coordinator_config_key(query_config)}"
+    return (
+        f"{resolver_key}|timeout={timeout}|{_coordinator_config_key(query_config)}"
+        f"|{_query_balancer_weights_key(weights)}"
+    )
 
 
-def stage_dns_profile(
-    base_dns_config: dict[str, Any], stage_config: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Return one DNS resolver profile after applying stage-level overrides."""
-    profile = {
-        "nameservers": list(base_dns_config.get("nameservers") or []),
-        "timeout": float(base_dns_config.get("timeout", 5.0)),
-        "ecs": dict(base_dns_config.get("ecs") or {}),
-        "query_rate_limit": dict(base_dns_config.get("query_rate_limit") or {}),
-        "query_balancer": dict(base_dns_config.get("query_balancer") or {}),
+def _effective_endpoint_weight_keys(nameservers: list[str]) -> set[str]:
+    endpoint_nameservers = nameservers or [SYSTEM_NAMESERVER]
+    return {_endpoint_weight_key(nameserver) for nameserver in endpoint_nameservers}
+
+
+def _validated_query_balancer_weights(
+    dns_profile: dict[str, Any], *, field_name: str
+) -> dict[str, int]:
+    query_balancer = dict(dns_profile.get("query_balancer") or {})
+    weights = {
+        str(nameserver): int(weight)
+        for nameserver, weight in dict(query_balancer.get("weights") or {}).items()
+        if int(weight) > 1
     }
-    for key, value in dict(stage_config or {}).items():
-        if key in DNS_PROFILE_KEYS and value is not None:
-            profile[key] = value
-    profile["nameservers"] = effective_dns_nameservers(profile)
-    profile["timeout"] = float(profile["timeout"])
-    profile["ecs"] = dict(profile.get("ecs") or {})
-    profile["query_rate_limit"] = dict(profile.get("query_rate_limit") or {})
-    profile["query_balancer"] = dict(profile.get("query_balancer") or {})
+    allowed_nameservers = _effective_endpoint_weight_keys(
+        list(dns_profile.get("nameservers") or [])
+    )
+    unknown_nameservers = sorted(set(weights) - allowed_nameservers)
+    if unknown_nameservers:
+        raise ValueError(
+            f"{field_name}.weights contains resolver not present in the effective "
+            "nameservers: " + ", ".join(unknown_nameservers)
+        )
+    return weights
+
+
+def _default_nameservers(dns_config: dict[str, Any]) -> list[str]:
+    """Return DNS default nameservers, accepting the legacy constructor shape."""
+    return list(
+        dns_config.get(
+            "default_nameservers",
+            dns_config.get("nameservers", []),
+        )
+        or []
+    )
+
+
+def _stage_nameservers(
+    dns_config: dict[str, Any], stage_config: dict[str, Any]
+) -> list[str]:
+    """Return stage nameservers after applying the default fallback."""
+    if stage_config.get("nameservers") is not None:
+        return list(stage_config.get("nameservers") or [])
+    return _default_nameservers(dns_config)
+
+
+def _stage_timeout(dns_config: dict[str, Any], stage_config: dict[str, Any]) -> float:
+    """Return stage timeout after applying the top-level default."""
+    if stage_config.get("timeout") is not None:
+        return float(stage_config["timeout"])
+    return float(dns_config.get("timeout", 5.0))
+
+
+def _stage_query_rate_limit(
+    dns_config: dict[str, Any], stage_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Return stage query-rate limits after applying the top-level default."""
+    if stage_config.get("query_rate_limit") is not None:
+        return dict(stage_config.get("query_rate_limit") or {})
+    return dict(dns_config.get("query_rate_limit") or {})
+
+
+def _stage_query_balancer(stage_config: dict[str, Any]) -> dict[str, Any]:
+    """Return a canonical stage query-balancer payload."""
+    payload = dict(stage_config.get("query_balancer") or {})
+    return {
+        "enabled": bool(payload.get("enabled", True)),
+        "strategy": str(payload.get("strategy", "round_robin")),
+        "weights": dict(payload.get("weights") or {}),
+    }
+
+
+def delegation_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
+    """Return the normalized delegation resolver profile without ECS."""
+    delegation_config = dict(dns_config.get("delegation") or {})
+    profile = {
+        "nameservers": _stage_nameservers(dns_config, delegation_config),
+        "timeout": _stage_timeout(dns_config, delegation_config),
+        "query_rate_limit": _stage_query_rate_limit(dns_config, delegation_config),
+        "query_balancer": _stage_query_balancer(delegation_config),
+    }
+    profile["query_balancer"]["weights"] = _validated_query_balancer_weights(
+        profile, field_name="dns.delegation.query_balancer"
+    )
+    return profile
+
+
+def host_resolution_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
+    """Return the normalized host-resolution resolver profile."""
+    host_config = dict(dns_config.get("host_resolution") or {})
+    profile = {
+        "nameservers": _stage_nameservers(dns_config, host_config),
+        "timeout": _stage_timeout(dns_config, host_config),
+        "ecs": dict(host_config.get("ecs") or {}),
+        "query_rate_limit": _stage_query_rate_limit(dns_config, host_config),
+        "query_balancer": _stage_query_balancer(host_config),
+    }
+    profile["nameservers"] = effective_host_resolution_nameservers(profile)
+    profile["query_balancer"]["weights"] = _validated_query_balancer_weights(
+        profile, field_name="dns.host_resolution.query_balancer"
+    )
     return profile
 
 
@@ -356,20 +461,26 @@ class DomainChecker:
         delegation_retry_attempts: int | None = None,
         host_retry_attempts: int | None = None,
     ) -> None:
+        delegation_payload = dict(delegation_dns or {})
+        host_resolution_payload = dict(host_resolution_dns or {})
+        if query_balancer and "query_balancer" not in delegation_payload:
+            delegation_payload["query_balancer"] = query_balancer
+        if query_balancer and "query_balancer" not in host_resolution_payload:
+            host_resolution_payload["query_balancer"] = query_balancer
+        if ecs and "ecs" not in host_resolution_payload:
+            host_resolution_payload["ecs"] = ecs
         dns_config = {
-            "nameservers": list(nameservers or self.DEFAULT_NAMESERVERS),
+            "default_nameservers": list(nameservers or self.DEFAULT_NAMESERVERS),
             "timeout": float(timeout),
-            "ecs": ecs or {},
             "query_rate_limit": query_rate_limit or {},
-            "query_balancer": query_balancer or {},
+            "delegation": delegation_payload,
+            "host_resolution": host_resolution_payload,
         }
-        self.delegation_dns_profile = stage_dns_profile(dns_config, delegation_dns)
-        self.host_resolution_dns_profile = stage_dns_profile(
-            dns_config, host_resolution_dns
-        )
+        self.delegation_dns_profile = delegation_dns_profile(dns_config)
+        self.host_resolution_dns_profile = host_resolution_dns_profile(dns_config)
         self.delegation_nameservers = list(self.delegation_dns_profile["nameservers"])
         self.nameservers = list(self.host_resolution_dns_profile["nameservers"])
-        self.timeout = timeout
+        self.timeout = float(self.host_resolution_dns_profile["timeout"])
         self.ecs = dict(self.host_resolution_dns_profile["ecs"])
         self.query_rate_limit = dict(
             self.host_resolution_dns_profile["query_rate_limit"]
@@ -444,11 +555,13 @@ class DomainChecker:
         endpoint_nameservers: list[str | None] = list(
             dns_profile.get("nameservers") or []
         ) or [None]
+        weights = dict(dns_profile.get("query_balancer", {}).get("weights") or {})
         endpoints = [
             build_dns_endpoint(
                 nameserver=nameserver,
                 timeout=float(dns_profile.get("timeout", 5.0)),
                 ecs=dict(dns_profile.get("ecs") or {}),
+                weight=weights.get(_endpoint_weight_key(nameserver), 1),
             )
             for nameserver in endpoint_nameservers
         ]
@@ -461,6 +574,7 @@ class DomainChecker:
             timeout=float(dns_profile.get("timeout", 5.0)),
             ecs=dict(dns_profile.get("ecs") or {}),
             query_config=query_config,
+            weights=weights,
         )
         return DNSQueryCoordinatorRegistry.get_or_create(
             registry_key=f"stage={stage}|{registry_key}",

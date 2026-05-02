@@ -38,27 +38,14 @@ defaults:
     request_timeout: 30.0
 
   dns:
-    # Resolver pool settings for both DNS stages.
+    # Fallback resolver pool used by DNS stages that do not set their own
+    # nameservers.
     # Entries must be literal IPv4/IPv6 resolver addresses or the literal
     # "system_resolver" to include the platform resolver. Leave empty to use
-    # only the platform resolver unless ECS forces a verified public resolver.
-    # ECS-enabled public pools should use resolvers that preserve ECS behavior,
-    # such as Google Public DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS
-    # (9.9.9.11, 149.112.112.11). Cloudflare 1.1.1.1 and Cisco Umbrella are
-    # not default ECS targets here because their public ECS behavior differs.
-    nameservers: []
+    # only the platform resolver for stages that inherit this fallback.
+    default_nameservers: []
     # Per-query DNS timeout, in seconds.
     timeout: 5.0
-    # Optional EDNS Client Subnet (ECS) settings.
-    # Set enabled=true and provide a CIDR subnet when querying a resolver that
-    # accepts client-supplied ECS data.
-    ecs:
-      enabled: false
-      # Example: 203.0.113.0/24 or 2001:db8::/48
-      subnet: ""
-      # Scope to advertise in the ECS option. Leave at 0 unless you have a
-      # specific resolver-side requirement.
-      scope_prefix_length: 0
     # Worker-local DNS safety limits. These defaults are intentionally below
     # documented public provider limits where a numeric public limit exists
     # because GitHub Actions worker_count can multiply aggregate traffic and
@@ -106,16 +93,9 @@ defaults:
           qps_per_worker: 25.0
           burst: 25
           max_pending: 50
-    # Deterministic endpoint selection across the configured resolver pool.
-    # Retry attempts select through the same round-robin balancer so one
-    # transient resolver failure does not pin all attempts to the same endpoint.
-    query_balancer:
-      enabled: true
-      strategy: round_robin
-    # Mandatory NS lookup for the parsed registrable domain. Stage-level
-    # nameservers/timeout/ecs/query_rate_limit/query_balancer override the
-    # top-level DNS resolver profile when present. This lets delegation use a
-    # non-ECS resolver profile while host resolution keeps ECS-capable resolvers.
+    # Mandatory NS lookup for the parsed registrable domain. Delegation does
+    # not use ECS. Stage-level nameservers/timeout/query_rate_limit override
+    # the top-level DNS defaults when present.
     # Timeout/SERVFAIL are retried up to this stage-specific attempt count and
     # are not cached after retry exhaustion.
     delegation:
@@ -126,19 +106,47 @@ defaults:
       #   - 1.0.0.1
       #   - 76.76.2.0
       #   - 76.76.10.0
-      # ecs:
-      #   enabled: false
-      #   subnet: ""
-      #   scope_prefix_length: 0
+      # query_balancer:
+      #   enabled: true
+      #   strategy: round_robin
+      #   weights:
+      #     system_resolver: 1
+      #     1.1.1.1: 1
+      #     1.0.0.1: 1
       retry_attempts: 3
     # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
-    # coordinator from delegation and inherits the top-level DNS resolver profile
-    # unless stage-level resolver fields are provided. If enabled is omitted,
-    # the runtime defaults it to true when geo.enabled=true and false otherwise.
+    # coordinator from delegation. It inherits dns.default_nameservers unless
+    # nameservers is provided here. ECS applies only to host resolution; when
+    # enabled, use resolvers that preserve ECS behavior, such as Google Public
+    # DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS (9.9.9.11, 149.112.112.11).
+    # Cloudflare 1.1.1.1 and Cisco Umbrella are not default ECS targets here
+    # because their public ECS behavior differs. If enabled is omitted, the
+    # runtime defaults it to true when geo.enabled=true and false otherwise.
     # Timeout/SERVFAIL use this stage-specific retry budget and are not cached
     # after retry exhaustion.
     host_resolution:
       enabled: false
+      # nameservers:
+      #   - 8.8.8.8
+      #   - 8.8.4.4
+      # Optional EDNS Client Subnet (ECS) settings. Set enabled=true and provide
+      # a CIDR subnet when querying a resolver that accepts client-supplied ECS.
+      ecs:
+        enabled: false
+        # Example: 203.0.113.0/24 or 2001:db8::/48
+        subnet: ""
+        # Scope to advertise in the ECS option. Leave at 0 unless you have a
+        # specific resolver-side requirement.
+        scope_prefix_length: 0
+      # Stage-local endpoint selection for live uncached host DNS lookups.
+      query_balancer:
+        enabled: true
+        strategy: round_robin
+        weights: {}
+        # Example weighted host-resolution pool:
+        # weights:
+        #   8.8.8.8: 2
+        #   8.8.4.4: 1
       retry_attempts: 3
 
   geo:
@@ -214,21 +222,22 @@ sources:
     fetch:
       request_timeout: 30.0
     dns:
-      nameservers: []
+      default_nameservers: []
       timeout: 5.0
-      ecs:
-        enabled: false
-        subnet: ""
-        scope_prefix_length: 0
       query_rate_limit:
         enabled: true
-      query_balancer:
-        enabled: true
-        strategy: round_robin
       delegation:
         retry_attempts: 3
       host_resolution:
         enabled: false
+        ecs:
+          enabled: false
+          subnet: ""
+          scope_prefix_length: 0
+        query_balancer:
+          enabled: true
+          strategy: round_robin
+          weights: {}
         retry_attempts: 3
     geo:
       enabled: false

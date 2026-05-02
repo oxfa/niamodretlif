@@ -16,6 +16,10 @@ from domain_pipeline.classifications import (
     CLASSIFICATION_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     CLASSIFICATION_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
+from domain_pipeline.checking.domain_checker import (
+    delegation_dns_profile,
+    host_resolution_dns_profile,
+)
 from domain_pipeline.io.parser import DomainListParser, ParsedDomainEntry
 from domain_pipeline.runtime.pipeline_runner import build_source_jobs
 from domain_pipeline.runtime.pure_helpers import build_base_row
@@ -141,9 +145,35 @@ def _public_suffix_review_row(
     )
 
 
+def _canonical_delegation_dns_behavior(dns_config: dict[str, Any]) -> dict[str, Any]:
+    delegation_config = dict(dns_config["delegation"])
+    return {
+        **delegation_dns_profile(dns_config),
+        "retry_attempts": delegation_config["retry_attempts"],
+    }
+
+
+def _canonical_host_resolution_dns_behavior(
+    dns_config: dict[str, Any],
+) -> dict[str, Any]:
+    host_resolution_config = dict(dns_config["host_resolution"])
+    return {
+        **host_resolution_dns_profile(dns_config),
+        "enabled": host_resolution_config["enabled"],
+        "retry_attempts": host_resolution_config["retry_attempts"],
+    }
+
+
+def _canonical_dns_behavior(dns_config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "delegation": _canonical_delegation_dns_behavior(dns_config),
+        "host_resolution": _canonical_host_resolution_dns_behavior(dns_config),
+    }
+
+
 def _source_behavior_fingerprint(source_config: dict[str, Any]) -> str:
     payload = {
-        "dns": source_config["dns"],
+        "dns": _canonical_dns_behavior(source_config["dns"]),
         "geo": source_config["geo"],
         "output": source_config["output"],
     }
@@ -154,12 +184,7 @@ def _manual_add_behavior_fingerprint(source_config: dict[str, Any]) -> str:
     """Return the delegation/output behavior used by config-scoped manual_add."""
     dns_config = source_config["dns"]
     payload = {
-        "dns": {
-            "nameservers": dns_config["nameservers"],
-            "timeout": dns_config["timeout"],
-            "ecs": dns_config["ecs"],
-            "delegation": dns_config["delegation"],
-        },
+        "dns": {"delegation": _canonical_delegation_dns_behavior(dns_config)},
         "output": source_config["output"],
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

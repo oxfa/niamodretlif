@@ -58,6 +58,7 @@ class DNSEndpoint:
     provider: str
     address: str | None
     resolver: Any
+    weight: int = 1
 
 
 class TokenBucketRateLimiter:
@@ -102,13 +103,23 @@ class PendingQueryLimiter:
 
 
 class DNSQueryBalancer:
-    """Thread-safe deterministic round-robin selector for DNS endpoints."""
+    """Thread-safe deterministic weighted round-robin selector for DNS endpoints."""
 
     def __init__(self, endpoints: list[DNSEndpoint], *, enabled: bool) -> None:
         self._endpoints = list(endpoints)
         self._enabled = enabled
+        self._total_weight = sum(max(1, endpoint.weight) for endpoint in endpoints)
         self._positions: dict[tuple[str, str], int] = {}
         self._lock = threading.Lock()
+
+    def _select_weighted_endpoint(self, position: int) -> DNSEndpoint:
+        offset = position % self._total_weight
+        cumulative_weight = 0
+        for endpoint in self._endpoints:
+            cumulative_weight += max(1, endpoint.weight)
+            if offset < cumulative_weight:
+                return endpoint
+        return self._endpoints[-1]
 
     def select(
         self, *, stage: str, record_type: str, attempt_index: int
@@ -121,7 +132,7 @@ class DNSQueryBalancer:
         key = (stage, record_type)
         with self._lock:
             position = self._positions.get(key, 0)
-            endpoint = self._endpoints[position % len(self._endpoints)]
+            endpoint = self._select_weighted_endpoint(position)
             self._positions[key] = position + 1
         if attempt_index <= 0:
             return endpoint
@@ -358,6 +369,7 @@ def build_dns_endpoint(
     nameserver: str | None,
     timeout: float,
     ecs: dict[str, Any],
+    weight: int = 1,
 ) -> DNSEndpoint:
     """Build one resolver endpoint from normalized DNS settings."""
     endpoint_address = None if nameserver == SYSTEM_NAMESERVER else nameserver
@@ -365,4 +377,5 @@ def build_dns_endpoint(
         provider=provider_for_nameserver(nameserver),
         address=endpoint_address,
         resolver=build_dns_resolver(nameserver=nameserver, timeout=timeout, ecs=ecs),
+        weight=max(1, int(weight)),
     )
