@@ -31,5 +31,5 @@ jobs:
       # provider across the effective parallel workers. The repository variable
       # AUTOMATION_MAX_PARALLEL_WORKERS overrides this config-specific default.
       worker_count: 18
-      max_parallel_workers_default: "6"
+      max_parallel_workers_default: "18"
     secrets: inherit
