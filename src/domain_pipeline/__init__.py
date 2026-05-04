@@ -15,23 +15,23 @@ This package processes host lists in three stages:
    unactionable. Stable host DNS and successful usable geo results are cached.
 """
 
-from .checking import (
+from domain_pipeline.prepare.sources import DomainListParser, ParsedDomainEntry
+from domain_pipeline.worker.cache import DelegationHistoryRecord, PipelineCache
+from domain_pipeline.worker.dns import (
     DomainChecker,
+    HostResolutionResult,
+)
+from domain_pipeline.worker.geo import (
     GeoJSProvider,
     GeoPolicyDecision,
-    HostResolutionResult,
     IPGeoResult,
     IPInfoLiteProvider,
     build_geo_provider,
-    classify,
     evaluate_geo_policy,
 )
-from .io.parser import DomainListParser, ParsedDomainEntry
-from .runtime.history import DelegationHistoryRecord, PipelineCache
 
 __all__ = [
     "DomainChecker",
-    "classify",
     "DomainListParser",
     "GeoJSProvider",
     "GeoPolicyDecision",
