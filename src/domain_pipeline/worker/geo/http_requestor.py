@@ -354,7 +354,7 @@ class HTTPRequester:
             0, min(retry_after_seconds, retry_policy.retry_after_cap_seconds)
         )
 
-    def _retry_after_seconds(self, response: object) -> int | None:
+    def retry_after_seconds(self, response: object) -> int | None:
         """Return a bounded Retry-After delay when present."""
         return self._retry_after_decision(
             response,

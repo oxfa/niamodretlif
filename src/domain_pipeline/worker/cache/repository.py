@@ -1,6 +1,6 @@
 """Persistent cache storage for delegation, host DNS, and IP geo data."""
 
-# pylint: disable=duplicate-code,too-many-instance-attributes
+# pylint: disable=too-many-instance-attributes
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +368,49 @@ class CacheRepository:
                 expires_at.isoformat(),
             ),
         )
+        self._connection.commit()
+
+    def replace_cache_table_rows(
+        self,
+        *,
+        delegation_rows: Iterable[sqlite3.Row],
+        dns_rows: Iterable[sqlite3.Row],
+        geo_rows: Iterable[sqlite3.Row],
+    ) -> None:
+        """Replace all physical cache tables with already-merged SQLite rows."""
+        self._connection.execute(f"DELETE FROM {DELEGATION_TABLE}")
+        self._connection.execute(f"DELETE FROM {DNS_TABLE}")
+        self._connection.execute(f"DELETE FROM {GEO_TABLE}")
+        for row in delegation_rows:
+            self._connection.execute(
+                f"""
+                INSERT OR REPLACE INTO {DELEGATION_TABLE} (
+                    domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
+                    ns_servfail, no_nameservers, nameservers, checked_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(row[column] for column in row.keys()),
+            )
+        for row in dns_rows:
+            self._connection.execute(
+                f"""
+                INSERT OR REPLACE INTO {DNS_TABLE} (
+                    host, resolver_key, a_exists, a_nodata, a_nxdomain, a_timeout,
+                    a_servfail, canonical_name, ipv4_addresses, ipv6_addresses,
+                    checked_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(row[column] for column in row.keys()),
+            )
+        for row in geo_rows:
+            self._connection.execute(
+                f"""
+                INSERT OR REPLACE INTO {GEO_TABLE} (
+                    provider, ip, country_code, region_code, region_name, checked_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(row[column] for column in row.keys()),
+            )
         self._connection.commit()
 
     def close(self) -> None:

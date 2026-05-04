@@ -1,7 +1,5 @@
 """Output file lifecycle helpers for pipeline runs."""
 
-# pylint: disable=import-outside-toplevel
-
 from __future__ import annotations
 
 import csv
@@ -10,9 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from domain_pipeline.paths.layout import DEBUG_ARTIFACTS_DIR
+from domain_pipeline.worker.output.review_labels import PUBLIC_REVIEW_LABELS
+from domain_pipeline.worker.output.rows import (
+    REVIEW_OUTPUT_COLUMNS,
+    ReviewOutputRow,
+    build_review_output_row,
+)
 
 if TYPE_CHECKING:
-    from domain_pipeline.worker.output.rows import ReviewOutputRow
     from domain_pipeline.worker.runtime.contracts import WorkerSourceContext
 
 log = logging.getLogger(__name__)
@@ -70,15 +73,6 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
     if not review_rows:
         return
 
-    from domain_pipeline.worker.output.review_labels import (
-        PUBLIC_REVIEW_LABELS,
-    )
-    from domain_pipeline.worker.output.rows import (
-        REVIEW_OUTPUT_COLUMNS,
-        ReviewOutputRow,
-        build_review_output_row,
-    )
-
     review_path.parent.mkdir(parents=True, exist_ok=True)
     with review_path.open("w", encoding="utf-8", newline="") as review_handle:
         writer = csv.DictWriter(
@@ -125,6 +119,4 @@ def output_paths_for_source(source_context: WorkerSourceContext) -> dict[str, Pa
 
 def csv_row_signature(row: ReviewOutputRow) -> str:
     """Return a deterministic signature for one CSV row."""
-    from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
-
     return repr(tuple(row[column] for column in REVIEW_OUTPUT_COLUMNS))

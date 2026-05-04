@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import Any, Protocol, TypedDict
 
 from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
@@ -40,9 +40,6 @@ from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 from domain_pipeline.worker.dns import DelegationResult, HostResolutionResult
 from domain_pipeline.worker.geo import GeoPolicyDecision, IPGeoResult
 
-if TYPE_CHECKING:
-    from domain_pipeline.worker.runtime.contracts import WorkerSourceContext
-
 REVIEW_OUTPUT_COLUMNS = (
     "input_name",
     "host",
@@ -63,6 +60,20 @@ REVIEW_OUTPUT_COLUMNS = (
     "source_ids",
     "source_input_labels",
 )
+
+
+class SourceContextLike(Protocol):
+    """Source context attributes required for terminal-row projection."""
+
+    @property
+    def source_id(self) -> str:
+        """Return the source identifier attached to this row."""
+        raise NotImplementedError
+
+    @property
+    def input_label(self) -> str:
+        """Return the operator-facing source input label."""
+        raise NotImplementedError
 
 
 class ReviewOutputRow(TypedDict):
@@ -165,7 +176,7 @@ def _json_list(values: list[str] | tuple[str, ...]) -> str:
 
 def build_base_row(
     *,
-    source_context: WorkerSourceContext,
+    source_context: SourceContextLike,
     entry: ParsedDomainEntry,
     pipeline_result_code: str,
     delegation_result: DelegationResult | None = None,

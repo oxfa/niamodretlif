@@ -1,7 +1,5 @@
 """Worker runtime stage owners."""
 
-# pylint: disable=protected-access
-
 from __future__ import annotations
 
 from typing import Any
@@ -44,13 +42,13 @@ class DelegationStage:
                     parsed.entry.is_public_suffix_input
                     or not parsed.entry.registrable_domain
                 ):
-                    await self.runtime._put_completed(
+                    await self.runtime.put_completed(
                         queue_bundle,
                         parsed,
                         pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
                     )
                     continue
-                delegation_result = await self.runtime._lookup_delegation(
+                delegation_result = await self.runtime.lookup_delegation(
                     parsed.source_context, parsed.entry
                 )
                 await self.route(queue_bundle, parsed, delegation_result)
@@ -66,7 +64,7 @@ class DelegationStage:
         """Route one delegation result to terminal output or host resolution."""
         delegation_result_code = classify_delegation(delegation_result)
         if not delegation_result.actionable:
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 parsed,
                 pipeline_result_code=delegation_result_code,
@@ -74,7 +72,7 @@ class DelegationStage:
             )
             return
         if parsed.manual_filter_pass:
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 parsed,
                 pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASSED,
@@ -82,7 +80,7 @@ class DelegationStage:
             )
             return
         if parsed.manual_add:
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 parsed,
                 pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_ADD_ACTIONABLE,
@@ -91,7 +89,7 @@ class DelegationStage:
             return
         dns_config = parsed.source_context.config["dns"]
         if not bool(dns_config.get("host_resolution", {}).get("enabled", False)):
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 parsed,
                 pipeline_result_code=host_resolution_skipped_result_code(),
@@ -116,7 +114,7 @@ class HostResolutionStage:
             try:
                 if work_item is None:
                     return
-                host_resolution_result = await self.runtime._lookup_host_resolution(
+                host_resolution_result = await self.runtime.lookup_host_resolution(
                     work_item.parsed.source_context, work_item.parsed.entry
                 )
                 await self.route(queue_bundle, work_item, host_resolution_result)
@@ -132,7 +130,7 @@ class HostResolutionStage:
         """Route one host-resolution result to terminal output or geo."""
         host_result_code = classify_host_resolution(host_resolution_result)
         if route_for_pipeline_result_code(host_result_code) == "review":
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 work_item.parsed,
                 pipeline_result_code=host_result_code,
@@ -143,7 +141,7 @@ class HostResolutionStage:
         if not bool(
             work_item.parsed.source_context.config["geo"].get("enabled", False)
         ):
-            await self.runtime._put_completed(
+            await self.runtime.put_completed(
                 queue_bundle,
                 work_item.parsed,
                 pipeline_result_code=host_result_code,
@@ -175,12 +173,12 @@ class GeoStage:
                 if work_item is None:
                     return
                 geo_result_code, geo_results, geo_policy = (
-                    await self.runtime._lookup_geo(
+                    await self.runtime.lookup_geo(
                         work_item.parsed.source_context,
                         work_item.host_resolution_result,
                     )
                 )
-                await self.runtime._put_completed(
+                await self.runtime.put_completed(
                     queue_bundle,
                     work_item.parsed,
                     pipeline_result_code=geo_result_code,
