@@ -160,8 +160,8 @@ defaults:
     cache_ttl_days: 7
     # In GitHub Actions, pass GEO_IPINFO_TOKEN through step-level env for
     # country-only ipinfo_lite lookups. Runtime consumes that env token without
-    # writing it into prepared worker bundles; leave geo.token blank unless you
-    # intentionally commit an explicit config token.
+    # writing it into prepare-to-worker manifests; leave geo.token blank unless
+    # you intentionally commit an explicit config token.
     policy:
       enabled: false
       match_scope: all_ips

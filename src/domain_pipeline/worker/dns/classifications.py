@@ -1,0 +1,55 @@
+"""DNS delegation and host-resolution pipeline result-code constants."""
+
+from __future__ import annotations
+
+PIPELINE_RESULT_CODE_DNS_DELEGATION_EXISTS = "dns_delegation_exists"
+PIPELINE_RESULT_CODE_DNS_DELEGATION_NXDOMAIN = "dns_delegation_nxdomain"
+PIPELINE_RESULT_CODE_DNS_DELEGATION_NODATA = "dns_delegation_nodata"
+PIPELINE_RESULT_CODE_DNS_DELEGATION_NO_NAMESERVERS = "dns_delegation_no_nameservers"
+PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT = "dns_delegation_timeout"
+PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL = "dns_delegation_servfail"
+
+# Host-resolution result codes keep their existing string values for output
+# compatibility. They describe only the optional A/AAAA/CNAME stage, never the
+# mandatory NS delegation stage above.
+PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SKIPPED = "dns_host_resolution_skipped"
+PIPELINE_RESULT_CODE_DNS_RESOLVES = "dns_resolves"
+PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES = (
+    "dns_resolved_without_ip_addresses"
+)
+PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT = "dns_lookup_timeout"
+PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL = "dns_lookup_servfail"
+PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN = "dns_host_nxdomain"
+PIPELINE_RESULT_CODE_DNS_HOST_NODATA = "dns_host_nodata"
+
+DELEGATION_UNACTIONABLE_PIPELINE_RESULT_CODES = frozenset(
+    {
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NXDOMAIN,
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NODATA,
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NO_NAMESERVERS,
+    }
+)
+
+DELEGATION_REVIEW_PIPELINE_RESULT_CODES = frozenset(
+    {
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL,
+    }
+)
+
+HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES = frozenset(
+    {
+        PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT,
+        PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL,
+        PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN,
+        PIPELINE_RESULT_CODE_DNS_HOST_NODATA,
+        PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES,
+    }
+)
+
+DNS_REVIEW_PIPELINE_RESULT_CODES = frozenset(
+    {
+        *DELEGATION_REVIEW_PIPELINE_RESULT_CODES,
+        *HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES,
+    }
+)
