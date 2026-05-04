@@ -31307,6 +31307,7 @@ eulerian.mathon.fr
 eulerian.monoprix.fr
 eulerian.net
 eulerian.netbooster.com
+eulerian.officiel-des-vacances.com
 eulerian.oxybul.com
 eulerian.sarenza.com
 eulerian.siandso.com
@@ -31395,6 +31396,7 @@ event-api.rdstation.com.br
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
+event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -31465,6 +31467,7 @@ events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
 events.ads.vungle.com
+events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.appsflyer.com
@@ -73574,6 +73577,7 @@ similarnatural.pro
 similarpresence.com
 similarshine.pro
 similartoweldeep.com
+simility.com
 simmeringsuitableunwoven.com
 simonsignal.com
 simpio.com
@@ -82033,6 +82037,7 @@ sync.mobojoy.baidu.com
 sync.republer.com
 sync.shinobi.jp
 sync.tidaltv.com
+sync.tv
 sync2.audtd.com
 syncclickflow.com
 syncope12.top
@@ -86675,6 +86680,7 @@ track.solutions.ostechnology.co.jp
 track.solventum.com
 track.span-smt.jp
 track.spothero.com
+track.strife.com
 track.sunmedia.tv
 track.tappx.com
 track.td3x.com
