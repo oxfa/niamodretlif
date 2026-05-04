@@ -116,6 +116,7 @@
 24837724.xyz
 24kad.com
 24newstech.com
+254a.com
 258pcf.com
 27fys.xyz
 285680.com
@@ -221,6 +222,7 @@
 5qjspf2c.xyz
 5wuefo9haif3.com
 5yrra.deshuangwang.cn
+600ad.com
 60571086.xyz
 60576949.xyz
 6080ai.com
@@ -518,7 +520,6 @@ acv.hikarisoftbank.com
 acvxskfeohrzi.online
 acwyolvrihywf.site
 acystiasix.shop
-ad-1258444056.cos.accelerate.myqcloud.com
 ad.17zhaole.com
 ad.googleanalysis.mobi
 ad.jsnbrynb.com
@@ -576,8 +577,6 @@ adsmarch.online
 adsmind.ugdtimg.com
 adsmogo.org
 adstats.tencentmusic.com
-adstore-1252524079.file.myqcloud.com
-adstore-index-1252524079.file.myqcloud.com
 adtqjaclmjanq.space
 adtrk.me
 adttt.com
@@ -774,7 +773,9 @@ aomeng.net
 aortaehexagyn.shop
 apajzmkpiuahv.space
 apciikxcsdzcu.website
+apd-pcdnwxlogin.teg.tencent-cloud.net
 apd-pcdnwxnat.teg.tencent-cloud.net
+apd-pcdnwxstat.teg.tencent-cloud.net
 aper.zhfosenghtr.com
 apgtlahmbaarc.website
 aphanesupwound.com
@@ -790,7 +791,6 @@ api.fastmoonclimbed.com
 api.h4game.net
 api.jsfc8.cn
 api.ketedata.com
-api.moogos.com
 api.newbelden.com
 api.ppoi.org
 api.rideraid.net
@@ -1084,6 +1084,7 @@ bcsnuyrwyfddx.space
 bcucrphyjuisx.site
 bcuh.tinwong.cn
 bd-gl.com
+bd1.flfgw.cn
 bd1.home8080.cn
 bd2.flfgw.cn
 bd2.home8080.cn
@@ -1620,7 +1621,6 @@ cdn.hivps.xyz
 cdn.img.liuxingyul.cn
 cdn.jandaqwe.com
 cdn.mingmingtehui.com
-cdn.moogos.com
 cdn.nuqwe.com
 cdn.rgrd.xyz
 cdn.surroundtm.com
@@ -2243,7 +2243,6 @@ dhrdievwphjqq.online
 dhuznadvqneop.website
 di5c.com
 dian5000.com
-dianjoy.com
 dianrui.com
 dianyilm.com
 diaoguoshi.mobi
@@ -2404,6 +2403,7 @@ drkelhpwlugrp.online
 dronml.ml
 drossesareca.com
 drrykr.com
+druic.mytxt.cc
 druis.mytxt.cc
 drusetrusts.shop
 drvmy.ats68.cn
@@ -2562,7 +2562,6 @@ e.dunmm.com
 e.dxmci.com
 e.e7001.com
 e.ediun.com
-e.ehxyz.com
 e.enjuk.com
 e.enjuw.com
 e.eozozw.cn
@@ -3117,14 +3116,12 @@ fallowsnorna.shop
 falsestbumwood.shop
 familytaste.cn
 fandelcot.com
-fandomsnidely.com
 fannybacker.com
 fanpxawzwfjyu.site
 faozulsoivlee.online
 farteniuson.com
 fascialbel.shop
 fashion-hat.cn
-fast-cdn.dianjoy.com
 fastestetaerio.shop
 fastishequinia.com
 fastpopunder.com
@@ -3490,7 +3487,6 @@ gg.g9mi6.com
 gg.gsdlcn.com
 gg.jtertp.com
 ggfcolzutnsjc.site
-ggtp-1255424916.cos.ap-chengdu.myqcloud.com
 ggvlrpjqnqssl.website
 ggwaqeyxuxmgj.space
 ggwcash.com
@@ -4668,7 +4664,6 @@ ketoleuncubic.shop
 ketoneaccruer.shop
 keweifuwu.shop
 kewqbdddbqsid.site
-keydot.net
 keyhamates.com
 kfewaz.zh1155.com
 kfnqlyvdoypie.site
@@ -5374,7 +5369,6 @@ m.ediun.com
 m.edysn.cn
 m.eglglh.cn
 m.egqiyw.com
-m.ehxyz.com
 m.eiiteho.cn
 m.ektktg.cn
 m.emshx.cn
@@ -5967,7 +5961,6 @@ monksbiduous.shop
 monsterofnews.com
 monthlypatient.com
 moodirresolute.com
-moogos.com
 moolveericed.com
 moonheappyrincenev.org
 moons.66bhy.com
@@ -6227,7 +6220,6 @@ nimbymjipsdap.space
 nimiq.by
 ninaning.com
 nincommf.com
-ninebox.cn
 ninetyfitful.com
 ninetyninesec.com
 ninontoising.com
@@ -8292,7 +8284,6 @@ rcnalhvjaxzkw.online
 rcojyxceaxjqs.website
 rcouxxirrshqr.site
 rcqdvveilyqfw.space
-rcv.moogos.com
 rcvmopjwwpfjd.website
 rcwkumpqfnpwn.website
 rcynoe.cn
@@ -8954,7 +8945,6 @@ s2.mingmingtehui.com
 s3.chengmingliang.com
 s350.familytaste.cn
 s4yxaqyq95.com
-s5.keydot.net
 s8.dnaxddnc.com
 saas-euw-1.com
 saasjlizzripq.space
