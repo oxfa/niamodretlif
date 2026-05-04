@@ -204,11 +204,7 @@ class RequestsIPGeoProvider:
 
     def _retry_after_seconds(self, response: object) -> float | None:
         """Return one provider-specific retry-after value when present."""
-        retry_after_seconds = (
-            self._requestor._retry_after_seconds(  # pylint: disable=protected-access
-                response
-            )
-        )
+        retry_after_seconds = self._requestor.retry_after_seconds(response)
         if retry_after_seconds is None:
             return None
         return float(retry_after_seconds)

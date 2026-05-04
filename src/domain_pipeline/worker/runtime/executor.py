@@ -188,9 +188,10 @@ class PipelineExecutor:
         if prefix == "host_resolution":
             self.cache_stats["dns_cache_misses"] += 1
 
-    async def _lookup_delegation(
+    async def lookup_delegation(
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> DelegationResult:
+        """Run or cache-read the required dns.delegation stage."""
         checker = RuntimeDNSCheckerFactory().build(
             source_context.config,
             effective_parallel_workers=self.effective_parallel_workers,
@@ -232,7 +233,7 @@ class PipelineExecutor:
         )
         return result
 
-    async def _lookup_host_resolution(
+    async def lookup_host_resolution(
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional dns.host_resolution stage."""
@@ -279,11 +280,12 @@ class PipelineExecutor:
         )
         return result
 
-    async def _lookup_geo(
+    async def lookup_geo(
         self,
         source_context: WorkerSourceContext,
         host_resolution_result: HostResolutionResult,
     ) -> tuple[str, list[IPGeoResult], Any | None]:
+        """Run or cache-read the optional geo stage and evaluate its policy."""
         geo_config = source_context.config["geo"]
         provider_name = str(
             geo_config.get("effective_provider") or geo_config.get("provider")
@@ -370,7 +372,7 @@ class PipelineExecutor:
             provenance=provenance,
         )
 
-    async def _put_completed(
+    async def put_completed(
         self,
         queue_bundle: RuntimeQueueSet,
         parsed: ParsedHostItem,
@@ -381,6 +383,7 @@ class PipelineExecutor:
         geo_results: list[IPGeoResult] | None = None,
         geo_policy: Any | None = None,
     ) -> None:
+        """Emit one terminal runtime result to the shared result queue."""
         await queue_bundle.result_queue.put(
             self._completed_result(
                 source_context=parsed.source_context,

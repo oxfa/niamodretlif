@@ -33,7 +33,6 @@ class AggregateCacheMerger:
             len(candidate_source_paths),
         )
         target_cache = CacheRepository.load(target_path)
-        target_connection = target_cache._connection  # pylint: disable=protected-access
         rows_by_key: dict[str, dict[tuple[str, ...], sqlite3.Row]] = {
             DELEGATION_TABLE: {},
             DNS_TABLE: {},
@@ -106,8 +105,11 @@ class AggregateCacheMerger:
                     source_dns_rows,
                     source_geo_rows,
                 )
-            self._write_merged_rows(target_connection, rows_by_key)
-            target_connection.commit()
+            target_cache.replace_cache_table_rows(
+                delegation_rows=rows_by_key[DELEGATION_TABLE].values(),
+                dns_rows=rows_by_key[DNS_TABLE].values(),
+                geo_rows=rows_by_key[GEO_TABLE].values(),
+            )
             logger.debug(
                 "Finished cache merge into %s with delegation_rows=%d dns_rows=%d geo_rows=%d "
                 "merged_cache_count=%d missing_cache_count=%d invalid_cache_count=%d",
@@ -167,42 +169,3 @@ class AggregateCacheMerger:
         finally:
             connection.close()
         return row_count
-
-    def _write_merged_rows(
-        self,
-        target_connection: sqlite3.Connection,
-        rows_by_key: dict[str, dict[tuple[str, ...], sqlite3.Row]],
-    ) -> None:
-        target_connection.execute(f"DELETE FROM {DELEGATION_TABLE}")
-        target_connection.execute(f"DELETE FROM {DNS_TABLE}")
-        target_connection.execute(f"DELETE FROM {GEO_TABLE}")
-        for row in rows_by_key[DELEGATION_TABLE].values():
-            target_connection.execute(
-                f"""
-                INSERT OR REPLACE INTO {DELEGATION_TABLE} (
-                    domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
-                    ns_servfail, no_nameservers, nameservers, checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(row[column] for column in row.keys()),
-            )
-        for row in rows_by_key[DNS_TABLE].values():
-            target_connection.execute(
-                """
-                INSERT OR REPLACE INTO dns_history (
-                    host, resolver_key, a_exists, a_nodata, a_nxdomain, a_timeout,
-                    a_servfail, canonical_name, ipv4_addresses, ipv6_addresses,
-                    checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(row[column] for column in row.keys()),
-            )
-        for row in rows_by_key[GEO_TABLE].values():
-            target_connection.execute(
-                """
-                INSERT OR REPLACE INTO geo_history (
-                    provider, ip, country_code, region_code, region_name, checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(row[column] for column in row.keys()),
-            )

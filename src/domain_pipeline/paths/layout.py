@@ -96,7 +96,7 @@ class OutputPathLayout:
 
 
 @dataclass(frozen=True)
-class WorkflowPathLayout:  # pylint: disable=too-many-public-methods
+class WorkflowPathLayout:
     """Derive workflow-state paths for one workspace."""
 
     workspace_root: Path
