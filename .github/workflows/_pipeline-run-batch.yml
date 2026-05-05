@@ -169,7 +169,9 @@ jobs:
           pip install -r requirements.txt
       # Prefer the prior attempt from the same workflow run when a rerun needs
       # to resume DNS-only cache progress, then fall back to the broader
-      # config-wide lineage.
+      # config-wide lineage. Later diagnostics log GitHub restore output,
+      # visible cache candidates, local DB file state, and sqlite usability
+      # separately; visible candidates do not prove restore eligibility.
       - name: Restore baseline cache
         id: restore_worker_baseline_cache
         uses: actions/cache/restore@v5
@@ -225,6 +227,7 @@ jobs:
           set -eo pipefail
           worker_cache_log_path=".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log"
           mkdir -p "$(dirname "${worker_cache_log_path}")"
+          cache_hit="${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
           key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
@@ -241,6 +244,14 @@ jobs:
             .actions_caches[]? |
             "worker baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
           ' "${response_path}" | tee -a "${worker_cache_log_path}"
+          python -m domain_pipeline.pipeline_run inspect-cache-lifecycle \
+            --scope worker \
+            --cache-hit "${cache_hit}" \
+            --candidate-response "${response_path}" \
+            --cache-path .workflow_state/runtime/cache/check-cache.sqlite3 \
+            --wal-path .workflow_state/runtime/cache/check-cache.sqlite3-wal \
+            --shm-path .workflow_state/runtime/cache/check-cache.sqlite3-shm \
+            | tee -a "${worker_cache_log_path}"
       - name: Download prepared batch artifact
         uses: actions/download-artifact@v8
         with:
@@ -455,7 +466,10 @@ jobs:
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
             --base-ref "${{ needs.prepare_run.outputs.source_sha }}"
       # Keep aggregate reruns on the same DNS-only per-run cache lineage before
-      # falling back to any newer config-wide cache generation.
+      # falling back to any newer config-wide cache generation. Restore output,
+      # visible candidates, local DB file state, and sqlite usability are logged
+      # as separate layers because candidate visibility is not restore
+      # eligibility.
       - name: Restore aggregate baseline cache
         id: restore_aggregate_baseline_cache
         uses: actions/cache/restore@v5
@@ -509,6 +523,7 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p "$(dirname "${CACHE_LOG_PATH}")"
+          cache_hit="${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
           key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
@@ -525,6 +540,14 @@ jobs:
             .actions_caches[]? |
             "aggregate baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
           ' "${response_path}" | tee -a "${CACHE_LOG_PATH}"
+          python -m domain_pipeline.pipeline_run inspect-cache-lifecycle \
+            --scope aggregate \
+            --cache-hit "${cache_hit}" \
+            --candidate-response "${response_path}" \
+            --cache-path .workflow_state/runtime/cache/check-cache.sqlite3 \
+            --wal-path .workflow_state/runtime/cache/check-cache.sqlite3-wal \
+            --shm-path .workflow_state/runtime/cache/check-cache.sqlite3-shm \
+            | tee -a "${CACHE_LOG_PATH}"
       - name: Configure git actor
         run: |
           python -m domain_pipeline.pipeline_run configure-git \
