@@ -23,6 +23,9 @@ defaults:
     # they are not provider-published guarantees.
     default_resolvers: []
     timeout: 5.0
+    # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
+    # capped at 2 seconds between attempts.
+    retry_backoff_base_seconds: 1.0
     query_rate_limit:
       enabled: true
       providers:

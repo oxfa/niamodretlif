@@ -148,18 +148,27 @@ class PendingQueryLimiter:
 class DNSQueryCoordinator:
     """Resolve DNS queries through a shared balanced and rate-limited endpoint pool."""
 
+    _limiter_lock = threading.Lock()
+    _shared_limiters: dict[
+        str,
+        tuple[dict[str, TokenBucketRateLimiter], dict[str, PendingQueryLimiter]],
+    ] = {}
+
     def __init__(
         self,
         *,
         endpoints: list[DNSEndpoint],
         resolver_key: str,
         config: DNSQueryCoordinatorConfig,
+        retry_backoff_base_seconds: float = 1.0,
+        limiter_key: str | None = None,
     ) -> None:
         if not endpoints:
             raise ValueError("DNS query coordinator requires at least one endpoint")
         self.endpoints = list(endpoints)
         self._resolver_key = resolver_key
         self._config = config
+        self._retry_backoff_base_seconds = max(float(retry_backoff_base_seconds), 0.001)
         self._selection = DNSQuerySelectionState(
             weighted_endpoint_indices=self._build_weighted_endpoint_indices(),
             positions={},
@@ -168,17 +177,43 @@ class DNSQueryCoordinator:
             query_counter_lock=threading.Lock(),
             provider_count=len({endpoint.provider for endpoint in self.endpoints}),
         )
-        self._rate_limiters = {
+        self._rate_limiters, self._pending_limiters = self._build_limiters(
+            config=config,
+            limiter_key=limiter_key,
+        )
+
+    @classmethod
+    def _build_limiters(
+        cls,
+        *,
+        config: DNSQueryCoordinatorConfig,
+        limiter_key: str | None,
+    ) -> tuple[dict[str, TokenBucketRateLimiter], dict[str, PendingQueryLimiter]]:
+        """Return fresh or shared provider limiter state."""
+        rate_limiters = {
             provider: TokenBucketRateLimiter(
                 qps=limit.qps_per_worker,
                 burst=limit.burst,
             )
             for provider, limit in config.provider_limits.items()
         }
-        self._pending_limiters = {
+        pending_limiters = {
             provider: PendingQueryLimiter(limit.max_pending)
             for provider, limit in config.provider_limits.items()
         }
+        if limiter_key is None:
+            return rate_limiters, pending_limiters
+        with cls._limiter_lock:
+            return cls._shared_limiters.setdefault(
+                limiter_key,
+                (rate_limiters, pending_limiters),
+            )
+
+    @classmethod
+    def clear_shared_limiters(cls) -> None:
+        """Clear shared limiter state for tests."""
+        with cls._limiter_lock:
+            cls._shared_limiters.clear()
 
     def resolver_key(self) -> str:
         """Return the pool-level resolver cache key."""
@@ -237,7 +272,8 @@ class DNSQueryCoordinator:
         """Apply bounded retry backoff after the first failed attempt."""
         if attempt_index <= 0:
             return
-        time.sleep(min(0.25 * (2 ** (attempt_index - 1)), 2.0))
+        wait_seconds = self._retry_backoff_base_seconds * (2 ** (attempt_index - 1))
+        time.sleep(min(wait_seconds, 2.0))
 
     def resolve(self, name: str, record_type: str, attempts: int, stage: str) -> Any:
         """Resolve one query with provider-aware retries and truthful telemetry."""
@@ -409,6 +445,7 @@ class DNSQueryCoordinatorRegistry:
         endpoints: list[DNSEndpoint],
         resolver_key: str,
         config: DNSQueryCoordinatorConfig,
+        retry_backoff_base_seconds: float = 1.0,
     ) -> DNSQueryCoordinator:
         """Return a shared coordinator for one normalized DNS resolver profile."""
         with cls._lock:
@@ -418,6 +455,7 @@ class DNSQueryCoordinatorRegistry:
                     endpoints=endpoints,
                     resolver_key=resolver_key,
                     config=config,
+                    retry_backoff_base_seconds=retry_backoff_base_seconds,
                 )
                 cls._coordinators[registry_key] = coordinator
             return coordinator
@@ -427,6 +465,7 @@ class DNSQueryCoordinatorRegistry:
         """Clear registry state for tests."""
         with cls._lock:
             cls._coordinators.clear()
+        DNSQueryCoordinator.clear_shared_limiters()
 
 
 def provider_for_nameserver(nameserver: str | None) -> str:

@@ -47,6 +47,9 @@ defaults:
     default_resolvers: []
     # Per-query DNS timeout, in seconds.
     timeout: 5.0
+    # Base wait, in seconds, for exponential DNS retry backoff after retryable
+    # timeout/SERVFAIL outcomes. Runtime caps each retry wait at 2 seconds.
+    retry_backoff_base_seconds: 1.0
     # DNS safety limits. aggregate_qps_target is a project cap for one provider
     # across the effective parallel workers; runtime divides it into the
     # effective worker-local qps_per_worker. The values below are conservative
@@ -217,6 +220,7 @@ sources:
     dns:
       default_resolvers: []
       timeout: 5.0
+      retry_backoff_base_seconds: 1.0
       query_rate_limit:
         enabled: true
       delegation:

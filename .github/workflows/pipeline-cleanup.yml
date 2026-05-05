@@ -25,6 +25,7 @@ jobs:
       WORKFLOW_HISTORY_FILES: |
         pipeline-block.yml
         pipeline-direct.yml
+        pipeline-cleanup.yml
     steps:
       - name: Delete stale pipeline-run sqlite caches
         env:
