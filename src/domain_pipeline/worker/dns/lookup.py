@@ -220,12 +220,14 @@ def dns_query_coordinator_key(
     ecs: dict[str, Any],
     query_config: DNSQueryCoordinatorConfig,
     weights: dict[str, int] | None = None,
+    retry_backoff_base_seconds: float = 1.0,
 ) -> str:
     """Return a process-local key for sharing one DNS query coordinator."""
     resolver_key = dns_resolver_key({"resolvers": resolvers, "ecs": ecs})
     return (
         f"{resolver_key}|timeout={timeout}|{_coordinator_config_key(query_config)}"
         f"|{_resolver_weights_key(weights)}"
+        f"|retry_backoff_base_seconds={retry_backoff_base_seconds:g}"
     )
 
 
@@ -298,6 +300,9 @@ def delegation_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
         "resolvers": resolvers,
         "resolver_weights": weights,
         "timeout": _stage_timeout(dns_config, delegation_config),
+        "retry_backoff_base_seconds": float(
+            dns_config.get("retry_backoff_base_seconds", 1.0)
+        ),
         "query_rate_limit": _stage_query_rate_limit(dns_config, delegation_config),
     }
     return profile
@@ -311,6 +316,9 @@ def host_resolution_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
         "resolvers": resolvers,
         "resolver_weights": weights,
         "timeout": _stage_timeout(dns_config, host_config),
+        "retry_backoff_base_seconds": float(
+            dns_config.get("retry_backoff_base_seconds", 1.0)
+        ),
         "ecs": dict(host_config.get("ecs") or {}),
         "query_rate_limit": _stage_query_rate_limit(dns_config, host_config),
     }
@@ -553,6 +561,7 @@ class DomainChecker:
             ],
             resolver_key=self.resolver_key(),
             config=query_config,
+            retry_backoff_base_seconds=1.0,
         )
         self.delegation_query_coordinator = coordinator
         self.host_resolution_query_coordinator = coordinator
@@ -582,6 +591,8 @@ class DomainChecker:
         resolver_key = (
             f"{dns_resolver_key(dns_profile)}"
             f"|timeout={float(dns_profile.get('timeout', 5.0))}"
+            f"|retry_backoff_base_seconds="
+            f"{float(dns_profile.get('retry_backoff_base_seconds', 1.0)):g}"
         )
         registry_key = dns_query_coordinator_key(
             resolvers=list(dns_profile.get("resolvers") or []),
@@ -589,12 +600,18 @@ class DomainChecker:
             ecs=dict(dns_profile.get("ecs") or {}),
             query_config=query_config,
             weights=weights,
+            retry_backoff_base_seconds=float(
+                dns_profile.get("retry_backoff_base_seconds", 1.0)
+            ),
         )
         return DNSQueryCoordinatorRegistry.get_or_create(
             registry_key=f"stage={stage}|{registry_key}",
             endpoints=endpoints,
             resolver_key=resolver_key,
             config=query_config,
+            retry_backoff_base_seconds=float(
+                dns_profile.get("retry_backoff_base_seconds", 1.0)
+            ),
         )
 
     def resolver_key(self) -> str:

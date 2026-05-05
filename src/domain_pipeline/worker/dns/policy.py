@@ -10,7 +10,7 @@ from domain_pipeline.worker.dns.constants import SYSTEM_DNS_NAMESERVER
 
 
 class DNSConfigPolicy:
-    """Validate DNS resolver literals, weights, timeout, and removed fields."""
+    """Validate DNS resolver literals, weights, timing, and removed fields."""
 
     def normalize_resolver_literal(self, value: str, *, field_name: str) -> str:
         """Return one normalized DNS resolver endpoint literal."""
@@ -46,4 +46,12 @@ class DNSConfigPolicy:
         """Return a normalized positive DNS timeout."""
         if not math.isfinite(value) or value <= 0:
             raise ValueError("dns.timeout must be finite and positive")
+        return float(value)
+
+    def validate_retry_backoff_base_seconds(self, value: float) -> float:
+        """Return a normalized positive DNS retry backoff base delay."""
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                "dns.retry_backoff_base_seconds must be finite and positive"
+            )
         return float(value)

@@ -365,6 +365,7 @@ class DNSConfig(StrictModel):
 
     default_resolvers: list[DNSResolverConfig] = Field(default_factory=list)
     timeout: float = 5.0
+    retry_backoff_base_seconds: float = 1.0
     query_rate_limit: DNSQueryRateLimitConfig = Field(
         default_factory=DNSQueryRateLimitConfig
     )
@@ -411,6 +412,11 @@ class DNSConfig(StrictModel):
     @classmethod
     def _validate_timeout(cls, value: float) -> float:
         return DNSConfigPolicy().validate_timeout(value)
+
+    @field_validator("retry_backoff_base_seconds", mode="after")
+    @classmethod
+    def _validate_retry_backoff_base_seconds(cls, value: float) -> float:
+        return DNSConfigPolicy().validate_retry_backoff_base_seconds(value)
 
 
 class OutputConfig(StrictModel):
