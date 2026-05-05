@@ -89,29 +89,15 @@ class FetchConfig(StrictModel):
 class DNSProviderRateLimitConfig(StrictModel):
     """DNS query limit for one resolver provider."""
 
-    qps_per_worker: float | None = None
-    aggregate_qps_target: float | None = None
+    qps_per_worker: float
     burst: int
     max_pending: int
 
-    @model_validator(mode="after")
-    def _validate_qps_source(self) -> DNSProviderRateLimitConfig:
-        if self.qps_per_worker is None and self.aggregate_qps_target is None:
-            raise ValueError(
-                "dns provider requires qps_per_worker or aggregate_qps_target"
-            )
-        return self
-
-    @field_validator("qps_per_worker", "aggregate_qps_target", mode="after")
+    @field_validator("qps_per_worker", mode="after")
     @classmethod
-    def _validate_qps(cls, value: float | None) -> float | None:
-        if value is None:
-            return None
+    def _validate_qps(cls, value: float) -> float:
         if not math.isfinite(value) or value <= 0:
-            raise ValueError(
-                "dns provider qps_per_worker and aggregate_qps_target "
-                "must be finite and positive"
-            )
+            raise ValueError("dns provider qps_per_worker must be finite and positive")
         return float(value)
 
     @field_validator("burst", "max_pending", mode="after")
@@ -125,12 +111,11 @@ class DNSProviderRateLimitConfig(StrictModel):
 class DNSRateLimitProvidersConfig(StrictModel):
     """Provider-specific project safety defaults for DNS rate limiting."""
 
-    # These are project caps, not provider-published guarantees. aggregate_qps_target
-    # is divided by the effective workflow parallelism at runtime.
+    # These worker-local caps are project safety defaults, not provider-published
+    # guarantees.
     system_resolver: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=60.0,
-            aggregate_qps_target=60.0,
             burst=10,
             max_pending=32,
         )
@@ -138,7 +123,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     google_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=30.0,
-            aggregate_qps_target=30.0,
             burst=5,
             max_pending=16,
         )
@@ -146,7 +130,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     quad9_ecs_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=30.0,
-            aggregate_qps_target=30.0,
             burst=5,
             max_pending=16,
         )
@@ -154,7 +137,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     cloudflare_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=12.0,
-            aggregate_qps_target=12.0,
             burst=2,
             max_pending=8,
         )
@@ -162,7 +144,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     opendns_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=12.0,
-            aggregate_qps_target=12.0,
             burst=2,
             max_pending=8,
         )
@@ -170,7 +151,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     controld_unfiltered_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=12.0,
-            aggregate_qps_target=12.0,
             burst=2,
             max_pending=8,
         )
@@ -178,7 +158,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     dns_sb_public_dns: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=12.0,
-            aggregate_qps_target=12.0,
             burst=2,
             max_pending=8,
         )
@@ -186,7 +165,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
     unrecognized_resolver: DNSProviderRateLimitConfig = Field(
         default_factory=lambda: DNSProviderRateLimitConfig(
             qps_per_worker=12.0,
-            aggregate_qps_target=12.0,
             burst=2,
             max_pending=8,
         )

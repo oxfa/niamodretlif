@@ -138,19 +138,10 @@ class ResultOutputWriter:
             )
         group.seen_review_rows.add(review_signature)
         group.review_rows.append(row)
-        logger.debug("Queued host=%s for review output", row["host"])
 
     def add(self, result: CompletedHostResult) -> None:
         """Record one completed terminal result."""
         group = self._group_for_source(result.source_context)
-        logger.debug(
-            "Collecting terminal result for source=%s host=%s "
-            "pipeline_result_code=%s route=%s",
-            result.source_context.source_id,
-            result.row["host"],
-            result.pipeline_result_code,
-            result.route,
-        )
         self.counts[result.pipeline_result_code] += 1
         self.counts[f"route_{result.route}"] += 1
         if result.route == "unactionable":
@@ -163,11 +154,6 @@ class ResultOutputWriter:
                 )
             group.seen_host_outputs["unactionable"].add(host)
             group.unactionable_rows.append(result.row)
-            logger.debug("Queued host=%s for unactionable output", host)
-            logger.debug(
-                "Routed host=%s to unactionable output after terminal routing decision",
-                result.row["host"],
-            )
         elif result.route == "filtered":
             host = result.row["host"]
             if host in group.seen_host_outputs["filtered"]:
@@ -178,7 +164,6 @@ class ResultOutputWriter:
                 )
             group.seen_host_outputs["filtered"].add(host)
             group.filtered_rows.append(result.row)
-            logger.debug("Queued host=%s for filtered output", host)
         elif result.route == "review":
             self._queue_review_row(group=group, row=result.row)
 
@@ -195,7 +180,6 @@ class ResultOutputWriter:
             )
         group.seen_audit_rows.add(audit_signature)
         group.audit_rows.append(audit_row)
-        logger.debug("Queued host=%s for audit output", result.row["host"])
 
     def _write_group_files(
         self,

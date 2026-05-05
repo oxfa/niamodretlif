@@ -85,12 +85,10 @@ class PipelineExecutor:
         *,
         runtime_identity: dict[str, str] | None = None,
         prepared_metadata: dict[str, Any] | None = None,
-        effective_parallel_workers: int = 1,
     ) -> None:
         _ = runtime_identity
         self.config = config
         self.prepared_metadata = prepared_metadata or {}
-        self.effective_parallel_workers = max(1, int(effective_parallel_workers))
         self.writer = ResultOutputWriter()
         cache_payload = config.get("cache", {})
         cache_file = str(cache_payload.get("cache_file", "")).strip()
@@ -113,14 +111,12 @@ class PipelineExecutor:
         *,
         runtime_identity: dict[str, str] | None = None,
         prepared_metadata: dict[str, Any] | None = None,
-        effective_parallel_workers: int = 1,
     ) -> "PipelineExecutor":
         """Build a runtime from a manifest-owned payload."""
         return cls(
             runtime_config,
             runtime_identity=runtime_identity,
             prepared_metadata=prepared_metadata,
-            effective_parallel_workers=effective_parallel_workers,
         )
 
     def close(self) -> None:
@@ -192,10 +188,7 @@ class PipelineExecutor:
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> DelegationResult:
         """Run or cache-read the required dns.delegation stage."""
-        checker = RuntimeDNSCheckerFactory().build(
-            source_context.config,
-            effective_parallel_workers=self.effective_parallel_workers,
-        )
+        checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.delegation_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_delegation_with_source(
@@ -237,10 +230,7 @@ class PipelineExecutor:
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional dns.host_resolution stage."""
-        checker = RuntimeDNSCheckerFactory().build(
-            source_context.config,
-            effective_parallel_workers=self.effective_parallel_workers,
-        )
+        checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_dns_with_source(
@@ -252,7 +242,7 @@ class PipelineExecutor:
                 self._record_cache_hit("host_resolution", source)
                 return cached_result
             logger.debug(
-                "Ignoring stale host-resolution cache row for %s with unknown status",
+                "Ignoring host-resolution cache row for %s with unknown status",
                 entry.host,
             )
         self._record_cache_miss("host_resolution")
@@ -587,8 +577,9 @@ class PipelineExecutor:
             await self._stop_cache_writers(self.cache_bundle, cache_tasks)
             writer_result = self.writer.write()
             logger.info(
-                "Pipeline emitted counts=%s outputs=%s",
+                "Pipeline emitted counts=%s cache_counts=%s outputs=%s",
                 dict(writer_result.counts),
+                dict(sorted(self.cache_stats.items())),
                 writer_result.output_paths,
             )
             return 0
@@ -610,14 +601,12 @@ async def run_prepared_pipeline_async(
     runtime_identity: dict[str, str] | None = None,
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
-    effective_parallel_workers: int = 1,
 ) -> int:
     """Run one workflow-owned runtime payload."""
     runtime = PipelineExecutor.from_runtime_payload(
         runtime_config,
         runtime_identity=runtime_identity,
         prepared_metadata=prepared_metadata,
-        effective_parallel_workers=effective_parallel_workers,
     )
     try:
         if max_runtime_seconds is None:

@@ -142,7 +142,6 @@ def _handle_worker(
         source_root=source_root,
         state_root=state_root,
         max_runtime_seconds=args.max_runtime_seconds,
-        effective_parallel_workers=args.effective_parallel_workers,
     )
     _print_json(payload)
     return 0
@@ -372,7 +371,6 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
                 },
             ),
             ("--max-runtime-seconds", {"type": float, "default": None}),
-            ("--effective-parallel-workers", {"type": int, "default": 1}),
         ],
     )
 

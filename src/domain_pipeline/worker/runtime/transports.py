@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from domain_pipeline.worker.dns import (
     DelegationResult,
@@ -11,8 +10,6 @@ from domain_pipeline.worker.dns import (
     HostResolutionResult,
 )
 from domain_pipeline.worker.geo import IPGeoProvider, IPGeoResult
-
-logger = logging.getLogger(__name__)
 
 
 class AsyncDelegationTransport:
@@ -23,7 +20,6 @@ class AsyncDelegationTransport:
 
     async def lookup(self, domain: str) -> DelegationResult:
         """Resolve one delegation result on a worker thread."""
-        logger.debug("Dispatching async delegation lookup for %s", domain)
         return await asyncio.to_thread(self.checker.delegation_lookup, domain)
 
 
@@ -35,7 +31,6 @@ class AsyncHostResolutionTransport:
 
     async def lookup(self, host: str) -> HostResolutionResult:
         """Resolve one dns.host_resolution result on a worker thread."""
-        logger.debug("Dispatching async host resolution lookup for %s", host)
         return await asyncio.to_thread(self.checker.host_resolution_lookup, host)
 
 

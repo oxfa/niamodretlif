@@ -17,8 +17,6 @@ class RuntimeDNSCheckerFactory:
     def build(
         self,
         source_config: dict[str, Any],
-        *,
-        effective_parallel_workers: int = 1,
     ) -> DomainChecker:
         """Build a DNS checker from one normalized source config."""
         dns_config = source_config["dns"]
@@ -33,5 +31,4 @@ class RuntimeDNSCheckerFactory:
             host_retry_attempts=int(
                 dns_config.get("host_resolution", {}).get("retry_attempts", 3)
             ),
-            effective_parallel_workers=effective_parallel_workers,
         )

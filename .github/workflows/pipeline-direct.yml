@@ -27,8 +27,8 @@ jobs:
       config_name: direct
       config_path: config/direct.yaml
       # Stage-specific resolver entries control live traffic share inside each
-      # worker when weights are present. DNS query rate limits are enforced per
-      # provider across the effective parallel workers. The repository variable
+      # worker when weights are present. max_parallel_workers controls only
+      # GitHub matrix concurrency. The repository variable
       # PIPELINE_RUN_MAX_PARALLEL_WORKERS overrides this config-specific default.
       worker_count: 18
       max_parallel_workers_default: "18"
