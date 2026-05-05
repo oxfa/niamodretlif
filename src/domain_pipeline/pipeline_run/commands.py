@@ -13,6 +13,10 @@ from domain_pipeline.aggregate import (
     aggregate_batch,
     validate_aggregate_readiness,
 )
+from domain_pipeline.pipeline_run.cache_lifecycle import (
+    inspect_cache_lifecycle,
+    render_lifecycle_log_lines,
+)
 from domain_pipeline.pipeline_run.settings import (
     batch_id_from_run,
     default_worker_ids,
@@ -207,6 +211,21 @@ def _handle_materialize_incomplete_statuses(
     return 0
 
 
+def _handle_inspect_cache_lifecycle(args: argparse.Namespace) -> int:
+    """Emit layered GitHub Actions sqlite cache lifecycle log lines."""
+    snapshot = inspect_cache_lifecycle(
+        scope=args.scope,
+        cache_hit=args.cache_hit,
+        candidate_response_path=Path(args.candidate_response),
+        cache_path=Path(args.cache_path),
+        wal_path=Path(args.wal_path),
+        shm_path=Path(args.shm_path),
+    )
+    for line in render_lifecycle_log_lines(snapshot):
+        print(line)
+    return 0
+
+
 def _build_command_handlers(
     args: argparse.Namespace,
     source_root: Path,
@@ -289,6 +308,7 @@ def _build_workflow_command_handlers(
             args,
             state_root,
         ),
+        "inspect-cache-lifecycle": lambda: _handle_inspect_cache_lifecycle(args),
         "materialize-incomplete-statuses": lambda: (
             _handle_materialize_incomplete_statuses(args, state_root)
         ),
@@ -421,6 +441,19 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         [
             ("--batch-id", {"required": True}),
             ("--failure-reason", {"required": True}),
+        ],
+    )
+
+    inspect_cache_parser = subparsers.add_parser("inspect-cache-lifecycle")
+    _add_arguments(
+        inspect_cache_parser,
+        [
+            ("--scope", {"choices": ["worker", "aggregate"], "required": True}),
+            ("--cache-hit", {"required": True}),
+            ("--candidate-response", {"required": True}),
+            ("--cache-path", {"required": True}),
+            ("--wal-path", {"required": True}),
+            ("--shm-path", {"required": True}),
         ],
     )
 
