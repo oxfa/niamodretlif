@@ -15,8 +15,10 @@ import dns.resolver
 
 from domain_pipeline.worker.dns.query_coordinator import (
     DNSEndpoint,
+    DNSDelegationQueryCoordinator,
+    DNSHostResolutionQueryCoordinator,
     DNSProviderRateLimit,
-    DNSQueryCoordinator,
+    DNSQueryCoordinatorBase,
     DNSQueryCoordinatorConfig,
     DNSQueryExhaustedError,
     DNSQueryCoordinatorRegistry,
@@ -40,33 +42,32 @@ VERIFIED_ECS_NAMESERVERS = frozenset(
     [*DEFAULT_ECS_FALLBACK_NAMESERVERS, *QUAD9_ECS_PUBLIC_DNS_NAMESERVERS]
 )
 CNAME_CHAIN_LIMIT = 8
-# Project safety caps, not provider-published guarantees. aggregate_qps_target
-# bounds one provider's intended total traffic across effective parallel workers;
-# qps_per_worker is the single-worker fallback when no aggregate target is set.
+# Project safety caps, not provider-published guarantees. qps_per_worker is a
+# worker-local cap for one provider bucket.
 DEFAULT_DNS_PROVIDER_LIMITS = {
     PROVIDER_SYSTEM_RESOLVER: DNSProviderRateLimit(
-        qps_per_worker=60.0, burst=10, max_pending=32, aggregate_qps_target=60.0
+        qps_per_worker=60.0, burst=10, max_pending=32
     ),
     PROVIDER_GOOGLE_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=30.0, burst=5, max_pending=16, aggregate_qps_target=30.0
+        qps_per_worker=30.0, burst=5, max_pending=16
     ),
     PROVIDER_QUAD9_ECS_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=30.0, burst=5, max_pending=16, aggregate_qps_target=30.0
+        qps_per_worker=30.0, burst=5, max_pending=16
     ),
     PROVIDER_CLOUDFLARE_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
+        qps_per_worker=12.0, burst=2, max_pending=8
     ),
     PROVIDER_OPENDNS_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
+        qps_per_worker=12.0, burst=2, max_pending=8
     ),
     PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
+        qps_per_worker=12.0, burst=2, max_pending=8
     ),
     PROVIDER_DNS_SB_PUBLIC_DNS: DNSProviderRateLimit(
-        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
+        qps_per_worker=12.0, burst=2, max_pending=8
     ),
     PROVIDER_UNRECOGNIZED_RESOLVER: DNSProviderRateLimit(
-        qps_per_worker=12.0, burst=2, max_pending=8, aggregate_qps_target=12.0
+        qps_per_worker=12.0, burst=2, max_pending=8
     ),
 }
 
@@ -115,44 +116,26 @@ def dns_resolver_key(dns_config: dict[str, Any]) -> str:
 def _provider_limit_from_config(
     payload: dict[str, Any],
     fallback: DNSProviderRateLimit,
-    *,
-    effective_parallel_workers: int,
 ) -> DNSProviderRateLimit:
-    if "aggregate_qps_target" in payload:
-        aggregate_payload = payload["aggregate_qps_target"]
-        aggregate_qps_target = (
-            None if aggregate_payload is None else float(aggregate_payload)
+    removed_budget_key = "aggregate" + "_qps_target"
+    if removed_budget_key in payload:
+        raise ValueError(
+            "unsupported DNS provider rate-limit field; use qps_per_worker"
         )
-    elif "qps_per_worker" in payload:
-        aggregate_qps_target = None
-    else:
-        aggregate_qps_target = fallback.aggregate_qps_target
     qps_payload = payload.get("qps_per_worker")
-    configured_qps = (
-        fallback.qps_per_worker if qps_payload is None else float(qps_payload)
-    )
-    if aggregate_qps_target is not None:
-        qps = aggregate_qps_target / max(1, int(effective_parallel_workers))
-    else:
-        qps = configured_qps
+    qps = fallback.qps_per_worker if qps_payload is None else float(qps_payload)
     burst = int(payload.get("burst", fallback.burst))
     max_pending = int(payload.get("max_pending", fallback.max_pending))
     return DNSProviderRateLimit(
         qps_per_worker=max(qps, 0.001),
         burst=max(burst, 1),
         max_pending=max(max_pending, 1),
-        aggregate_qps_target=(
-            max(float(aggregate_qps_target), 0.001)
-            if aggregate_qps_target is not None
-            else None
-        ),
     )
 
 
 def dns_query_coordinator_config(
     *,
     query_rate_limit: dict[str, Any] | None,
-    effective_parallel_workers: int = 1,
 ) -> DNSQueryCoordinatorConfig:
     """Return normalized DNS query coordination settings."""
     rate_payload = dict(query_rate_limit or {})
@@ -166,7 +149,6 @@ def dns_query_coordinator_config(
         provider: _provider_limit_from_config(
             dict(provider_payloads.get(provider) or {}),
             fallback,
-            effective_parallel_workers=effective_parallel_workers,
         )
         for provider, fallback in DEFAULT_DNS_PROVIDER_LIMITS.items()
     }
@@ -198,14 +180,8 @@ def _coordinator_config_key(config: DNSQueryCoordinatorConfig) -> str:
     provider_parts = []
     for provider in sorted(config.provider_limits):
         limit = config.provider_limits[provider]
-        aggregate = (
-            "none"
-            if limit.aggregate_qps_target is None
-            else f"{limit.aggregate_qps_target:g}"
-        )
         provider_parts.append(
-            f"{provider}:{limit.qps_per_worker:g}:{aggregate}:"
-            f"{limit.burst}:{limit.max_pending}"
+            f"{provider}:{limit.qps_per_worker:g}:{limit.burst}:{limit.max_pending}"
         )
     return (
         f"rate={int(config.rate_limit_enabled)}"
@@ -474,13 +450,12 @@ class DomainChecker:
         timeout: float = 5.0,
         ecs: dict[str, Any] | None = None,
         query_rate_limit: dict[str, Any] | None = None,
-        query_coordinator: DNSQueryCoordinator | None = None,
+        query_coordinator: DNSQueryCoordinatorBase | None = None,
         delegation_dns: dict[str, Any] | None = None,
         host_resolution_dns: dict[str, Any] | None = None,
         retry_attempts: int = 3,
         delegation_retry_attempts: int | None = None,
         host_retry_attempts: int | None = None,
-        effective_parallel_workers: int = 1,
     ) -> None:
         delegation_payload = dict(delegation_dns or {})
         host_resolution_payload = dict(host_resolution_dns or {})
@@ -510,7 +485,6 @@ class DomainChecker:
             self.host_resolution_dns_profile["query_rate_limit"]
         )
         self.retry_attempts = max(1, int(retry_attempts))
-        self.effective_parallel_workers = max(1, int(effective_parallel_workers))
         self.delegation_retry_attempts = max(
             1,
             int(
@@ -551,7 +525,7 @@ class DomainChecker:
             rate_limit_enabled=False,
             provider_limits={},
         )
-        coordinator = DNSQueryCoordinator(
+        delegation_coordinator = DNSDelegationQueryCoordinator(
             endpoints=[
                 DNSEndpoint(
                     provider=PROVIDER_UNRECOGNIZED_RESOLVER,
@@ -563,18 +537,36 @@ class DomainChecker:
             config=query_config,
             retry_backoff_base_seconds=1.0,
         )
-        self.delegation_query_coordinator = coordinator
-        self.host_resolution_query_coordinator = coordinator
-        self.query_coordinator = coordinator
+        host_resolution_coordinator = DNSHostResolutionQueryCoordinator(
+            endpoints=[
+                DNSEndpoint(
+                    provider=PROVIDER_UNRECOGNIZED_RESOLVER,
+                    address=None,
+                    resolver=resolver,
+                )
+            ],
+            resolver_key=self.resolver_key(),
+            config=query_config,
+            retry_backoff_base_seconds=1.0,
+        )
+        self.delegation_query_coordinator = delegation_coordinator
+        self.host_resolution_query_coordinator = host_resolution_coordinator
+        self.query_coordinator = host_resolution_coordinator
 
     def _build_query_coordinator(
         self, stage: str, dns_profile: dict[str, Any]
-    ) -> DNSQueryCoordinator:
+    ) -> DNSQueryCoordinatorBase:
         """Build or retrieve the shared DNS query coordinator for this checker."""
         query_config = dns_query_coordinator_config(
             query_rate_limit=dns_profile.get("query_rate_limit", {}),
-            effective_parallel_workers=self.effective_parallel_workers,
         )
+        coordinator_cls: type[DNSQueryCoordinatorBase]
+        if stage == "delegation":
+            coordinator_cls = DNSDelegationQueryCoordinator
+        elif stage == "host_resolution":
+            coordinator_cls = DNSHostResolutionQueryCoordinator
+        else:
+            raise ValueError(f"unsupported DNS query coordinator stage: {stage}")
         endpoint_resolvers: list[str | None] = list(
             dns_profile.get("resolvers") or []
         ) or [None]
@@ -605,7 +597,8 @@ class DomainChecker:
             ),
         )
         return DNSQueryCoordinatorRegistry.get_or_create(
-            registry_key=f"stage={stage}|{registry_key}",
+            coordinator_cls=coordinator_cls,
+            registry_key=registry_key,
             endpoints=endpoints,
             resolver_key=resolver_key,
             config=query_config,
@@ -639,7 +632,6 @@ class DomainChecker:
                 name,
                 record_type,
                 attempts=retry_attempts,
-                stage=stage,
             )
         except DNSQueryExhaustedError as exc:
             raise RetryableDNSLookupError(

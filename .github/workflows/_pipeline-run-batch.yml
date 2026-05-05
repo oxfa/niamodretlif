@@ -297,7 +297,6 @@ jobs:
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --log-level "${{ inputs.worker_log_level }}" \
-            --effective-parallel-workers "${{ needs.prepare_run.outputs.max_parallel_workers }}" \
             --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
             | tee worker.json
           echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"

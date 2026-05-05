@@ -50,51 +50,41 @@ defaults:
     # Base wait, in seconds, for exponential DNS retry backoff after retryable
     # timeout/SERVFAIL outcomes. Runtime caps each retry wait at 2 seconds.
     retry_backoff_base_seconds: 1.0
-    # DNS safety limits. aggregate_qps_target is a project cap for one provider
-    # across the effective parallel workers; runtime divides it into the
-    # effective worker-local qps_per_worker. The values below are conservative
-    # project defaults, not provider-published guarantees.
+    # DNS safety limits. qps_per_worker is a worker-local project cap for one
+    # provider bucket, not a provider-published guarantee.
     query_rate_limit:
       enabled: true
       providers:
         system_resolver:
           qps_per_worker: 60.0
-          aggregate_qps_target: 60.0
           burst: 10
           max_pending: 32
         google_public_dns:
           qps_per_worker: 30.0
-          aggregate_qps_target: 30.0
           burst: 5
           max_pending: 16
         quad9_ecs_public_dns:
           qps_per_worker: 30.0
-          aggregate_qps_target: 30.0
           burst: 5
           max_pending: 16
         cloudflare_public_dns:
           qps_per_worker: 12.0
-          aggregate_qps_target: 12.0
           burst: 2
           max_pending: 8
         opendns_public_dns:
           qps_per_worker: 12.0
-          aggregate_qps_target: 12.0
           burst: 2
           max_pending: 8
         controld_unfiltered_public_dns:
           qps_per_worker: 12.0
-          aggregate_qps_target: 12.0
           burst: 2
           max_pending: 8
         dns_sb_public_dns:
           qps_per_worker: 12.0
-          aggregate_qps_target: 12.0
           burst: 2
           max_pending: 8
         unrecognized_resolver:
           qps_per_worker: 12.0
-          aggregate_qps_target: 12.0
           burst: 2
           max_pending: 8
     # Mandatory NS lookup for the parsed registrable domain. Delegation does

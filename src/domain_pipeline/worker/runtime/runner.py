@@ -30,7 +30,6 @@ def run_prepared_pipeline(
     runtime_identity: dict[str, str],
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
-    effective_parallel_workers: int = 1,
 ) -> int:
     """Run one workflow-owned runtime payload from a prepared pipeline-run manifest."""
     try:
@@ -40,7 +39,6 @@ def run_prepared_pipeline(
                 runtime_identity=runtime_identity,
                 max_runtime_seconds=max_runtime_seconds,
                 prepared_metadata=prepared_metadata,
-                effective_parallel_workers=effective_parallel_workers,
             )
         )
     except ValueError as exc:
@@ -70,7 +68,6 @@ class WorkerBatchRunner:
         source_root: Path,
         state_root: Path,
         max_runtime_seconds: float | None = None,
-        effective_parallel_workers: int = 1,
     ) -> dict[str, Any]:
         """Process one worker from its prepare-owned runtime manifest."""
         prepare_manifest = load_prepare_worker_manifest_for_worker(
@@ -119,7 +116,6 @@ class WorkerBatchRunner:
                         mode="json"
                     ),
                     max_runtime_seconds=max_runtime_seconds,
-                    effective_parallel_workers=effective_parallel_workers,
                     prepared_metadata=prepare_manifest.prepared_metadata.to_runtime_payload(),
                 )
             if exit_code != 0:
@@ -202,7 +198,6 @@ def run_worker(
     source_root: Path,
     state_root: Path,
     max_runtime_seconds: float | None = None,
-    effective_parallel_workers: int = 1,
 ) -> dict[str, Any]:
     """Run one prepared worker from the workflow command layer."""
     return WorkerBatchRunner().run(
@@ -211,5 +206,4 @@ def run_worker(
         source_root=source_root,
         state_root=state_root,
         max_runtime_seconds=max_runtime_seconds,
-        effective_parallel_workers=effective_parallel_workers,
     )

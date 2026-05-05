@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import threading
 import time
@@ -36,12 +37,11 @@ DNS_SB_PUBLIC_NAMESERVERS = frozenset({"185.222.222.222", "45.11.45.11"})
 
 @dataclasses.dataclass(frozen=True)
 class DNSProviderRateLimit:
-    """Provider-specific effective DNS query limits."""
+    """Provider-specific worker-local DNS query limits."""
 
     qps_per_worker: float
     burst: int
     max_pending: int
-    aggregate_qps_target: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,8 +96,9 @@ class DNSQueryExhaustedError(Exception):
 class DNSQuerySelectionState:
     """Mutable selection state shared across queries in one coordinator."""
 
-    weighted_endpoint_indices: list[int]
-    positions: dict[tuple[str, str], int]
+    endpoint_weights: tuple[int, ...]
+    total_weight: int
+    current_weights: list[int]
     position_lock: threading.Lock
     query_counter: int
     query_counter_lock: threading.Lock
@@ -105,7 +106,7 @@ class DNSQuerySelectionState:
 
 
 class TokenBucketRateLimiter:
-    """Thread-safe blocking token bucket for one DNS provider."""
+    """Thread-safe token bucket for one DNS provider."""
 
     def __init__(self, *, qps: float, burst: int) -> None:
         self.qps = max(float(qps), 0.001)
@@ -114,20 +115,37 @@ class TokenBucketRateLimiter:
         self._updated_at = time.monotonic()
         self._lock = threading.Lock()
 
+    def _refill_locked(self, now: float) -> None:
+        """Refill tokens using a caller-held lock."""
+        elapsed = max(now - self._updated_at, 0.0)
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.qps)
+        self._updated_at = now
+
+    def try_acquire(self) -> bool:
+        """Reserve one token if immediately available."""
+        with self._lock:
+            self._refill_locked(time.monotonic())
+            if self._tokens < 1.0:
+                return False
+            self._tokens -= 1.0
+            return True
+
+    def seconds_until_available(self) -> float:
+        """Return the current wait until a token should be available."""
+        with self._lock:
+            self._refill_locked(time.monotonic())
+            if self._tokens >= 1.0:
+                return 0.0
+            return (1.0 - self._tokens) / self.qps
+
     def acquire(self) -> float:
         """Block until one query token is available and return wait seconds."""
         total_wait_seconds = 0.0
         while True:
-            with self._lock:
-                now = time.monotonic()
-                elapsed = max(now - self._updated_at, 0.0)
-                self._tokens = min(self.capacity, self._tokens + elapsed * self.qps)
-                self._updated_at = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return total_wait_seconds
-                wait_seconds = (1.0 - self._tokens) / self.qps
-                total_wait_seconds += wait_seconds
+            if self.try_acquire():
+                return total_wait_seconds
+            wait_seconds = self.seconds_until_available()
+            total_wait_seconds += wait_seconds
             time.sleep(wait_seconds)
 
 
@@ -145,14 +163,13 @@ class PendingQueryLimiter:
             yield max(time.monotonic() - started_at, 0.0)
 
 
-class DNSQueryCoordinator:
-    """Resolve DNS queries through a shared balanced and rate-limited endpoint pool."""
+class DNSQueryCoordinatorBase:
+    """Resolve one DNS stage through a balanced worker-local endpoint pool."""
 
+    stage = ""
     _limiter_lock = threading.Lock()
-    _shared_limiters: dict[
-        str,
-        tuple[dict[str, TokenBucketRateLimiter], dict[str, PendingQueryLimiter]],
-    ] = {}
+    _token_limiters: dict[tuple[str, float, int, int], TokenBucketRateLimiter] = {}
+    _pending_limiters: dict[tuple[str, float, int, int], PendingQueryLimiter] = {}
 
     def __init__(
         self,
@@ -161,25 +178,28 @@ class DNSQueryCoordinator:
         resolver_key: str,
         config: DNSQueryCoordinatorConfig,
         retry_backoff_base_seconds: float = 1.0,
-        limiter_key: str | None = None,
     ) -> None:
         if not endpoints:
             raise ValueError("DNS query coordinator requires at least one endpoint")
+        if not self.stage:
+            raise ValueError("DNS query coordinator subclass must define a stage")
         self.endpoints = list(endpoints)
         self._resolver_key = resolver_key
         self._config = config
         self._retry_backoff_base_seconds = max(float(retry_backoff_base_seconds), 0.001)
+        endpoint_weights = self._endpoint_weights()
         self._selection = DNSQuerySelectionState(
-            weighted_endpoint_indices=self._build_weighted_endpoint_indices(),
-            positions={},
+            endpoint_weights=endpoint_weights,
+            total_weight=sum(endpoint_weights),
+            current_weights=[0] * len(self.endpoints),
             position_lock=threading.Lock(),
             query_counter=0,
             query_counter_lock=threading.Lock(),
             provider_count=len({endpoint.provider for endpoint in self.endpoints}),
         )
-        self._rate_limiters, self._pending_limiters = self._build_limiters(
+        self._rate_limiters, self._provider_pending_limiters = self._build_limiters(
             config=config,
-            limiter_key=limiter_key,
+            endpoints=self.endpoints,
         )
 
     @classmethod
@@ -187,33 +207,61 @@ class DNSQueryCoordinator:
         cls,
         *,
         config: DNSQueryCoordinatorConfig,
-        limiter_key: str | None,
+        endpoints: list[DNSEndpoint] | None = None,
     ) -> tuple[dict[str, TokenBucketRateLimiter], dict[str, PendingQueryLimiter]]:
-        """Return fresh or shared provider limiter state."""
-        rate_limiters = {
-            provider: TokenBucketRateLimiter(
-                qps=limit.qps_per_worker,
-                burst=limit.burst,
-            )
-            for provider, limit in config.provider_limits.items()
-        }
-        pending_limiters = {
-            provider: PendingQueryLimiter(limit.max_pending)
-            for provider, limit in config.provider_limits.items()
-        }
-        if limiter_key is None:
-            return rate_limiters, pending_limiters
+        """Return class-owned worker-local provider limiter state."""
+        if not config.rate_limit_enabled:
+            return {}, {}
+        endpoint_providers = (
+            {endpoint.provider for endpoint in endpoints}
+            if endpoints is not None
+            else set()
+        )
+        rate_limiters: dict[str, TokenBucketRateLimiter] = {}
+        pending_limiters: dict[str, PendingQueryLimiter] = {}
         with cls._limiter_lock:
-            return cls._shared_limiters.setdefault(
-                limiter_key,
-                (rate_limiters, pending_limiters),
-            )
+            for provider in sorted(endpoint_providers):
+                limit = config.provider_limits.get(provider)
+                if limit is None:
+                    continue
+                provider_policy_key = cls._provider_policy_key(provider, limit)
+                if provider_policy_key not in cls._token_limiters:
+                    cls._token_limiters[provider_policy_key] = TokenBucketRateLimiter(
+                        qps=limit.qps_per_worker,
+                        burst=limit.burst,
+                    )
+                if provider_policy_key not in cls._pending_limiters:
+                    cls._pending_limiters[provider_policy_key] = PendingQueryLimiter(
+                        limit.max_pending
+                    )
+                rate_limiters[provider] = cls._token_limiters[provider_policy_key]
+                pending_limiters[provider] = cls._pending_limiters[provider_policy_key]
+        return rate_limiters, pending_limiters
+
+    @staticmethod
+    def _provider_policy_key(
+        provider: str, limit: DNSProviderRateLimit
+    ) -> tuple[str, float, int, int]:
+        """Return the worker-local static limiter key for one provider policy."""
+        return (
+            provider,
+            float(limit.qps_per_worker),
+            int(limit.burst),
+            int(limit.max_pending),
+        )
 
     @classmethod
     def clear_shared_limiters(cls) -> None:
-        """Clear shared limiter state for tests."""
+        """Clear worker-local static limiter state for tests."""
         with cls._limiter_lock:
-            cls._shared_limiters.clear()
+            cls._token_limiters.clear()
+            cls._pending_limiters.clear()
+
+    @classmethod
+    def shared_limiter_counts(cls) -> tuple[int, int]:
+        """Return static limiter counts for deterministic tests."""
+        with cls._limiter_lock:
+            return len(cls._token_limiters), len(cls._pending_limiters)
 
     def resolver_key(self) -> str:
         """Return the pool-level resolver cache key."""
@@ -224,12 +272,9 @@ class DNSQueryCoordinator:
         """Return the first endpoint resolver in this coordinator."""
         return self.endpoints[0].resolver
 
-    def _build_weighted_endpoint_indices(self) -> list[int]:
-        """Return endpoint indexes repeated by their configured first-attempt weight."""
-        indices: list[int] = []
-        for index, endpoint in enumerate(self.endpoints):
-            indices.extend([index] * max(1, int(endpoint.weight)))
-        return indices
+    def _endpoint_weights(self) -> tuple[int, ...]:
+        """Return normalized positive first-attempt weights for all endpoints."""
+        return tuple(max(1, int(endpoint.weight)) for endpoint in self.endpoints)
 
     def _next_query_id(self) -> str:
         """Return a process-local identifier for one coordinator-owned query."""
@@ -237,36 +282,109 @@ class DNSQueryCoordinator:
             self._selection.query_counter += 1
             return f"dnsq-{self._selection.query_counter}"
 
-    def _select_first_endpoint_index(self, *, stage: str, record_type: str) -> int:
-        """Return the weighted first endpoint index for one query."""
-        if not self._selection.weighted_endpoint_indices:
+    def _select_first_endpoint_index(self) -> int:
+        """Return the smooth weighted first endpoint index for one query."""
+        if not self._selection.endpoint_weights:
             raise RuntimeError("DNS query coordinator requires at least one endpoint")
-        if len(self._selection.weighted_endpoint_indices) == 1:
-            return self._selection.weighted_endpoint_indices[0]
-        key = (stage, record_type)
+        if len(self._selection.endpoint_weights) == 1:
+            return 0
         with self._selection.position_lock:
-            position = self._selection.positions.get(key, 0)
-            endpoint_index = self._selection.weighted_endpoint_indices[
-                position % len(self._selection.weighted_endpoint_indices)
-            ]
-            self._selection.positions[key] = position + 1
+            current_weights = self._selection.current_weights
+            for index, weight in enumerate(self._selection.endpoint_weights):
+                current_weights[index] += weight
+            endpoint_index = max(
+                range(len(current_weights)),
+                key=lambda index: current_weights[index],
+            )
+            current_weights[endpoint_index] -= self._selection.total_weight
             return endpoint_index
 
-    def _endpoint_indices_after(self, previous_index: int) -> Iterator[int]:
+    def _endpoint_indices_after(
+        self, previous_index: int, *, include_previous: bool = False
+    ) -> Iterator[int]:
         """Yield endpoint indexes after a previous endpoint, wrapping once."""
         endpoint_count = len(self.endpoints)
-        for offset in range(1, endpoint_count + 1):
+        offsets = (
+            range(0, endpoint_count)
+            if include_previous
+            else range(1, endpoint_count + 1)
+        )
+        for offset in offsets:
             yield (previous_index + offset) % endpoint_count
 
-    def _select_retry_endpoint_index(
+    def _candidate_indices(
+        self, *, preferred_index: int, failed_providers: set[str]
+    ) -> list[int]:
+        """Return rate-limit candidates in preferred-then-wraparound order."""
+        candidate_indices = list(
+            self._endpoint_indices_after(preferred_index, include_previous=True)
+        )
+        if self._selection.provider_count > len(failed_providers):
+            filtered_indices = [
+                endpoint_index
+                for endpoint_index in candidate_indices
+                if self.endpoints[endpoint_index].provider not in failed_providers
+            ]
+            if filtered_indices:
+                return filtered_indices
+        return candidate_indices
+
+    def _select_retry_preferred_index(
         self, *, previous_index: int, failed_providers: set[str]
     ) -> int:
-        """Return a retry endpoint, avoiding already-failed providers when possible."""
+        """Return a retry preference, avoiding failed providers when possible."""
         if self._selection.provider_count > len(failed_providers):
             for endpoint_index in self._endpoint_indices_after(previous_index):
                 if self.endpoints[endpoint_index].provider not in failed_providers:
                     return endpoint_index
         return next(self._endpoint_indices_after(previous_index))
+
+    def _select_rate_available_endpoint_index(
+        self,
+        *,
+        preferred_index: int,
+        failed_providers: set[str],
+        record_type: str,
+        name: str,
+    ) -> int:
+        """Return an endpoint whose provider has an available query token."""
+        while True:
+            candidate_indices = self._candidate_indices(
+                preferred_index=preferred_index,
+                failed_providers=failed_providers,
+            )
+            wait_candidates: list[tuple[float, int, TokenBucketRateLimiter]] = []
+            for endpoint_index in candidate_indices:
+                endpoint = self.endpoints[endpoint_index]
+                rate_limiter = self._rate_limiters.get(endpoint.provider)
+                if rate_limiter is None or rate_limiter.try_acquire():
+                    return endpoint_index
+                wait_candidates.append(
+                    (
+                        rate_limiter.seconds_until_available(),
+                        endpoint_index,
+                        rate_limiter,
+                    )
+                )
+            if not wait_candidates:
+                return candidate_indices[0]
+            wait_seconds, waited_index, rate_limiter = min(
+                wait_candidates, key=lambda item: item[0]
+            )
+            waited_endpoint = self.endpoints[waited_index]
+            time.sleep(wait_seconds)
+            logger.debug(
+                "DNS rate limiter waited provider=%s wait_seconds=%.6f "
+                "qps=%.3f burst=%d stage=%s record_type=%s name=%s nameserver=%s",
+                waited_endpoint.provider,
+                wait_seconds,
+                rate_limiter.qps,
+                rate_limiter.capacity,
+                self.stage,
+                record_type,
+                name,
+                waited_endpoint.address or SYSTEM_NAMESERVER,
+            )
 
     def _sleep_before_retry(self, attempt_index: int) -> None:
         """Apply bounded retry backoff after the first failed attempt."""
@@ -275,30 +393,35 @@ class DNSQueryCoordinator:
         wait_seconds = self._retry_backoff_base_seconds * (2 ** (attempt_index - 1))
         time.sleep(min(wait_seconds, 2.0))
 
-    def resolve(self, name: str, record_type: str, attempts: int, stage: str) -> Any:
+    def resolve(self, name: str, record_type: str, attempts: int) -> Any:
         """Resolve one query with provider-aware retries and truthful telemetry."""
         query_id = self._next_query_id()
         attempt_budget = max(1, int(attempts))
         last_error: Exception | None = None
         failures: list[DNSQueryAttemptFailure] = []
         failed_providers: set[str] = set()
-        endpoint_index = self._select_first_endpoint_index(
-            stage=stage, record_type=record_type
-        )
+        preferred_index = self._select_first_endpoint_index()
+        endpoint_index = preferred_index
         for attempt_index in range(attempt_budget):
             self._sleep_before_retry(attempt_index)
             if attempt_index > 0:
-                endpoint_index = self._select_retry_endpoint_index(
+                preferred_index = self._select_retry_preferred_index(
                     previous_index=endpoint_index,
                     failed_providers=failed_providers,
                 )
+            endpoint_index = self._select_rate_available_endpoint_index(
+                preferred_index=preferred_index,
+                failed_providers=failed_providers,
+                record_type=record_type,
+                name=name,
+            )
             endpoint = self.endpoints[endpoint_index]
             logger.debug(
                 "DNS query selected endpoint query_id=%s stage=%s record_type=%s "
                 "name=%s attempt=%d attempts=%d provider=%s nameserver=%s "
                 "resolver_key=%s",
                 query_id,
-                stage,
+                self.stage,
                 record_type,
                 name,
                 attempt_index + 1,
@@ -308,7 +431,17 @@ class DNSQueryCoordinator:
                 self._resolver_key,
             )
             try:
-                return self._resolve_once(endpoint, name, record_type)
+                answer = self._resolve_once(endpoint, name, record_type)
+                self._log_success(
+                    endpoint,
+                    name,
+                    record_type,
+                    self.stage,
+                    attempt_index,
+                    query_id,
+                    answer,
+                )
+                return answer
             except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
                 last_error = exc
                 failed_providers.add(endpoint.provider)
@@ -316,7 +449,7 @@ class DNSQueryCoordinator:
                     endpoint,
                     name,
                     record_type,
-                    stage,
+                    self.stage,
                     attempt_index,
                     query_id,
                     exc,
@@ -337,7 +470,7 @@ class DNSQueryCoordinator:
                     endpoint,
                     name,
                     record_type,
-                    stage,
+                    self.stage,
                     attempt_index,
                     query_id,
                     exc,
@@ -356,7 +489,7 @@ class DNSQueryCoordinator:
                 "DNS query retry exhausted query_id=%s stage=%s record_type=%s "
                 "name=%s attempts=%d resolver_key=%s error_type=%s",
                 query_id,
-                stage,
+                self.stage,
                 record_type,
                 name,
                 attempt_budget,
@@ -371,6 +504,35 @@ class DNSQueryCoordinator:
                 failures=failures,
             ) from last_error
         raise dns.exception.Timeout(f"{record_type} lookup for {name} failed")
+
+    def _log_success(
+        self,
+        endpoint: DNSEndpoint,
+        name: str,
+        record_type: str,
+        stage: str,
+        attempt_index: int,
+        query_id: str,
+        answer: Any,
+    ) -> None:
+        """Log one successful DNS query answer."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        answer_values = _answer_values(answer)
+        logger.debug(
+            "DNS query success query_id=%s stage=%s record_type=%s name=%s "
+            "attempt=%d provider=%s nameserver=%s answer_count=%d "
+            "answer_values=%s",
+            query_id,
+            stage,
+            record_type,
+            name,
+            attempt_index + 1,
+            endpoint.provider,
+            endpoint.address or SYSTEM_NAMESERVER,
+            len(answer_values),
+            json.dumps(answer_values, ensure_ascii=True, separators=(",", ":")),
+        )
 
     def _log_retryable_failure(
         self,
@@ -399,22 +561,7 @@ class DNSQueryCoordinator:
     def _resolve_once(self, endpoint: DNSEndpoint, name: str, record_type: str) -> Any:
         provider = endpoint.provider
         if self._config.rate_limit_enabled:
-            rate_limiter = self._rate_limiters.get(provider)
-            if rate_limiter is not None:
-                wait_seconds = rate_limiter.acquire()
-                if wait_seconds > 0:
-                    logger.debug(
-                        "DNS rate limiter waited provider=%s wait_seconds=%.6f "
-                        "qps=%.3f burst=%d record_type=%s name=%s nameserver=%s",
-                        provider,
-                        wait_seconds,
-                        rate_limiter.qps,
-                        rate_limiter.capacity,
-                        record_type,
-                        name,
-                        endpoint.address or SYSTEM_NAMESERVER,
-                    )
-            pending_limiter = self._pending_limiters.get(provider)
+            pending_limiter = self._provider_pending_limiters.get(provider)
             if pending_limiter is not None:
                 with pending_limiter.slot() as wait_seconds:
                     if wait_seconds > 0.001:
@@ -431,33 +578,58 @@ class DNSQueryCoordinator:
         return endpoint.resolver.resolve(name, record_type)
 
 
+class DNSDelegationQueryCoordinator(DNSQueryCoordinatorBase):
+    """Coordinator for the dns.delegation stage."""
+
+    stage = "delegation"
+
+
+class DNSHostResolutionQueryCoordinator(DNSQueryCoordinatorBase):
+    """Coordinator for the dns.host_resolution stage."""
+
+    stage = "host_resolution"
+
+
+def _answer_values(answer: Any) -> list[str]:
+    """Return stable string values for logging a DNS answer."""
+    if isinstance(answer, str):
+        return [answer.rstrip(".").lower()]
+    try:
+        values = [str(value).rstrip(".").lower() for value in answer]
+    except TypeError:
+        return [str(answer).rstrip(".").lower()]
+    return sorted(set(values))
+
+
 class DNSQueryCoordinatorRegistry:
     """Process-local registry for sharing DNS query coordinators."""
 
     _lock = threading.Lock()
-    _coordinators: dict[str, DNSQueryCoordinator] = {}
+    _coordinators: dict[str, DNSQueryCoordinatorBase] = {}
 
     @classmethod
     def get_or_create(
         cls,
         *,
+        coordinator_cls: type[DNSQueryCoordinatorBase],
         registry_key: str,
         endpoints: list[DNSEndpoint],
         resolver_key: str,
         config: DNSQueryCoordinatorConfig,
         retry_backoff_base_seconds: float = 1.0,
-    ) -> DNSQueryCoordinator:
-        """Return a shared coordinator for one normalized DNS resolver profile."""
+    ) -> DNSQueryCoordinatorBase:
+        """Return a shared coordinator for one normalized stage resolver profile."""
+        stage_key = f"{coordinator_cls.stage}|{registry_key}"
         with cls._lock:
-            coordinator = cls._coordinators.get(registry_key)
+            coordinator = cls._coordinators.get(stage_key)
             if coordinator is None:
-                coordinator = DNSQueryCoordinator(
+                coordinator = coordinator_cls(
                     endpoints=endpoints,
                     resolver_key=resolver_key,
                     config=config,
                     retry_backoff_base_seconds=retry_backoff_base_seconds,
                 )
-                cls._coordinators[registry_key] = coordinator
+                cls._coordinators[stage_key] = coordinator
             return coordinator
 
     @classmethod
@@ -465,7 +637,7 @@ class DNSQueryCoordinatorRegistry:
         """Clear registry state for tests."""
         with cls._lock:
             cls._coordinators.clear()
-        DNSQueryCoordinator.clear_shared_limiters()
+        DNSQueryCoordinatorBase.clear_shared_limiters()
 
 
 def provider_for_nameserver(nameserver: str | None) -> str:
