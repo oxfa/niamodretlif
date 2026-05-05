@@ -80,7 +80,7 @@ class DelegationHistoryRecord:
 
 
 @dataclasses.dataclass(frozen=True)
-class DNSHistoryRecord:
+class HostResolutionHistoryRecord:
     """A cached host-resolution lookup keyed by host and resolver settings."""
 
     host: str
@@ -97,7 +97,7 @@ class DNSHistoryRecord:
     expires_at: datetime
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "DNSHistoryRecord":
+    def from_row(cls, row: sqlite3.Row) -> "HostResolutionHistoryRecord":
         """Build a host-resolution cache record from one SQLite row."""
         return cls(
             host=str(row["host"]),
@@ -117,10 +117,6 @@ class DNSHistoryRecord:
     def is_expired(self, now: datetime) -> bool:
         """Return whether this cache row has expired."""
         return self.expires_at <= now
-
-
-HostResolutionHistoryRecord = DNSHistoryRecord
-"""Explicit name for rows stored in the physical dns_history table."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -272,9 +268,9 @@ class CacheRepository:
         )
         self._connection.commit()
 
-    def get_dns(
+    def get_host_resolution(
         self, host: str, resolver_key: str, now: datetime
-    ) -> DNSHistoryRecord | None:
+    ) -> HostResolutionHistoryRecord | None:
         """Return a fresh host-resolution cache record when present."""
         row = self._connection.execute(
             f"SELECT * FROM {DNS_TABLE} WHERE host = ? AND resolver_key = ?",
@@ -282,10 +278,10 @@ class CacheRepository:
         ).fetchone()
         if row is None:
             return None
-        record = DNSHistoryRecord.from_row(row)
+        record = HostResolutionHistoryRecord.from_row(row)
         return None if record.is_expired(now) else record
 
-    def put_dns(
+    def put_host_resolution(
         self,
         *,
         host: str,

@@ -164,7 +164,12 @@ class PendingQueryLimiter:
 
 
 class DNSQueryCoordinatorBase:
-    """Resolve one DNS stage through a balanced worker-local endpoint pool."""
+    """Resolve one DNS stage through a balanced worker-local endpoint pool.
+
+    The limiter is intentionally process-local. Observed GitHub matrix runs
+    rarely share IPv4 egress, so the scheduler assumes distinct worker IPs and
+    avoids cross-worker DNS budget coordination by design.
+    """
 
     stage = ""
     _limiter_lock = threading.Lock()

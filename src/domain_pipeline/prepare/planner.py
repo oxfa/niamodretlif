@@ -231,11 +231,13 @@ class PreparationPlanner:
                     line_index=record.line_index,
                     raw_line=record.raw_line,
                     entry=record.entry,
-                    manual_filter_pass=host in manual_inputs.pass_entries,
+                    manual_filter_pass=(
+                        host in manual_inputs.manual_filter_pass_entries
+                    ),
                     source_ids=(job.source_id,),
                     source_input_labels=(job.input_label,),
                 )
-                if host in manual_inputs.out_entries:
+                if host in manual_inputs.manual_filter_out_entries:
                     self.entry_merger.merge_entry_by_host(
                         manual_out_by_host, prepared_entry
                     )
@@ -251,7 +253,7 @@ class PreparationPlanner:
         host_fingerprints: dict[str, str],
         manual_add_fingerprints_by_host: dict[str, str],
     ) -> None:
-        if host in manual_inputs.add_entries:
+        if host in manual_inputs.manual_add_entries:
             fingerprint = self._manual_add_behavior_fingerprint(job.config)
             previous = manual_add_fingerprints_by_host.get(host)
             if previous is not None and previous != fingerprint:
@@ -285,13 +287,14 @@ class PreparationPlanner:
                 (PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,), prepared_entry.source_ids
             )
             source_input_labels = self.entry_merger.stable_unique_merge(
-                (str(manual_inputs.out_path),), prepared_entry.source_input_labels
+                (str(manual_inputs.manual_filter_out_path),),
+                prepared_entry.source_input_labels,
             )
             row = _manual_review_row(
                 job=source_jobs_by_id[prepared_entry.source_id],
                 entry=prepared_entry.entry,
                 pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
-                input_label=str(manual_inputs.out_path),
+                input_label=str(manual_inputs.manual_filter_out_path),
                 source_ids=source_ids,
                 source_input_labels=source_input_labels,
             )
@@ -315,7 +318,7 @@ class PreparationPlanner:
         manual_add_config_fingerprints = {
             self._manual_add_behavior_fingerprint(job.config) for job in jobs
         }
-        for host, entry in sorted(manual_inputs.add_entries.items()):
+        for host, entry in sorted(manual_inputs.manual_add_entries.items()):
             incoming = PreparedHostEntry(
                 source_id=primary_job.source_id,
                 source_index=0,
@@ -324,15 +327,15 @@ class PreparationPlanner:
                 entry=entry,
                 manual_add=True,
                 source_id_override=MANUAL_ADD_SOURCE_ID,
-                source_input_label_override=str(manual_inputs.add_path),
+                source_input_label_override=str(manual_inputs.manual_add_path),
                 source_ids=(MANUAL_ADD_SOURCE_ID,),
-                source_input_labels=(str(manual_inputs.add_path),),
+                source_input_labels=(str(manual_inputs.manual_add_path),),
             )
             current = entries_by_host.get(host)
             if current is None:
                 if len(manual_add_config_fingerprints) > 1:
                     raise ValueError(
-                        f"manual-add file {manual_inputs.add_path} contains "
+                        f"manual-add file {manual_inputs.manual_add_path} contains "
                         f"unmatched host {host!r}; unmatched manual_add requires "
                         "all enabled sources to share delegation/output behavior"
                     )
@@ -342,12 +345,13 @@ class PreparationPlanner:
                     current,
                     manual_add=True,
                     source_id_override=MANUAL_ADD_SOURCE_ID,
-                    source_input_label_override=str(manual_inputs.add_path),
+                    source_input_label_override=str(manual_inputs.manual_add_path),
                     source_ids=self.entry_merger.stable_unique_merge(
                         current.source_ids, (MANUAL_ADD_SOURCE_ID,)
                     ),
                     source_input_labels=self.entry_merger.stable_unique_merge(
-                        current.source_input_labels, (str(manual_inputs.add_path),)
+                        current.source_input_labels,
+                        (str(manual_inputs.manual_add_path),),
                     ),
                 )
             matched_hosts.add(host)
@@ -397,14 +401,14 @@ class PreparationPlanner:
         preparation_review_rows: list[dict[str, Any]],
         preparation_terminal_rows: list[dict[str, Any]],
     ) -> None:
-        for host, entry in sorted(manual_inputs.pass_entries.items()):
+        for host, entry in sorted(manual_inputs.manual_filter_pass_entries.items()):
             if host in matched_hosts:
                 continue
             row = _manual_review_row(
                 job=primary_job,
                 entry=entry,
                 pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
-                input_label=str(manual_inputs.pass_path),
+                input_label=str(manual_inputs.manual_filter_pass_path),
             )
             preparation_review_rows.append(row)
             preparation_terminal_rows.append(
@@ -423,14 +427,14 @@ class PreparationPlanner:
         preparation_review_rows: list[dict[str, Any]],
         preparation_terminal_rows: list[dict[str, Any]],
     ) -> None:
-        for host, entry in sorted(manual_inputs.out_entries.items()):
+        for host, entry in sorted(manual_inputs.manual_filter_out_entries.items()):
             if host in manual_out_by_host:
                 continue
             row = _manual_review_row(
                 job=primary_job,
                 entry=entry,
                 pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-                input_label=str(manual_inputs.out_path),
+                input_label=str(manual_inputs.manual_filter_out_path),
             )
             preparation_review_rows.append(row)
             preparation_terminal_rows.append(

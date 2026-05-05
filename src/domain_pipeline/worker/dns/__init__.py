@@ -15,7 +15,7 @@ from domain_pipeline.worker.dns.lookup import (
     effective_host_resolution_resolvers,
     host_resolution_dns_profile,
 )
-from domain_pipeline.worker.dns.classification import (
+from domain_pipeline.worker.dns.result_policy import (
     classify_delegation,
     classify_host_resolution,
     host_resolution_skipped_result_code,

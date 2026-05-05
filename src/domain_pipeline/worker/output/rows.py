@@ -11,17 +11,17 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
-from domain_pipeline.worker.dns.classifications import (
+from domain_pipeline.worker.dns.result_codes import (
     PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
     PIPELINE_RESULT_CODE_DNS_HOST_NODATA,
     PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN,
-    PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL,
-    PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT,
-    PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT,
     HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES,
 )
-from domain_pipeline.worker.geo.classifications import (
+from domain_pipeline.worker.geo.result_codes import (
     PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
     PIPELINE_RESULT_CODE_GEO_POLICY_REJECTED,
     PIPELINE_RESULT_CODE_GEO_REGION_NAME_UNAVAILABLE,
@@ -154,9 +154,13 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         ),
         PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN: "host resolution returned NXDOMAIN",
         PIPELINE_RESULT_CODE_DNS_HOST_NODATA: "host resolution returned NODATA",
-        PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT: "host resolution timed out after retries",
-        PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL: "host resolution returned SERVFAIL after retries",
-        PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES: (
+        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT: (
+            "host resolution timed out after retries"
+        ),
+        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL: (
+            "host resolution returned SERVFAIL after retries"
+        ),
+        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES: (
             "host resolution produced no usable IP addresses"
         ),
         PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED: "geo lookup did not produce usable data",
@@ -224,11 +228,6 @@ def build_base_row(
         ),
         "host_resolution_reason": (
             host_resolution_result.reason
-            if host_resolution_result is not None
-            else "skipped"
-        ),
-        "dns_status": (
-            host_resolution_result.status
             if host_resolution_result is not None
             else "skipped"
         ),

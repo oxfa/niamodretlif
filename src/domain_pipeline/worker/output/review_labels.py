@@ -6,7 +6,7 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
-from domain_pipeline.worker.dns.classifications import (
+from domain_pipeline.worker.dns.result_codes import (
     PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
 )

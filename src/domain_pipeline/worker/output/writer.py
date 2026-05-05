@@ -1,4 +1,4 @@
-"""Terminal result collector and final deterministic writer."""
+"""Terminal result collector and deterministic worker-local sidecar writer."""
 
 from __future__ import annotations
 
@@ -227,7 +227,7 @@ class ResultOutputWriter:
             review_path.unlink()
 
     def write(self) -> WriterResult:
-        """Write collected results to their final output files."""
+        """Write collected results to their worker-local output sidecar files."""
         for (
             filtered_path,
             unactionable_path,

@@ -43,10 +43,6 @@ class HostResolutionCacheWriteRequest:
     ttl_days: int
 
 
-DNSCacheWriteRequest = HostResolutionCacheWriteRequest
-"""Alias for host-resolution cache writes stored in dns_history."""
-
-
 @dataclass(frozen=True)
 class GeoCacheWriteRequest:
     """Write request for the geo cache table."""

@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.worker.geo.classifications import (
+from domain_pipeline.worker.geo.result_codes import (
     PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
 )
 from domain_pipeline.worker.cache.requests import (
@@ -233,7 +233,7 @@ class PipelineExecutor:
         checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
-        cached, source = await self.cache_reader.get_fresh_dns_with_source(
+        cached, source = await self.cache_reader.get_fresh_host_resolution_with_source(
             entry.host, resolver_key, now
         )
         if cached is not None:

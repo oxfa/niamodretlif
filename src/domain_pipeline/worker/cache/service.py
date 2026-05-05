@@ -67,12 +67,12 @@ class AsyncCacheService:
             self._get_fresh_delegation_sync_with_source, domain, resolver_key, now
         )
 
-    async def get_fresh_dns_with_source(
+    async def get_fresh_host_resolution_with_source(
         self, host: str, resolver_key: str, now: Any
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         """Return a fresh host-resolution record and cache-hit source."""
         return await asyncio.to_thread(
-            self._get_fresh_dns_sync_with_source, host, resolver_key, now
+            self._get_fresh_host_resolution_sync_with_source, host, resolver_key, now
         )
 
     async def get_fresh_geo_with_source(
@@ -127,7 +127,7 @@ class AsyncCacheService:
             now=now,
         )
 
-    def _get_fresh_dns_sync_with_source(
+    def _get_fresh_host_resolution_sync_with_source(
         self, host: str, resolver_key: str, now: Any
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
@@ -195,7 +195,7 @@ def _write_delegation(
 def _write_host_resolution(
     cache: CacheRepository, request: HostResolutionCacheWriteRequest
 ) -> None:
-    cache.put_dns(**request.__dict__)
+    cache.put_host_resolution(**request.__dict__)
 
 
 def _write_geo(cache: CacheRepository, request: GeoCacheWriteRequest) -> None:

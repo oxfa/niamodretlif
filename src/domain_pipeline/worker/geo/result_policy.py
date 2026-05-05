@@ -1,16 +1,16 @@
-"""Geo result-code helpers owned by the worker geo stage."""
+"""Geo result-code policy helpers owned by the worker geo stage."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from domain_pipeline.worker.geo.classifications import (
+from domain_pipeline.worker.geo.providers import GeoPolicyDecision, IPGeoResult
+from domain_pipeline.worker.geo.result_codes import (
     PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
     PIPELINE_RESULT_CODE_GEO_POLICY_ACCEPTED,
     PIPELINE_RESULT_CODE_GEO_POLICY_REJECTED,
     PIPELINE_RESULT_CODE_GEO_REGION_NAME_UNAVAILABLE,
 )
-from domain_pipeline.worker.geo.providers import GeoPolicyDecision, IPGeoResult
 
 
 def geo_policy_result_code(
