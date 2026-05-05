@@ -18,8 +18,9 @@ permissions:
 # - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
-# manual_filter_pass and manual_add still require delegation before filtered
-# output; manual_filter_out bypasses DNS/geo and writes review rows.
+# manual_filter_pass and manual_add still require delegation before routing to
+# filtered; manual_filter_out bypasses delegation, host resolution, and geo and
+# routes to review.
 jobs:
   batch:
     uses: ./.github/workflows/_pipeline-run-batch.yml

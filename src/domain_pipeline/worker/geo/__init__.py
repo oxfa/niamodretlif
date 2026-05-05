@@ -20,7 +20,6 @@ from domain_pipeline.worker.geo.providers import (
     build_geo_provider,
     evaluate_geo_policy,
 )
-from domain_pipeline.worker.geo.classification import geo_policy_result_code
 from domain_pipeline.worker.geo.constants import (
     GEO_PROVIDER_GEOJS,
     GEO_PROVIDER_IP2LOCATION_IO,
@@ -29,6 +28,7 @@ from domain_pipeline.worker.geo.constants import (
     GEO_PROVIDER_IP_API,
 )
 from domain_pipeline.worker.geo.policy import GeoConfigPolicy
+from domain_pipeline.worker.geo.result_policy import geo_policy_result_code
 
 __all__ = [
     "GEO_PROVIDER_GEOJS",

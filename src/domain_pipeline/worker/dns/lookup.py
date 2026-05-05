@@ -43,7 +43,9 @@ VERIFIED_ECS_NAMESERVERS = frozenset(
 )
 CNAME_CHAIN_LIMIT = 8
 # Project safety caps, not provider-published guarantees. qps_per_worker is a
-# worker-local cap for one provider bucket.
+# worker-local cap for one provider bucket. Observed GitHub matrix runs rarely
+# share IPv4 egress, so the intentional design is to assume distinct worker IPs
+# and avoid cross-worker DNS budget coordination.
 DEFAULT_DNS_PROVIDER_LIMITS = {
     PROVIDER_SYSTEM_RESOLVER: DNSProviderRateLimit(
         qps_per_worker=60.0, burst=10, max_pending=32

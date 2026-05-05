@@ -5,11 +5,11 @@ version: 2
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
 # manual_filter_pass and manual_add entries still require DNS delegation. When
-# delegation is actionable they bypass host-resolution and geo checks and emit
-# filtered output. manual_add takes precedence over matching source entries for
-# the same host. manual_filter_out skips DNS/geo and emits one review row per
-# host. Public-suffix inputs are prepare-owned review/audit rows because they
-# have no registrable domain for delegation.
+# delegation is actionable they bypass host-resolution and geo checks and route
+# to filtered. manual_add takes precedence over matching source entries for
+# the same host. manual_filter_out skips delegation, host resolution, and geo
+# and routes to review. Public-suffix inputs are prepare-owned
+# review/audit rows because they have no registrable domain for delegation.
 
 defaults:
   fetch:

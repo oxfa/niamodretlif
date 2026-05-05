@@ -1,10 +1,10 @@
-"""DNS result-code helpers owned by the worker DNS stage."""
+"""DNS result-code policy helpers owned by the worker DNS stage."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from domain_pipeline.worker.dns.classifications import (
+from domain_pipeline.worker.dns.result_codes import (
     PIPELINE_RESULT_CODE_DNS_DELEGATION_EXISTS,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_NODATA,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_NO_NAMESERVERS,
@@ -13,11 +13,11 @@ from domain_pipeline.worker.dns.classifications import (
     PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
     PIPELINE_RESULT_CODE_DNS_HOST_NODATA,
     PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN,
-    PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL,
-    PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT,
-    PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES,
-    PIPELINE_RESULT_CODE_DNS_RESOLVES,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVES,
     PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SKIPPED,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL,
+    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT,
 )
 
 
@@ -39,16 +39,16 @@ def classify_delegation(result: Any) -> str:
 def classify_host_resolution(result: Any) -> str:
     """Return the pipeline result code for one host-resolution result."""
     if result.status == "resolved":
-        return PIPELINE_RESULT_CODE_DNS_RESOLVES
+        return PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVES
     if result.status == "nxdomain":
         return PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN
     if result.status == "nodata":
         return PIPELINE_RESULT_CODE_DNS_HOST_NODATA
     if result.status == "timeout":
-        return PIPELINE_RESULT_CODE_DNS_LOOKUP_TIMEOUT
+        return PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT
     if result.status == "servfail":
-        return PIPELINE_RESULT_CODE_DNS_LOOKUP_SERVFAIL
-    return PIPELINE_RESULT_CODE_DNS_RESOLVED_WITHOUT_IP_ADDRESSES
+        return PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL
+    return PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES
 
 
 def host_resolution_skipped_result_code() -> str:

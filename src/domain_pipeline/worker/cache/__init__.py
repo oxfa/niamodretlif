@@ -6,7 +6,6 @@ from domain_pipeline.worker.cache.repository import (
     DNS_TABLE,
     GEO_TABLE,
     DelegationHistoryRecord,
-    DNSHistoryRecord,
     GeoHistoryRecord,
     HostResolutionHistoryRecord,
     PipelineCache,
@@ -23,7 +22,6 @@ from domain_pipeline.worker.cache.service import (
     build_host_resolution_cache_writer,
 )
 from domain_pipeline.worker.cache.requests import (
-    DNSCacheWriteRequest,
     DelegationCacheWriteRequest,
     GeoCacheWriteRequest,
     HostResolutionCacheWriteRequest,
@@ -38,8 +36,6 @@ __all__ = [
     "CacheHitSource",
     "CacheRepository",
     "CacheWriteDispatcher",
-    "DNSCacheWriteRequest",
-    "DNSHistoryRecord",
     "DelegationHistoryRecord",
     "DelegationCacheWriteRequest",
     "GeoCacheWriteRequest",

@@ -226,7 +226,6 @@ class WorkerStatusLifecycle:
             "batch_id": batch_id,
             "worker_id": worker_id,
             "conclusion": STATUS_IN_PROGRESS,
-            "error_reason": None,
             "started_at": utc_now(),
         }
 
