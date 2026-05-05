@@ -30098,6 +30098,7 @@ elqtrk.intel.la
 elqtrk.intel.pl
 elqtrk.intel.ru
 elqtrk.intel.sg
+elqtrk.intelrealsense.com
 elqtrk.morningstar.be
 elqtrk.morningstar.ch
 elqtrk.morningstar.com
@@ -68266,6 +68267,7 @@ remarkable-teacher.com
 remarkablebottom.com
 remarkableprompt.com
 remarketing.oncourselearning.com
+remarketingpixel.com
 remarketstats.com
 remarriedbore.com
 remaxmetro369.myre.io
