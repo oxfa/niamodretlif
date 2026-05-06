@@ -115,6 +115,7 @@ class ConfigNormalizer:
                     "config_name": config_namespace,
                     "config_path": str(config_path),
                     "defaults": defaults_payload,
+                    "runtime": raw_config.runtime.model_dump(),
                     "cache": cache_payload,
                     "sources": normalized_sources,
                 }

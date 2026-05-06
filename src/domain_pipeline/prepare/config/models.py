@@ -18,6 +18,11 @@ from domain_pipeline.worker.dns.policy import DNSConfigPolicy
 from domain_pipeline.worker.geo.constants import (
     GEO_PROVIDER_IPINFO_LITE,
 )
+from domain_pipeline.worker.runtime.constants import (
+    DNS_DELEGATION_STAGE_WORKERS,
+    DNS_HOST_RESOLUTION_STAGE_WORKERS,
+    GEO_STAGE_WORKERS,
+)
 
 LEGACY_TOP_LEVEL_KEYS = {"rdap", "rdap_global_policy", "whois_fallback"}
 LEGACY_CACHE_TTL_KEYS = {
@@ -483,6 +488,29 @@ class CacheConfig(StrictModel):
     )
 
 
+class RuntimeStageWorkersConfig(StrictModel):
+    """Worker-local async stage worker counts."""
+
+    delegation: int = DNS_DELEGATION_STAGE_WORKERS
+    host_resolution: int = DNS_HOST_RESOLUTION_STAGE_WORKERS
+    geo: int = GEO_STAGE_WORKERS
+
+    @field_validator("delegation", "host_resolution", "geo", mode="after")
+    @classmethod
+    def _validate_stage_workers(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("runtime stage worker counts must be >= 1")
+        return value
+
+
+class RuntimeConfig(StrictModel):
+    """Worker-local runtime sizing settings."""
+
+    stage_workers: RuntimeStageWorkersConfig = Field(
+        default_factory=RuntimeStageWorkersConfig
+    )
+
+
 class DefaultsConfig(StrictModel):
     """Default settings inherited by each source."""
 
@@ -529,6 +557,7 @@ class RawPipelineConfig(StrictModel):
 
     version: Literal[2]
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     sources: list[SourceOverrideConfig] = Field(default_factory=list)
 
@@ -557,6 +586,7 @@ class NormalizedPipelineConfig(StrictModel):
     config_name: str
     config_path: str
     defaults: DefaultsConfig
+    runtime: RuntimeConfig
     cache: CacheConfig
     sources: list[EffectiveSourceConfig]
 

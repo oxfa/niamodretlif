@@ -66,6 +66,7 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
 
     config_identity: ConfigIdentity
     cache: dict[str, Any]
+    runtime: dict[str, Any] = Field(default_factory=dict)
     sources: list[dict[str, Any]]
     output_spec: WorkerOutputSpec
     debug_log_path: str
@@ -83,6 +84,7 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
             "config_path": self.config_identity.config_path,
             "config_file_name": self.config_identity.config_file_name,
             "cache": copy.deepcopy(self.cache),
+            "runtime": copy.deepcopy(self.runtime),
             "sources": copy.deepcopy(self.sources),
         }
         cache_payload = payload["cache"]

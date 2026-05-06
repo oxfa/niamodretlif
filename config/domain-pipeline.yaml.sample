@@ -46,7 +46,7 @@ defaults:
     # for stages that inherit this fallback.
     default_resolvers: []
     # Per-query DNS timeout, in seconds.
-    timeout: 5.0
+    timeout: 15.0
     # Base wait, in seconds, for exponential DNS retry backoff after retryable
     # timeout/SERVFAIL outcomes. Runtime caps each retry wait at 2 seconds.
     retry_backoff_base_seconds: 1.0
@@ -133,7 +133,7 @@ defaults:
         # Scope to advertise in the ECS option. Leave at 0 unless you have a
         # specific resolver-side requirement.
         scope_prefix_length: 0
-      retry_attempts: 2
+      retry_attempts: 3
 
   geo:
     # Enable geo lookups and evaluate the resolved IPs against the policy block
@@ -175,6 +175,15 @@ defaults:
     # - output/review/domain-pipeline.csv
     directory: output
 
+runtime:
+  # Worker-local async concurrency for each processing stage inside one
+  # GitHub matrix worker. GitHub matrix concurrency is controlled separately by
+  # workflow settings.
+  stage_workers:
+    delegation: 16
+    host_resolution: 16
+    geo: 8
+
 cache:
   classification_ttl_days:
     # Cache retention, in days, for delegated registrable domains.
@@ -209,7 +218,7 @@ sources:
       request_timeout: 30.0
     dns:
       default_resolvers: []
-      timeout: 5.0
+      timeout: 15.0
       retry_backoff_base_seconds: 1.0
       query_rate_limit:
         enabled: true
@@ -221,7 +230,7 @@ sources:
           enabled: false
           subnet: ""
           scope_prefix_length: 0
-        retry_attempts: 2
+        retry_attempts: 3
     geo:
       enabled: false
       provider: ipinfo_lite

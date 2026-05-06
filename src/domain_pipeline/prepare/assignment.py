@@ -302,6 +302,7 @@ class WorkerAssignmentPlanner:
                 ),
                 "dns_ttl_days": config["cache"]["dns_ttl_days"],
             },
+            runtime=json.loads(json.dumps(config.get("runtime", {}))),
             sources=source_configs,
             output_spec=WorkerOutputSpec(
                 result_root=relative_path(worker_paths.result_root),

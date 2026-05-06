@@ -23,7 +23,7 @@ defaults:
     # qps_per_worker values are worker-local project safety caps, not
     # provider-published guarantees.
     default_resolvers: []
-    timeout: 5.0
+    timeout: 15.0
     # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
     # capped at 2 seconds between attempts.
     retry_backoff_base_seconds: 1.0
@@ -90,10 +90,16 @@ defaults:
         enabled: true
         subnet: "140.206.64.0/24"
         scope_prefix_length: 0
-      retry_attempts: 2
+      retry_attempts: 3
 
   output:
     directory: output
+
+runtime:
+  stage_workers:
+    delegation: 16
+    host_resolution: 16
+    geo: 8
 
 cache:
   classification_ttl_days:
