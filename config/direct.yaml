@@ -23,7 +23,7 @@ defaults:
     # qps_per_worker values are worker-local project safety caps, not
     # provider-published guarantees.
     default_resolvers: []
-    timeout: 15.0
+    timeout: 25.0
     # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
     # capped at 2 seconds between attempts.
     retry_backoff_base_seconds: 1.0
@@ -99,8 +99,8 @@ runtime:
   # Delegation concurrency is worker-local root-level NS lookup concurrency.
   # Host-resolution and geo concurrency remain host-level.
   stage_workers:
-    delegation: 16
-    host_resolution: 16
+    delegation: 20
+    host_resolution: 20
     geo: 8
 
 cache:
