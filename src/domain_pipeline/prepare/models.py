@@ -20,6 +20,9 @@ class PreparedRootPlan:
 
     registrable_domain: str
     status: str = "pending"
+    entry_count: int = 0
+    delegation_config_source_id: str = ""
+    delegation_behavior_fingerprint: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,8 +69,3 @@ class PreparedInputSet:
                 else:
                     root_entries[entry.entry.registrable_domain].append(entry)
         return dict(root_entries), public_suffix_entries
-
-
-def root_plan_runtime_payload(plan: PreparedRootPlan) -> dict[str, Any]:
-    """Serialize prepared delegation root metadata for worker runtime."""
-    return dataclasses.asdict(plan)

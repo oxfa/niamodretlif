@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from domain_pipeline.prepare.classifications import (
-    PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_ADD_ACTIONABLE,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASSED,
 )
@@ -18,6 +17,7 @@ from domain_pipeline.worker.dns import (
 )
 from domain_pipeline.routing import route_for_pipeline_result_code
 from domain_pipeline.worker.runtime.contracts import (
+    DelegationRootWorkItem,
     GeoWorkItem,
     HostResolutionWorkItem,
     ParsedHostItem,
@@ -26,34 +26,38 @@ from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 
 
 class DelegationStage:
-    """Own delegation queue consumption and delegation routing."""
+    """Own root-level delegation queue consumption and host-level fanout."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
     async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume worker-local delegation input and route each result."""
+        """Consume root-level delegation input and route each host result."""
         while True:
-            parsed = await queue_bundle.delegation_input.get()
+            work_item = await queue_bundle.delegation_input.get()
             try:
-                if parsed is None:
+                if work_item is None:
                     return
-                if (
-                    parsed.entry.is_public_suffix_input
-                    or not parsed.entry.registrable_domain
-                ):
-                    await self.runtime.put_completed(
-                        queue_bundle,
-                        parsed,
-                        pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
-                    )
-                    continue
-                delegation_result = await self.runtime.lookup_delegation(
-                    parsed.source_context, parsed.entry
+                delegation_result = await self.runtime.lookup_delegation_root(
+                    work_item.delegation_source_context,
+                    work_item.registrable_domain,
                 )
-                await self.route(queue_bundle, parsed, delegation_result)
+                await self.route_root(queue_bundle, work_item, delegation_result)
             finally:
                 queue_bundle.delegation_input.task_done()
+
+    async def route_root(
+        self,
+        queue_bundle: RuntimeQueueSet,
+        work_item: DelegationRootWorkItem,
+        delegation_result: DelegationResult,
+    ) -> None:
+        """Fan out one root delegation result to host-level routing."""
+        self.runtime.log_delegation_fanout(
+            work_item.registrable_domain, len(work_item.items)
+        )
+        for parsed in work_item.items:
+            await self.route(queue_bundle, parsed, delegation_result)
 
     async def route(
         self,

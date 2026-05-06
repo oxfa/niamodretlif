@@ -86,6 +86,8 @@ defaults:
     directory: output
 
 runtime:
+  # Delegation concurrency is worker-local root-level NS lookup concurrency.
+  # Host-resolution and geo concurrency remain host-level.
   stage_workers:
     delegation: 16
     host_resolution: 16

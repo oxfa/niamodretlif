@@ -16,7 +16,6 @@ from domain_pipeline.prepare.models import (
     PreparedHostEntry,
     PreparedInputSet,
     PreparedRootPlan,
-    root_plan_runtime_payload,
 )
 from domain_pipeline.prepare.planner import PreparationPlanner
 
@@ -32,6 +31,5 @@ __all__ = [
     "PreparedRootPlan",
     "WorkerAssignmentPlanner",
     "prepare_batch",
-    "root_plan_runtime_payload",
     "write_prepared_batch",
 ]

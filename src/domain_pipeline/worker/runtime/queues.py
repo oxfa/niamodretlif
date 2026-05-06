@@ -13,17 +13,17 @@ from domain_pipeline.worker.runtime.constants import (
 )
 from domain_pipeline.worker.runtime.contracts import (
     CompletedHostResult,
+    DelegationRootWorkItem,
     GeoWorkItem,
     HostResolutionWorkItem,
-    ParsedHostItem,
 )
 
 
 @dataclass
 class RuntimeQueueSet:
-    """Own worker-local runtime queues and sentinel-compatible queue wiring."""
+    """Own root-level delegation and host-level downstream runtime queues."""
 
-    delegation_input: asyncio.Queue[ParsedHostItem | None]
+    delegation_input: asyncio.Queue[DelegationRootWorkItem | None]
     delegation_to_host_resolution: asyncio.Queue[HostResolutionWorkItem | None]
     host_resolution_to_geo: asyncio.Queue[GeoWorkItem | None]
     result_queue: asyncio.Queue[CompletedHostResult | None]
