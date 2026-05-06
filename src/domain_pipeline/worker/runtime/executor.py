@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 from collections import Counter
@@ -54,12 +55,33 @@ from domain_pipeline.worker.runtime.stages import (
     HostResolutionStage,
 )
 from domain_pipeline.worker.runtime.constants import (
-    DELEGATION_STAGE_WORKERS,
+    DNS_DELEGATION_STAGE_WORKERS,
+    DNS_HOST_RESOLUTION_STAGE_WORKERS,
     GEO_STAGE_WORKERS,
-    HOST_RESOLUTION_STAGE_WORKERS,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeStageWorkerCounts:
+    """Worker-local async stage worker counts."""
+
+    delegation: int
+    host_resolution: int
+    geo: int
+
+
+def _runtime_stage_worker_counts(config: dict[str, Any]) -> RuntimeStageWorkerCounts:
+    """Return runtime stage worker counts with defaults for legacy payloads."""
+    stage_workers = dict(config.get("runtime", {}).get("stage_workers", {}))
+    return RuntimeStageWorkerCounts(
+        delegation=int(stage_workers.get("delegation", DNS_DELEGATION_STAGE_WORKERS)),
+        host_resolution=int(
+            stage_workers.get("host_resolution", DNS_HOST_RESOLUTION_STAGE_WORKERS)
+        ),
+        geo=int(stage_workers.get("geo", GEO_STAGE_WORKERS)),
+    )
 
 
 def _geo_provider_token(geo_config: dict[str, Any]) -> str:
@@ -103,6 +125,7 @@ class PipelineExecutor:
         )
         self.cache_reader = self.cache_bundle.reader
         self.cache_stats: Counter[str] = Counter()
+        self.stage_workers = _runtime_stage_worker_counts(config)
 
     @classmethod
     def from_runtime_payload(
@@ -453,11 +476,11 @@ class PipelineExecutor:
         )
         for item in items:
             await queue_bundle.delegation_input.put(item)
-        for _ in range(DELEGATION_STAGE_WORKERS):
+        for _ in range(self.stage_workers.delegation):
             await queue_bundle.delegation_input.put(None)
         logger.debug(
             "Async pipeline loader sent delegation sentinels count=%d",
-            DELEGATION_STAGE_WORKERS,
+            self.stage_workers.delegation,
         )
 
     async def _join_or_raise(
@@ -508,23 +531,23 @@ class PipelineExecutor:
         logger.debug(
             "Async pipeline starting worker-local queues delegation_workers=%d "
             "host_resolution_workers=%d geo_workers=%d prepared_metadata=%s",
-            DELEGATION_STAGE_WORKERS,
-            HOST_RESOLUTION_STAGE_WORKERS,
-            GEO_STAGE_WORKERS,
+            self.stage_workers.delegation,
+            self.stage_workers.host_resolution,
+            self.stage_workers.geo,
             bool(self.prepared_metadata),
         )
         loader_task = asyncio.create_task(self._load_delegation_input(queue_bundle))
         delegation_tasks = [
             asyncio.create_task(self._delegation_worker(queue_bundle))
-            for _ in range(DELEGATION_STAGE_WORKERS)
+            for _ in range(self.stage_workers.delegation)
         ]
         host_resolution_tasks = [
             asyncio.create_task(self._host_resolution_worker(queue_bundle))
-            for _ in range(HOST_RESOLUTION_STAGE_WORKERS)
+            for _ in range(self.stage_workers.host_resolution)
         ]
         geo_tasks = [
             asyncio.create_task(self._geo_worker(queue_bundle))
-            for _ in range(GEO_STAGE_WORKERS)
+            for _ in range(self.stage_workers.geo)
         ]
         result_task = asyncio.create_task(self._result_writer(queue_bundle))
         cache_tasks = [
@@ -544,11 +567,11 @@ class PipelineExecutor:
             await self._join_or_raise(queue_bundle.delegation_input, delegation_tasks)
             await asyncio.gather(*delegation_tasks)
             logger.debug("Async pipeline delegation_input drained")
-            for _ in range(HOST_RESOLUTION_STAGE_WORKERS):
+            for _ in range(self.stage_workers.host_resolution):
                 await queue_bundle.delegation_to_host_resolution.put(None)
             logger.debug(
                 "Async pipeline sent host-resolution sentinels count=%d",
-                HOST_RESOLUTION_STAGE_WORKERS,
+                self.stage_workers.host_resolution,
             )
             logger.debug(
                 "Async pipeline waiting for delegation_to_host_resolution drain"
@@ -559,11 +582,11 @@ class PipelineExecutor:
             )
             await asyncio.gather(*host_resolution_tasks)
             logger.debug("Async pipeline delegation_to_host_resolution drained")
-            for _ in range(GEO_STAGE_WORKERS):
+            for _ in range(self.stage_workers.geo):
                 await queue_bundle.host_resolution_to_geo.put(None)
             logger.debug(
                 "Async pipeline sent geo sentinels count=%d",
-                GEO_STAGE_WORKERS,
+                self.stage_workers.geo,
             )
             logger.debug("Async pipeline waiting for host_resolution_to_geo drain")
             await self._join_or_raise(queue_bundle.host_resolution_to_geo, geo_tasks)
