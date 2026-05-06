@@ -10,6 +10,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from domain_pipeline.prepare.classifications import (
+    PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+)
 from domain_pipeline.worker.geo.result_codes import (
     PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
 )
@@ -98,7 +101,7 @@ def _geo_provider_token(geo_config: dict[str, Any]) -> str:
     return env_token
 
 
-class PipelineExecutor:
+class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
     """Worker-local async DAG for prepared and config-sourced runtime payloads."""
 
     def __init__(
@@ -110,7 +113,7 @@ class PipelineExecutor:
     ) -> None:
         _ = runtime_identity
         self.config = config
-        self.prepared_metadata = prepared_metadata or {}
+        self.prepared_metadata = prepared_metadata
         self.writer = ResultOutputWriter()
         cache_payload = config.get("cache", {})
         cache_file = str(cache_payload.get("cache_file", "")).strip()
@@ -126,6 +129,9 @@ class PipelineExecutor:
         self.cache_reader = self.cache_bundle.reader
         self.cache_stats: Counter[str] = Counter()
         self.stage_workers = _runtime_stage_worker_counts(config)
+        self._delegation_tasks: dict[
+            tuple[str, str], asyncio.Task[DelegationResult]
+        ] = {}
 
     @classmethod
     def from_runtime_payload(
@@ -211,19 +217,51 @@ class PipelineExecutor:
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> DelegationResult:
         """Run or cache-read the required dns.delegation stage."""
+        return await self.lookup_delegation_root(
+            source_context, entry.registrable_domain
+        )
+
+    async def lookup_delegation_root(
+        self, source_context: WorkerSourceContext, registrable_domain: str
+    ) -> DelegationResult:
+        """Run or join one root-level dns.delegation lookup."""
         checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.delegation_resolver_key()
+        task_key = (registrable_domain, resolver_key)
+        task = self._delegation_tasks.get(task_key)
+        if task is None:
+            task = asyncio.create_task(
+                self._lookup_delegation_root_once(
+                    checker=checker,
+                    registrable_domain=registrable_domain,
+                    resolver_key=resolver_key,
+                ),
+                name=f"delegation_{registrable_domain}",
+            )
+            self._delegation_tasks[task_key] = task
+        try:
+            return await task
+        finally:
+            if task.done() and self._delegation_tasks.get(task_key) is task:
+                self._delegation_tasks.pop(task_key, None)
+
+    async def _lookup_delegation_root_once(
+        self,
+        *,
+        checker: Any,
+        registrable_domain: str,
+        resolver_key: str,
+    ) -> DelegationResult:
+        """Run or cache-read one root-level delegation lookup."""
         now = utc_now()
         cached, source = await self.cache_reader.get_fresh_delegation_with_source(
-            entry.registrable_domain, resolver_key, now
+            registrable_domain, resolver_key, now
         )
         if cached is not None:
             self._record_cache_hit("delegation", source)
             return self._delegation_from_cache_record(cached)
         self._record_cache_miss("delegation")
-        result = await AsyncDelegationTransport(checker).lookup(
-            entry.registrable_domain
-        )
+        result = await AsyncDelegationTransport(checker).lookup(registrable_domain)
         if result.status in {"timeout", "servfail"}:
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
@@ -445,6 +483,14 @@ class PipelineExecutor:
         """Consume geo work and emit terminal policy results."""
         await GeoStage(self).worker(queue_bundle)
 
+    def log_delegation_fanout(self, registrable_domain: str, item_count: int) -> None:
+        """Log the host fanout size for one root-owned delegation result."""
+        logger.debug(
+            "Async pipeline delegation root fanout root=%s host_items=%d",
+            registrable_domain,
+            item_count,
+        )
+
     async def _result_writer(self, queue_bundle: RuntimeQueueSet) -> None:
         """Drain terminal results into the deterministic writer buffer."""
         while True:
@@ -469,13 +515,27 @@ class PipelineExecutor:
         ).runtime_items()
 
     async def _load_delegation_input(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Seed the first worker-local queue from runtime payload entries."""
-        items = self._runtime_items()
-        logger.debug(
-            "Async pipeline loader enqueueing delegation_input items=%d", len(items)
+        """Seed root-level delegation input from runtime payload entries."""
+        loader = RuntimeItemLoader(
+            config=self.config, prepared_metadata=self.prepared_metadata
         )
-        for item in items:
-            await queue_bundle.delegation_input.put(item)
+        root_work_items, terminal_items = loader.delegation_work_items()
+        host_item_count = sum(len(work_item.items) for work_item in root_work_items)
+        logger.debug(
+            "Async pipeline loader enqueueing delegation roots=%d host_items=%d "
+            "terminal_items=%d",
+            len(root_work_items),
+            host_item_count,
+            len(terminal_items),
+        )
+        for item in terminal_items:
+            await self.put_completed(
+                queue_bundle,
+                item,
+                pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+            )
+        for work_item in root_work_items:
+            await queue_bundle.delegation_input.put(work_item)
         for _ in range(self.stage_workers.delegation):
             await queue_bundle.delegation_input.put(None)
         logger.debug(
@@ -534,7 +594,7 @@ class PipelineExecutor:
             self.stage_workers.delegation,
             self.stage_workers.host_resolution,
             self.stage_workers.geo,
-            bool(self.prepared_metadata),
+            self.prepared_metadata is not None,
         )
         loader_task = asyncio.create_task(self._load_delegation_input(queue_bundle))
         delegation_tasks = [

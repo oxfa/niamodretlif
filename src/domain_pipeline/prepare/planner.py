@@ -17,6 +17,7 @@ from domain_pipeline.prepare.classifications import (
 from domain_pipeline.prepare.config.loader import (
     load_config_without_runtime_credentials,
 )
+from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
 from domain_pipeline.prepare.manual_inputs import ManualInputLoader, ManualInputSet
 from domain_pipeline.prepare.merger import PreparedEntryMerger
 from domain_pipeline.prepare.models import (
@@ -28,10 +29,7 @@ from domain_pipeline.prepare.models import (
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
 from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
 from domain_pipeline.routing import route_for_pipeline_result_code
-from domain_pipeline.worker.dns import (
-    delegation_dns_profile,
-    host_resolution_dns_profile,
-)
+from domain_pipeline.worker.dns import host_resolution_dns_profile
 from domain_pipeline.worker.output.rows import build_base_row
 
 
@@ -186,7 +184,10 @@ class PreparationPlanner:
             preparation_terminal_rows=preparation_terminal_rows,
         )
 
-        root_plans = self._root_plans(entries_by_source)
+        root_plans = self._root_plans(
+            entries_by_source=entries_by_source,
+            source_jobs_by_id=source_jobs_by_id,
+        )
         return PreparedInputSet(
             config=config,
             source_jobs_by_id=source_jobs_by_id,
@@ -445,25 +446,56 @@ class PreparationPlanner:
             )
 
     def _root_plans(
-        self, entries_by_source: dict[str, list[PreparedHostEntry]]
+        self,
+        *,
+        entries_by_source: dict[str, list[PreparedHostEntry]],
+        source_jobs_by_id: dict[str, SourceJob],
     ) -> dict[str, PreparedRootPlan]:
-        return {
-            entry.entry.registrable_domain: PreparedRootPlan(
-                entry.entry.registrable_domain
+        root_entries: dict[str, list[PreparedHostEntry]] = defaultdict(list)
+        for entries in entries_by_source.values():
+            for entry in entries:
+                if entry.entry.registrable_domain:
+                    root_entries[entry.entry.registrable_domain].append(entry)
+
+        root_plans: dict[str, PreparedRootPlan] = {}
+        for registrable_domain, entries in sorted(root_entries.items()):
+            ordered_entries = sorted(
+                entries,
+                key=lambda entry: (
+                    entry.source_index,
+                    entry.line_index,
+                    entry.entry.host,
+                ),
             )
-            for entries in entries_by_source.values()
-            for entry in entries
-            if entry.entry.registrable_domain
-        }
+            fingerprints_by_source = {
+                entry.source_id: delegation_behavior_fingerprint(
+                    source_jobs_by_id[entry.source_id].config["dns"]
+                )
+                for entry in ordered_entries
+            }
+            fingerprints = set(fingerprints_by_source.values())
+            if len(fingerprints) > 1:
+                conflicting_sources = ", ".join(sorted(fingerprints_by_source))
+                raise ValueError(
+                    "registrable domain "
+                    f"{registrable_domain!r} appears in sources with different "
+                    f"delegation DNS behavior: {conflicting_sources}"
+                )
+            delegation_config_source_id = ordered_entries[0].source_id
+            root_plans[registrable_domain] = PreparedRootPlan(
+                registrable_domain=registrable_domain,
+                entry_count=len(ordered_entries),
+                delegation_config_source_id=delegation_config_source_id,
+                delegation_behavior_fingerprint=fingerprints_by_source[
+                    delegation_config_source_id
+                ],
+            )
+        return root_plans
 
     def _canonical_delegation_dns_behavior(
         self, dns_config: dict[str, Any]
     ) -> dict[str, Any]:
-        delegation_config = dict(dns_config["delegation"])
-        return {
-            **delegation_dns_profile(dns_config),
-            "retry_attempts": delegation_config["retry_attempts"],
-        }
+        return json.loads(delegation_behavior_fingerprint(dns_config))
 
     def _canonical_host_resolution_dns_behavior(
         self, dns_config: dict[str, Any]

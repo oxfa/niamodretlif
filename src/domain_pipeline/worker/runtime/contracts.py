@@ -40,6 +40,16 @@ class ParsedHostItem:
 
 
 @dataclass(frozen=True)
+class DelegationRootWorkItem:
+    """One root-level delegation lookup with host-level fanout items."""
+
+    registrable_domain: str
+    delegation_source_context: WorkerSourceContext
+    items: tuple[ParsedHostItem, ...]
+    delegation_behavior_fingerprint: str
+
+
+@dataclass(frozen=True)
 class HostResolutionWorkItem:
     """Item emitted by delegation for optional host-resolution processing."""
 

@@ -16,6 +16,8 @@ from domain_pipeline.prepare.aggregate_manifest import (
 from domain_pipeline.prepare.worker_manifest import (
     ConfigIdentity as WorkerConfigIdentity,
     PrepareWorkerManifest,
+    PreparedDelegationRootMetadata,
+    PreparedHostEntryMetadata,
     PreparedRuntimeMetadata,
     WorkerOutputSpec,
     WorkerRuntimeSpec,
@@ -25,7 +27,6 @@ from domain_pipeline.prepare.models import (
     PreparedHostEntry,
     PreparedInputSet,
     PreparedRootPlan,
-    root_plan_runtime_payload,
 )
 
 PIPELINE_RUN_FORMAT_VERSION = 2
@@ -120,18 +121,14 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
 
 
 def prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
-    """Serialize one prepared entry for the worker runtime fast path."""
+    """Serialize one root-owned prepared host entry for worker runtime."""
     return {
         "host": entry.entry.host,
         "input_name": entry.entry.input_name,
-        "registrable_domain": entry.entry.registrable_domain,
-        "public_suffix": entry.entry.public_suffix,
-        "is_public_suffix_input": entry.entry.is_public_suffix_input,
+        "source_id": entry.source_id,
         "input_kind": entry.entry.input_kind,
         "apex_scope": entry.entry.apex_scope,
         "source_format": entry.entry.source_format,
-        "raw_line": entry.raw_line,
-        "line_index": entry.line_index,
         "manual_filter_pass": entry.manual_filter_pass,
         "manual_add": entry.manual_add,
         "source_id_override": entry.source_id_override,
@@ -238,6 +235,11 @@ class WorkerAssignmentPlanner:
         for worker_id in worker_ids:
             if not worker_source_entries[worker_id]:
                 continue
+            selected_source_ids = set(worker_source_entries[worker_id])
+            selected_source_ids.update(
+                plan.delegation_config_source_id
+                for plan in worker_root_plans[worker_id].values()
+            )
             manifests.append(
                 PreparedWorkerManifest(
                     worker_id=worker_id,
@@ -249,7 +251,7 @@ class WorkerAssignmentPlanner:
                             config=config,
                             batch_id=batch_id,
                             worker_id=worker_id,
-                            selected_source_ids=set(worker_source_entries[worker_id]),
+                            selected_source_ids=selected_source_ids,
                         ),
                         prepared_metadata=self._prepared_runtime_metadata_from_assignment(
                             source_entries=worker_source_entries[worker_id],
@@ -287,6 +289,13 @@ class WorkerAssignmentPlanner:
                 worker_paths.output_directory
             )
             source_configs.append(selected_source)
+        included_source_ids = {str(source["id"]) for source in source_configs}
+        missing_source_ids = sorted(selected_source_ids - included_source_ids)
+        if missing_source_ids:
+            raise ValueError(
+                "worker runtime spec references unavailable configured sources: "
+                + ", ".join(missing_source_ids)
+            )
         return WorkerRuntimeSpec(
             config_identity=config_identity,
             cache={
@@ -315,38 +324,72 @@ class WorkerAssignmentPlanner:
             debug_log_path=relative_path(worker_paths.debug_log),
         )
 
-    def _prepared_sources_payload(
-        self,
-        *,
-        source_entries: dict[str, list[PreparedHostEntry]],
-    ) -> dict[str, Any]:
-        sources_payload: dict[str, Any] = {}
-        for source_id, entries in sorted(
-            source_entries.items(),
-            key=lambda item: (item[1][0].source_index, item[0]),
-        ):
-            ordered_entries = list(entries)
-            sources_payload[source_id] = {
-                "source_index": ordered_entries[0].source_index,
-                "entries": [prepared_entry_payload(entry) for entry in ordered_entries],
-            }
-        return sources_payload
-
     def _prepared_runtime_metadata_from_assignment(
         self,
         *,
         source_entries: dict[str, list[PreparedHostEntry]],
         root_plans: dict[str, PreparedRootPlan],
     ) -> PreparedRuntimeMetadata:
-        sources_payload = self._prepared_sources_payload(source_entries=source_entries)
+        entries_by_root: dict[str, list[PreparedHostEntry]] = defaultdict(list)
+        for entries in source_entries.values():
+            for entry in entries:
+                if entry.entry.registrable_domain:
+                    entries_by_root[entry.entry.registrable_domain].append(entry)
+        missing_roots = sorted(set(entries_by_root) - set(root_plans))
+        if missing_roots:
+            raise ValueError(
+                "worker assignment missing delegation root metadata for "
+                + ", ".join(missing_roots)
+            )
+        extra_roots = sorted(set(root_plans) - set(entries_by_root))
+        if extra_roots:
+            raise ValueError(
+                "worker assignment has delegation root metadata without entries for "
+                + ", ".join(extra_roots)
+            )
+        for registrable_domain, entries in entries_by_root.items():
+            plan = root_plans[registrable_domain]
+            if plan.entry_count != len(entries):
+                raise ValueError(
+                    "delegation root entry_count mismatch for "
+                    f"{registrable_domain}: metadata={plan.entry_count} "
+                    f"entries={len(entries)}"
+                )
+            if not plan.delegation_config_source_id:
+                raise ValueError(
+                    "delegation root "
+                    f"{registrable_domain} is missing delegation config source"
+                )
+            public_suffixes = {entry.entry.public_suffix for entry in entries}
+            if len(public_suffixes) != 1:
+                raise ValueError(
+                    "delegation root "
+                    f"{registrable_domain} has inconsistent public suffix metadata"
+                )
         return PreparedRuntimeMetadata(
-            prepared_source_ids=sorted(sources_payload),
-            sources=sources_payload,
             delegation_roots={
-                registrable_domain: root_plan_runtime_payload(plan)
-                for registrable_domain, plan in sorted(root_plans.items())
+                registrable_domain: PreparedDelegationRootMetadata(
+                    public_suffix=entries[0].entry.public_suffix,
+                    delegation_config_source_id=(
+                        root_plans[registrable_domain].delegation_config_source_id
+                    ),
+                    delegation_behavior_fingerprint=(
+                        root_plans[registrable_domain].delegation_behavior_fingerprint
+                    ),
+                    host_entries=[
+                        PreparedHostEntryMetadata(**prepared_entry_payload(entry))
+                        for entry in sorted(
+                            entries,
+                            key=lambda current: (
+                                current.source_index,
+                                current.line_index,
+                                current.entry.host,
+                            ),
+                        )
+                    ],
+                )
+                for registrable_domain, entries in sorted(entries_by_root.items())
             },
-            terminal_rows=[],
         )
 
     def _ordered_entries_for_root(

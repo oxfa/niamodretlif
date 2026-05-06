@@ -20,6 +20,7 @@ from domain_pipeline.worker.runtime.stages import (
 )
 from domain_pipeline.worker.runtime.contracts import (
     CompletedHostResult,
+    DelegationRootWorkItem,
     GeoWorkItem,
     HostResolutionWorkItem,
     ParsedHostItem,
@@ -38,6 +39,7 @@ __all__ = [
     "CompletedHostResult",
     "CompletedResultFactory",
     "DelegationStage",
+    "DelegationRootWorkItem",
     "GeoStage",
     "GeoWorkItem",
     "HostResolutionStage",

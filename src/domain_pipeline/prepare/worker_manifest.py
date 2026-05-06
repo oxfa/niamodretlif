@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from domain_pipeline.paths import PathLayout
 
@@ -48,13 +48,71 @@ class WorkerOutputSpec(PrepareWorkerModel):
         }
 
 
-class PreparedRuntimeMetadata(PrepareWorkerModel):
-    """Prepared metadata consumed by the worker runtime fast path."""
+class PreparedHostEntryMetadata(PrepareWorkerModel):
+    """Worker-local prepared host entry owned by one delegation root."""
 
-    prepared_source_ids: list[str] = Field(default_factory=list)
-    sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    delegation_roots: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    terminal_rows: list[dict[str, Any]] = Field(default_factory=list)
+    host: str
+    input_name: str
+    source_id: str
+    input_kind: str = "exact_host"
+    apex_scope: str = "exact_only"
+    source_format: str = "plain"
+    manual_filter_pass: bool = False
+    manual_add: bool = False
+    source_id_override: str | None = None
+    source_input_label_override: str | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    source_input_labels: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_host_entry_metadata(self) -> "PreparedHostEntryMetadata":
+        if not self.host:
+            raise ValueError("prepared host entry host is required")
+        if not self.input_name:
+            raise ValueError("prepared host entry input_name is required")
+        if not self.source_id:
+            raise ValueError("prepared host entry source_id is required")
+        return self
+
+
+class PreparedDelegationRootMetadata(PrepareWorkerModel):
+    """Worker-local root metadata with root-owned prepared host entries."""
+
+    public_suffix: str
+    delegation_config_source_id: str
+    delegation_behavior_fingerprint: str
+    host_entries: list[PreparedHostEntryMetadata]
+
+    @model_validator(mode="after")
+    def _validate_root_metadata(self) -> "PreparedDelegationRootMetadata":
+        if not self.public_suffix:
+            raise ValueError("delegation root public_suffix is required")
+        if not self.delegation_config_source_id:
+            raise ValueError("delegation root delegation_config_source_id is required")
+        if not self.delegation_behavior_fingerprint:
+            raise ValueError(
+                "delegation root delegation_behavior_fingerprint is required"
+            )
+        if not self.host_entries:
+            raise ValueError("delegation root host_entries must not be empty")
+        return self
+
+
+class PreparedRuntimeMetadata(PrepareWorkerModel):
+    """Root-owned prepared metadata consumed by the worker runtime fast path."""
+
+    delegation_roots: dict[str, PreparedDelegationRootMetadata] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def _validate_delegation_root_keys(self) -> "PreparedRuntimeMetadata":
+        for root_key in self.delegation_roots:
+            if not root_key:
+                raise ValueError(
+                    "delegation_roots key must be a non-empty registrable domain"
+                )
+        return self
 
     def to_runtime_payload(self) -> dict[str, Any]:
         """Return a mutable runtime payload preserving the current metadata shape."""
