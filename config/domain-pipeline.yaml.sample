@@ -46,7 +46,7 @@ defaults:
     # for stages that inherit this fallback.
     default_resolvers: []
     # Per-query DNS timeout, in seconds.
-    timeout: 15.0
+    timeout: 25.0
     # Base wait, in seconds, for exponential DNS retry backoff after retryable
     # timeout/SERVFAIL outcomes. Runtime caps each retry wait at 2 seconds.
     retry_backoff_base_seconds: 1.0
@@ -182,8 +182,8 @@ runtime:
   # host-level. GitHub matrix concurrency is controlled separately by workflow
   # settings.
   stage_workers:
-    delegation: 16
-    host_resolution: 16
+    delegation: 20
+    host_resolution: 20
     geo: 8
 
 cache:
@@ -220,7 +220,7 @@ sources:
       request_timeout: 30.0
     dns:
       default_resolvers: []
-      timeout: 15.0
+      timeout: 25.0
       retry_backoff_base_seconds: 1.0
       query_rate_limit:
         enabled: true
