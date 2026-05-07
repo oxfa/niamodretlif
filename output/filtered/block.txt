@@ -41472,6 +41472,7 @@ images.newsletter.larksuite.com
 images.newsletter.rewe-group.at
 images.notice.wageworks.com
 images.noticias.clarin.com
+images.notifications.aigdirect.com
 images.novedades.fibercorp.com.ar
 images.nwinsurance.pemco.com
 images.offers.princesscruises.co.uk
@@ -65034,6 +65035,7 @@ previousplayground.com
 prewrapabulic.com
 prezna.com
 prf.vagnt.com
+prfct.co
 prfctmney.com
 prftrndivoqqt.online
 prfwhite.com
