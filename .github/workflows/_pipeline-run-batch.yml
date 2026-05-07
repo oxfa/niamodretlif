@@ -303,7 +303,7 @@ jobs:
         run: |
           set -eo pipefail
           # The prepare step emits root-atomic worker manifests. Matrix
-          # max-parallel controls GitHub worker count; runtime.stage_workers
+          # max-parallel controls GitHub worker count; runtime.stage_concurrency
           # controls worker-local async concurrency. Delegation and
           # host-resolution may adapt inside this worker while preserving
           # root-level delegation fanout to host-level stages.

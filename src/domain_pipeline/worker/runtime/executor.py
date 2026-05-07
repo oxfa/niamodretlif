@@ -73,17 +73,17 @@ from domain_pipeline.worker.runtime.stages import (
     HostResolutionStage,
 )
 from domain_pipeline.worker.runtime.constants import (
-    DNS_DELEGATION_STAGE_WORKERS,
-    DNS_HOST_RESOLUTION_STAGE_WORKERS,
-    GEO_STAGE_WORKERS,
+    DNS_DELEGATION_STAGE_CONCURRENCY,
+    DNS_HOST_RESOLUTION_STAGE_CONCURRENCY,
+    GEO_STAGE_CONCURRENCY,
 )
 
 logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class RuntimeStageWorkerCounts:
-    """Worker-local async stage worker counts."""
+class RuntimeStageConcurrencyCounts:
+    """Worker-local async stage concurrency counts."""
 
     delegation: int
     host_resolution: int
@@ -91,7 +91,7 @@ class RuntimeStageWorkerCounts:
 
 
 @dataclasses.dataclass(frozen=True)
-class RuntimeStageAdaptiveSettings:
+class RuntimeStageConcurrencyLimits:
     """Adaptive sizing for one worker-local runtime stage."""
 
     minimum: int
@@ -100,12 +100,12 @@ class RuntimeStageAdaptiveSettings:
 
 
 @dataclasses.dataclass(frozen=True)
-class RuntimeStageWorkerSettings:  # pylint: disable=too-many-instance-attributes
+class RuntimeStageConcurrencySettings:  # pylint: disable=too-many-instance-attributes
     """Parsed worker-local runtime stage sizing settings."""
 
-    delegation: RuntimeStageAdaptiveSettings
-    host_resolution: RuntimeStageAdaptiveSettings
-    geo: RuntimeStageAdaptiveSettings
+    delegation: RuntimeStageConcurrencyLimits
+    host_resolution: RuntimeStageConcurrencyLimits
+    geo: RuntimeStageConcurrencyLimits
     adaptive_enabled: bool
     supervisor_interval_seconds: float
     busy_scale_up_after_seconds: float
@@ -116,54 +116,76 @@ class RuntimeStageWorkerSettings:  # pylint: disable=too-many-instance-attribute
     scale_down_step: int
 
 
-def _runtime_stage_worker_counts(config: dict[str, Any]) -> RuntimeStageWorkerCounts:
-    """Return runtime stage worker counts with defaults for legacy payloads."""
-    stage_workers = dict(config.get("runtime", {}).get("stage_workers", {}))
-    minimums = dict(stage_workers.get("minimums", {}))
+def _runtime_stage_concurrency_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """Return canonical stage concurrency payload, accepting legacy manifests."""
+    runtime_payload = dict(config.get("runtime", {}))
+    if "stage_concurrency" in runtime_payload:
+        return dict(runtime_payload["stage_concurrency"])
+    return dict(runtime_payload.get("stage_workers", {}))
+
+
+def _runtime_stage_concurrency_counts(
+    config: dict[str, Any],
+) -> RuntimeStageConcurrencyCounts:
+    """Return runtime stage concurrency counts with defaults for legacy payloads."""
+    stage_concurrency = _runtime_stage_concurrency_payload(config)
+    minimums = dict(stage_concurrency.get("minimums", {}))
     if minimums:
-        stage_workers = minimums
-    return RuntimeStageWorkerCounts(
-        delegation=int(stage_workers.get("delegation", DNS_DELEGATION_STAGE_WORKERS)),
-        host_resolution=int(
-            stage_workers.get("host_resolution", DNS_HOST_RESOLUTION_STAGE_WORKERS)
+        stage_concurrency = minimums
+    return RuntimeStageConcurrencyCounts(
+        delegation=int(
+            stage_concurrency.get("delegation", DNS_DELEGATION_STAGE_CONCURRENCY)
         ),
-        geo=int(stage_workers.get("geo", GEO_STAGE_WORKERS)),
+        host_resolution=int(
+            stage_concurrency.get(
+                "host_resolution", DNS_HOST_RESOLUTION_STAGE_CONCURRENCY
+            )
+        ),
+        geo=int(stage_concurrency.get("geo", GEO_STAGE_CONCURRENCY)),
     )
 
 
-def _runtime_stage_worker_settings(
+def _runtime_stage_concurrency_settings(
     config: dict[str, Any],
-) -> RuntimeStageWorkerSettings:
-    """Return parsed runtime worker settings for adaptive and static modes."""
-    counts = _runtime_stage_worker_counts(config)
-    stage_workers = dict(config.get("runtime", {}).get("stage_workers", {}))
-    adaptive = dict(stage_workers.get("adaptive", {}))
+) -> RuntimeStageConcurrencySettings:
+    """Return parsed runtime concurrency settings for adaptive and static modes."""
+    counts = _runtime_stage_concurrency_counts(config)
+    stage_concurrency = _runtime_stage_concurrency_payload(config)
+    adaptive = dict(stage_concurrency.get("adaptive", {}))
     adaptive_enabled = bool(adaptive.get("enabled", True))
-    multiplier = max(int(adaptive.get("max_worker_multiplier", 4)), 1)
+    multiplier = max(
+        int(
+            adaptive.get(
+                "max_concurrency_multiplier",
+                adaptive.get("max_worker_multiplier", 4),
+            )
+        ),
+        1,
+    )
 
-    def stage_settings(
+    def concurrency_settings(
         minimum: int, *, adaptive_stage: bool = True
-    ) -> RuntimeStageAdaptiveSettings:
+    ) -> RuntimeStageConcurrencyLimits:
         if not adaptive_enabled or not adaptive_stage:
-            return RuntimeStageAdaptiveSettings(
+            return RuntimeStageConcurrencyLimits(
                 minimum=minimum, cap=minimum, enabled=False
             )
-        return RuntimeStageAdaptiveSettings(
+        return RuntimeStageConcurrencyLimits(
             minimum=minimum,
             cap=minimum * multiplier,
             enabled=True,
         )
 
-    return RuntimeStageWorkerSettings(
-        delegation=stage_settings(
+    return RuntimeStageConcurrencySettings(
+        delegation=concurrency_settings(
             counts.delegation,
             adaptive_stage=bool(adaptive.get("delegation_enabled", True)),
         ),
-        host_resolution=stage_settings(
+        host_resolution=concurrency_settings(
             counts.host_resolution,
             adaptive_stage=bool(adaptive.get("host_resolution_enabled", True)),
         ),
-        geo=stage_settings(counts.geo, adaptive_stage=False),
+        geo=concurrency_settings(counts.geo, adaptive_stage=False),
         adaptive_enabled=adaptive_enabled,
         supervisor_interval_seconds=float(
             adaptive.get("supervisor_interval_seconds", 1.0)
@@ -233,18 +255,18 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         )
         self.cache_reader = self.cache_bundle.reader
         self.cache_stats: Counter[str] = Counter()
-        self.stage_workers = _runtime_stage_worker_counts(config)
-        self.stage_settings = _runtime_stage_worker_settings(config)
+        self.stage_concurrency = _runtime_stage_concurrency_counts(config)
+        self.concurrency_settings = _runtime_stage_concurrency_settings(config)
         self.dns_capacity_groups = _runtime_dns_capacity_groups(
             config,
             prepared_metadata=prepared_metadata,
         )
         self.delegation_executor = ThreadPoolExecutor(
-            max_workers=self.stage_settings.delegation.cap,
+            max_workers=self.concurrency_settings.delegation.cap,
             thread_name_prefix="dns-delegation",
         )
         self.host_resolution_executor = ThreadPoolExecutor(
-            max_workers=self.stage_settings.host_resolution.cap,
+            max_workers=self.concurrency_settings.host_resolution.cap,
             thread_name_prefix="dns-host-resolution",
         )
         self._delegation_tasks: dict[
@@ -593,9 +615,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 )
             )
 
-    async def _delegation_worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def _delegation_stage_consumer(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume worker-local delegation input and route each result."""
-        await DelegationStage(self).worker(queue_bundle)
+        await DelegationStage(self).consume(queue_bundle)
 
     async def _route_delegation_result(
         self,
@@ -605,9 +627,11 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
     ) -> None:
         await DelegationStage(self).route(queue_bundle, parsed, delegation_result)
 
-    async def _host_resolution_worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def _host_resolution_stage_consumer(
+        self, queue_bundle: RuntimeQueueSet
+    ) -> None:
         """Consume host-resolution work and route review, filtered, or geo cases."""
-        await HostResolutionStage(self).worker(queue_bundle)
+        await HostResolutionStage(self).consume(queue_bundle)
 
     async def _route_host_resolution_result(
         self,
@@ -619,9 +643,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             queue_bundle, work_item, host_resolution_result
         )
 
-    async def _geo_worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def _geo_stage_consumer(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume geo work and emit terminal policy results."""
-        await GeoStage(self).worker(queue_bundle)
+        await GeoStage(self).consume(queue_bundle)
 
     def log_delegation_fanout(self, registrable_domain: str, item_count: int) -> None:
         """Log the host fanout size for one root-owned delegation result."""
@@ -679,11 +703,11 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         for work_item in root_work_items:
             await queue_bundle.delegation_input.put(work_item)
         if send_sentinels:
-            for _ in range(self.stage_workers.delegation):
+            for _ in range(self.stage_concurrency.delegation):
                 await queue_bundle.delegation_input.put(None)
             logger.debug(
                 "Async pipeline loader sent delegation sentinels count=%d",
-                self.stage_workers.delegation,
+                self.stage_concurrency.delegation,
             )
 
     def _dns_pressure_state(
@@ -692,7 +716,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         """Return stage-scoped DNS capacity and recent pressure state."""
         snapshots = DNSQueryCoordinatorRegistry.provider_capacity_snapshot(
             rate_limit_enabled=True,
-            pressure_window_seconds=self.stage_settings.pressure_window_seconds,
+            pressure_window_seconds=self.concurrency_settings.pressure_window_seconds,
         )
         return capacity_state_for_groups(groups, snapshots)
 
@@ -715,17 +739,17 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             decision_engine=AdaptiveStageDecisionEngine(
                 minimum=minimum,
                 cap=cap,
-                scale_up_step=self.stage_settings.scale_up_step,
-                scale_down_step=self.stage_settings.scale_down_step,
+                scale_up_step=self.concurrency_settings.scale_up_step,
+                scale_down_step=self.concurrency_settings.scale_down_step,
                 busy_scale_up_after_seconds=(
-                    self.stage_settings.busy_scale_up_after_seconds
+                    self.concurrency_settings.busy_scale_up_after_seconds
                 ),
                 idle_scale_down_after_seconds=(
-                    self.stage_settings.idle_scale_down_after_seconds
+                    self.concurrency_settings.idle_scale_down_after_seconds
                 ),
-                queue_pressure_ratio=self.stage_settings.queue_pressure_ratio,
+                queue_pressure_ratio=self.concurrency_settings.queue_pressure_ratio,
             ),
-            interval_seconds=self.stage_settings.supervisor_interval_seconds,
+            interval_seconds=self.concurrency_settings.supervisor_interval_seconds,
             dns_pressure_state=lambda: self._dns_pressure_state(capacity_groups),
         )
 
@@ -734,7 +758,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         queue: asyncio.Queue[Any],
         watched_tasks: list[asyncio.Task[Any]] | Callable[[], list[asyncio.Task[Any]]],
     ) -> None:
-        """Wait for a queue to drain while surfacing worker task failures."""
+        """Wait for a queue to drain while surfacing consumer task failures."""
 
         def current_tasks() -> list[asyncio.Task[Any]]:
             return watched_tasks() if callable(watched_tasks) else watched_tasks
@@ -771,7 +795,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         cache_bundle: CacheBundle,
         cache_tasks: list[asyncio.Task[Any]],
     ) -> None:
-        """Drain and stop cache writers after all stage workers have stopped."""
+        """Drain and stop cache writers after all stage consumers have stopped."""
         logger.debug("Async pipeline waiting for cache writer queues to drain")
         for writer in cache_bundle.writers:
             await writer.queue.join()
@@ -787,28 +811,29 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         """Run the prepared or config-sourced pipeline through async stage queues."""
         queue_bundle = RuntimeQueueSet.create()
         logger.debug(
-            "Async pipeline starting worker-local queues delegation_workers=%d "
-            "host_resolution_workers=%d geo_workers=%d adaptive=%s "
+            "Async pipeline starting worker-local queues delegation_concurrency=%d "
+            "host_resolution_concurrency=%d geo_concurrency=%d adaptive=%s "
             "delegation_cap=%d host_resolution_cap=%d "
             "supervisor_interval_seconds=%.3f pressure_window_seconds=%.3f "
             "queue_pressure_ratio=%.3f prepared_metadata=%s",
-            self.stage_workers.delegation,
-            self.stage_workers.host_resolution,
-            self.stage_workers.geo,
-            self.stage_settings.adaptive_enabled,
-            self.stage_settings.delegation.cap,
-            self.stage_settings.host_resolution.cap,
-            self.stage_settings.supervisor_interval_seconds,
-            self.stage_settings.pressure_window_seconds,
-            self.stage_settings.queue_pressure_ratio,
+            self.stage_concurrency.delegation,
+            self.stage_concurrency.host_resolution,
+            self.stage_concurrency.geo,
+            self.concurrency_settings.adaptive_enabled,
+            self.concurrency_settings.delegation.cap,
+            self.concurrency_settings.host_resolution.cap,
+            self.concurrency_settings.supervisor_interval_seconds,
+            self.concurrency_settings.pressure_window_seconds,
+            self.concurrency_settings.queue_pressure_ratio,
             self.prepared_metadata is not None,
         )
-        adaptive_enabled = self.stage_settings.adaptive_enabled
+        adaptive_enabled = self.concurrency_settings.adaptive_enabled
         geo_tasks = [
             asyncio.create_task(
-                self._geo_worker(queue_bundle), name=f"geo-static-worker-{index}"
+                self._geo_stage_consumer(queue_bundle),
+                name=f"geo-static-consumer-{index}",
             )
-            for index in range(self.stage_workers.geo)
+            for index in range(self.stage_concurrency.geo)
         ]
         result_task = asyncio.create_task(
             self._result_writer(queue_bundle), name="result-writer"
@@ -823,17 +848,17 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             host_resolution_supervisor = self._adaptive_supervisor(
                 stage_name="host-resolution",
                 queue=queue_bundle.delegation_to_host_resolution,
-                task_factory=lambda: self._host_resolution_worker(queue_bundle),
-                minimum=self.stage_settings.host_resolution.minimum,
-                cap=self.stage_settings.host_resolution.cap,
+                task_factory=lambda: self._host_resolution_stage_consumer(queue_bundle),
+                minimum=self.concurrency_settings.host_resolution.minimum,
+                cap=self.concurrency_settings.host_resolution.cap,
                 capacity_groups=self.dns_capacity_groups.host_resolution,
             )
             delegation_supervisor = self._adaptive_supervisor(
                 stage_name="delegation",
                 queue=queue_bundle.delegation_input,
-                task_factory=lambda: self._delegation_worker(queue_bundle),
-                minimum=self.stage_settings.delegation.minimum,
-                cap=self.stage_settings.delegation.cap,
+                task_factory=lambda: self._delegation_stage_consumer(queue_bundle),
+                minimum=self.concurrency_settings.delegation.minimum,
+                cap=self.concurrency_settings.delegation.cap,
                 capacity_groups=self.dns_capacity_groups.delegation,
             )
             await host_resolution_supervisor.start()
@@ -843,17 +868,17 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         else:
             delegation_tasks = [
                 asyncio.create_task(
-                    self._delegation_worker(queue_bundle),
-                    name=f"delegation-static-worker-{index}",
+                    self._delegation_stage_consumer(queue_bundle),
+                    name=f"delegation-static-consumer-{index}",
                 )
-                for index in range(self.stage_workers.delegation)
+                for index in range(self.stage_concurrency.delegation)
             ]
             host_resolution_tasks = [
                 asyncio.create_task(
-                    self._host_resolution_worker(queue_bundle),
-                    name=f"host-resolution-static-worker-{index}",
+                    self._host_resolution_stage_consumer(queue_bundle),
+                    name=f"host-resolution-static-consumer-{index}",
                 )
-                for index in range(self.stage_workers.host_resolution)
+                for index in range(self.stage_concurrency.host_resolution)
             ]
         loader_task = asyncio.create_task(
             self._load_delegation_input(
@@ -889,11 +914,11 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 await asyncio.gather(*delegation_tasks)
             logger.debug("Async pipeline delegation_input drained")
             if host_resolution_supervisor is None:
-                for _ in range(self.stage_workers.host_resolution):
+                for _ in range(self.stage_concurrency.host_resolution):
                     await queue_bundle.delegation_to_host_resolution.put(None)
                 logger.debug(
                     "Async pipeline sent host-resolution sentinels count=%d",
-                    self.stage_workers.host_resolution,
+                    self.stage_concurrency.host_resolution,
                 )
             logger.debug(
                 "Async pipeline waiting for delegation_to_host_resolution drain"
@@ -914,11 +939,11 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             else:
                 await asyncio.gather(*host_resolution_tasks)
             logger.debug("Async pipeline delegation_to_host_resolution drained")
-            for _ in range(self.stage_workers.geo):
+            for _ in range(self.stage_concurrency.geo):
                 await queue_bundle.host_resolution_to_geo.put(None)
             logger.debug(
                 "Async pipeline sent geo sentinels count=%d",
-                self.stage_workers.geo,
+                self.stage_concurrency.geo,
             )
             logger.debug("Async pipeline waiting for host_resolution_to_geo drain")
             await self._join_or_raise(queue_bundle.host_resolution_to_geo, geo_tasks)
