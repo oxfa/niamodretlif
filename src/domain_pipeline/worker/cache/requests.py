@@ -23,6 +23,11 @@ class DelegationCacheWriteRequest:
     nameservers: list[str]
     checked_at: datetime
     ttl_days: int
+    soa_exists: bool = False
+    soa_nodata: bool = False
+    soa_nxdomain: bool = False
+    soa_timeout: bool = False
+    soa_servfail: bool = False
 
 
 @dataclass(frozen=True)

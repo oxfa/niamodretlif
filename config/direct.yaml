@@ -7,8 +7,9 @@ version: 2
 # manual_filter_pass and manual_add entries require DNS delegation when they
 # have a registrable domain. Source-matched public suffix manual_filter_pass
 # entries route to filtered during prepare because there is no registrable
-# domain to query. When delegation is actionable they bypass host-resolution
-# and geo checks and route to filtered. manual_add takes precedence over
+# domain to query. Actionable delegation means NS records exist, or NS returns
+# NODATA while same-owner SOA exists. When delegation is actionable they bypass
+# host-resolution and geo checks and route to filtered. manual_add takes precedence over
 # matching source entries for the same host. manual_filter_out skips
 # delegation, host resolution, and geo and routes to review. Other
 # public-suffix inputs are prepare-owned review/audit rows.
@@ -19,8 +20,9 @@ defaults:
 
   dns:
     # Delegation and host-resolution use separate resolver pools. Delegation
-    # NS queries use the platform resolver plus Cloudflare Public DNS, Control D
-    # unfiltered, and DNS.SB with ECS disabled. Resolver entries can omit
+    # NS queries and SOA fallback for NS NODATA use the platform resolver plus
+    # Cloudflare Public DNS, Control D unfiltered, and DNS.SB with ECS disabled.
+    # Resolver entries can omit
     # weight for stage-local traffic preference, not rate control. Per-provider
     # qps_per_worker values are worker-local project safety caps, not
     # provider-published guarantees.
@@ -121,7 +123,9 @@ runtime:
 
 cache:
   classification_ttl_days:
+    # NS-present and NS-NODATA with same-owner SOA use the actionable TTL.
     dns_delegation_actionable: 7
+    # Stable unactionable delegation, including NS-NODATA with SOA absent.
     dns_delegation_unactionable: 1
   dns_ttl_days: 7
   dns_host_resolution_ttl_days:

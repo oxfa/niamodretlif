@@ -12,10 +12,12 @@ version: 2
 # manual_filter_pass and manual_add entries require DNS delegation on the
 # registrable domain. Source-matched public suffix manual_filter_pass entries
 # route to filtered during prepare because there is no registrable domain to
-# query. If delegation is actionable, manual_filter_pass and manual_add skip
-# host-resolution and geo and route to filtered. manual_add takes precedence
-# over matching source entries for the same host. If delegation is not
-# actionable, they route to unactionable or review using the normal delegation
+# query. Delegation is actionable when NS records exist, or when NS returns
+# NODATA and same-owner SOA exists. If delegation is actionable,
+# manual_filter_pass and manual_add skip host-resolution and geo and route to
+# filtered. manual_add takes precedence over matching source entries for the
+# same host. If delegation is not actionable, they route to unactionable or
+# review using the normal delegation
 # result. Unmatched manual_add entries require all enabled sources to share
 # delegation/output behavior. Unmatched manual_filter_pass entries route to
 # review without delegation or host-resolution lookup because they are operator
@@ -27,8 +29,8 @@ version: 2
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.
 # - review: uncertain or operator-attention rows.
-# - unactionable: rows whose registrable domain currently has no usable DNS
-#   delegation by NS lookup.
+# - unactionable: rows whose registrable domain has no actionable delegation,
+#   including NS NODATA with SOA absent.
 # Duplicate host collapse is keyed by final host and compares dns.delegation,
 # dns.host_resolution, geo, and output behavior across enabled sources. For
 # manual_add-matched hosts, only delegation/output behavior must match because
@@ -89,10 +91,11 @@ defaults:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
-    # Mandatory NS lookup for the parsed registrable domain. Delegation does
-    # not use ECS. Stage-level resolvers/timeout/query_rate_limit override
-    # the top-level DNS defaults when present.
-    # Timeout/SERVFAIL are retried up to this stage-specific attempt count and
+    # Mandatory NS lookup for the parsed registrable domain, with same-stage
+    # SOA fallback when NS returns NODATA. Delegation does not use ECS.
+    # Stage-level resolvers/timeout/query_rate_limit override the top-level
+    # DNS defaults when present. Timeout/SERVFAIL, including SOA fallback
+    # timeout/SERVFAIL, are retried up to this stage-specific attempt count and
     # are not cached after retry exhaustion.
     delegation:
       # Example non-ECS delegation pool:
@@ -204,10 +207,12 @@ runtime:
 
 cache:
   classification_ttl_days:
-    # Cache retention, in days, for delegated registrable domains.
+    # Cache retention, in days, for actionable registrable domains: NS-present
+    # or NS-NODATA with same-owner SOA present.
     dns_delegation_actionable: 7
-    # Cache retention, in days, for registrable domains without usable NS
-    # delegation. Transient timeout/SERVFAIL delegation results are not cached.
+    # Cache retention, in days, for stable unactionable delegation, including
+    # NS-NODATA with SOA absent. Transient timeout/SERVFAIL delegation results
+    # are not cached.
     dns_delegation_unactionable: 1
   # Cache retention, in days, for stable exact-host dns.host_resolution results.
   # This legacy scalar remains the fallback for resolved host-resolution rows.

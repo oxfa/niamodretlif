@@ -13,6 +13,9 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.worker.dns.result_codes import (
+    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_ABSENT,
+    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL,
+    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL,
     PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
     PIPELINE_RESULT_CODE_DNS_HOST_NODATA,
@@ -29,6 +32,8 @@ from domain_pipeline.worker.geo.result_codes import (
     GEO_REVIEW_PIPELINE_RESULT_CODES,
 )
 from domain_pipeline.worker.output.review_labels import (
+    REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL,
+    REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT,
     REVIEW_LABEL_DNS_DELEGATION_SERVFAIL,
     REVIEW_LABEL_DNS_DELEGATION_TIMEOUT,
     REVIEW_LABEL_DNS_HOST_RESOLUTION_FILTERED_OUT,
@@ -116,6 +121,16 @@ def public_review_label(row: dict[str, Any]) -> str:
         return REVIEW_LABEL_DNS_DELEGATION_TIMEOUT
     if pipeline_result_code == PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL:
         return REVIEW_LABEL_DNS_DELEGATION_SERVFAIL
+    if (
+        pipeline_result_code
+        == PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT
+    ):
+        return REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT
+    if (
+        pipeline_result_code
+        == PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL
+    ):
+        return REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL
     if pipeline_result_code in HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES:
         return REVIEW_LABEL_DNS_HOST_RESOLUTION_FILTERED_OUT
     if pipeline_result_code in GEO_REVIEW_PIPELINE_RESULT_CODES:
@@ -155,6 +170,15 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         ),
         PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL: (
             "NS delegation lookup returned SERVFAIL after retries"
+        ),
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_ABSENT: (
+            "NS delegation returned NODATA and SOA was absent"
+        ),
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT: (
+            "NS delegation returned NODATA and SOA fallback timed out after retries"
+        ),
+        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL: (
+            "NS delegation returned NODATA and SOA fallback returned SERVFAIL after retries"
         ),
         PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN: "host resolution returned NXDOMAIN",
         PIPELINE_RESULT_CODE_DNS_HOST_NODATA: "host resolution returned NODATA",

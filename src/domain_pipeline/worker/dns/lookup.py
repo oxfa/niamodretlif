@@ -11,7 +11,10 @@ import socket
 from typing import Any
 
 import dns.exception
+import dns.message
+import dns.rcode
 import dns.resolver
+import dns.rdatatype
 
 from domain_pipeline.worker.dns.query_coordinator import (
     DNSEndpoint,
@@ -309,7 +312,7 @@ def host_resolution_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
 
 @dataclasses.dataclass(frozen=True)
 class DelegationResult:
-    """Result of the mandatory NS delegation query for a registrable domain."""
+    """Result of delegation NS lookup with SOA fallback for NS NODATA."""
 
     domain: str
     ns_exists: bool = False
@@ -317,6 +320,12 @@ class DelegationResult:
     ns_nxdomain: bool = False
     ns_timeout: bool = False
     ns_servfail: bool = False
+    soa_exists: bool = False
+    soa_nodata: bool = False
+    soa_nxdomain: bool = False
+    soa_timeout: bool = False
+    soa_servfail: bool = False
+    soa_source: str = ""
     no_nameservers: bool = False
     nameservers: list[str] = dataclasses.field(default_factory=list)
     from_cache: bool = False
@@ -328,6 +337,14 @@ class DelegationResult:
             return "exists"
         if self.ns_nxdomain:
             return "nxdomain"
+        if self.ns_nodata and self.soa_exists:
+            return "ns_nodata_soa_exists"
+        if self.ns_nodata and (self.soa_nodata or self.soa_nxdomain):
+            return "ns_nodata_soa_absent"
+        if self.ns_nodata and self.soa_timeout:
+            return "ns_nodata_soa_timeout"
+        if self.ns_nodata and self.soa_servfail:
+            return "ns_nodata_soa_servfail"
         if self.ns_nodata:
             return "nodata"
         if self.no_nameservers:
@@ -341,7 +358,7 @@ class DelegationResult:
     @property
     def actionable(self) -> bool:
         """Return whether the domain is delegated and currently actionable."""
-        return self.status == "exists"
+        return self.status in {"exists", "ns_nodata_soa_exists"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -621,14 +638,14 @@ class DomainChecker:
         """Return a deterministic cache key for the host-resolution resolver profile."""
         return self.host_resolution_query_coordinator.resolver_key()
 
-    def _resolve_record(self, name: str, record_type: str, retry_attempts: int) -> Any:
-        """Resolve one DNS record type through the coordinator-owned retry budget."""
-        stage = "delegation" if record_type == "NS" else "host_resolution"
-        coordinator = (
-            self.delegation_query_coordinator
-            if stage == "delegation"
-            else self.host_resolution_query_coordinator
-        )
+    def _resolve_with_coordinator(
+        self,
+        coordinator: DNSQueryCoordinatorBase,
+        name: str,
+        record_type: str,
+        retry_attempts: int,
+    ) -> Any:
+        """Resolve one DNS record type through one explicit stage coordinator."""
         try:
             return coordinator.resolve(
                 name,
@@ -640,14 +657,150 @@ class DomainChecker:
                 str(exc.last_error), last_error=exc.last_error
             ) from exc
 
+    def _resolve_delegation_record(
+        self, name: str, record_type: str, retry_attempts: int
+    ) -> Any:
+        """Resolve one delegation-stage DNS record with the delegation profile."""
+        return self._resolve_with_coordinator(
+            self.delegation_query_coordinator,
+            name,
+            record_type,
+            retry_attempts,
+        )
+
+    def _resolve_host_record(
+        self, name: str, record_type: str, retry_attempts: int
+    ) -> Any:
+        """Resolve one host-resolution DNS record with the host profile."""
+        return self._resolve_with_coordinator(
+            self.host_resolution_query_coordinator,
+            name,
+            record_type,
+            retry_attempts,
+        )
+
+    @staticmethod
+    def _normalize_dns_name(name: Any) -> str:
+        """Return a lower-case DNS owner name without the root-dot suffix."""
+        return str(name).rstrip(".").lower()
+
+    def _response_matches_question(
+        self, response: dns.message.Message, domain: str, record_type: str
+    ) -> bool:
+        """Return whether a response belongs to the expected DNS question."""
+        if response.rcode() != dns.rcode.NOERROR or not response.question:
+            return False
+        question = response.question[0]
+        return (
+            self._normalize_dns_name(question.name) == self._normalize_dns_name(domain)
+            and dns.rdatatype.to_text(question.rdtype).upper() == record_type.upper()
+        )
+
+    def _response_has_same_owner_authority_soa(
+        self, response: dns.message.Message | None, domain: str
+    ) -> bool:
+        """Return whether the original NS NODATA response proves same-owner SOA."""
+        if response is None or not self._response_matches_question(
+            response, domain, "NS"
+        ):
+            return False
+        normalized_domain = self._normalize_dns_name(domain)
+        return any(
+            rrset.rdtype == dns.rdatatype.SOA
+            and self._normalize_dns_name(rrset.name) == normalized_domain
+            for rrset in response.authority
+        )
+
+    def _noanswer_response(
+        self, exc: dns.resolver.NoAnswer
+    ) -> dns.message.Message | None:
+        """Return the response carried by dnspython NoAnswer when available."""
+        try:
+            response = exc.response()
+        except (KeyError, AttributeError):
+            return None
+        return response if isinstance(response, dns.message.Message) else None
+
+    def _soa_answer_exists_for_domain(self, answer: Any, domain: str) -> bool:
+        """Return whether an explicit SOA answer proves SOA at the queried domain."""
+        rrset = getattr(answer, "rrset", None)
+        if rrset is not None:
+            return rrset.rdtype == dns.rdatatype.SOA and self._normalize_dns_name(
+                rrset.name
+            ) == self._normalize_dns_name(domain)
+        try:
+            return any(True for _record in answer)
+        except TypeError:
+            return bool(answer)
+
+    def _delegation_nodata_with_soa_fallback(
+        self, domain: str, exc: dns.resolver.NoAnswer
+    ) -> DelegationResult:
+        """Resolve NS NODATA by reusing authority SOA or querying SOA directly."""
+        response = self._noanswer_response(exc)
+        if self._response_has_same_owner_authority_soa(response, domain):
+            logger.debug(
+                "DNS delegation NS NODATA reused authority SOA domain=%s soa_source=%s",
+                domain,
+                "ns_authority",
+            )
+            return DelegationResult(
+                domain=domain,
+                ns_nodata=True,
+                soa_exists=True,
+                soa_source="ns_authority",
+            )
+        logger.debug(
+            "DNS delegation NS NODATA starting SOA fallback domain=%s soa_source=%s",
+            domain,
+            "soa_query",
+        )
+        try:
+            answer = self._resolve_delegation_record(
+                domain, "SOA", self.delegation_retry_attempts
+            )
+        except dns.resolver.NXDOMAIN:
+            result = DelegationResult(domain=domain, ns_nodata=True, soa_nxdomain=True)
+        except dns.resolver.NoAnswer:
+            result = DelegationResult(domain=domain, ns_nodata=True, soa_nodata=True)
+        except RetryableDNSLookupError as fallback_exc:
+            result = (
+                DelegationResult(domain=domain, ns_nodata=True, soa_timeout=True)
+                if fallback_exc.is_timeout
+                else DelegationResult(domain=domain, ns_nodata=True, soa_servfail=True)
+            )
+        except (dns.exception.DNSException, socket.gaierror):
+            result = DelegationResult(domain=domain, ns_nodata=True, soa_servfail=True)
+        else:
+            result = (
+                DelegationResult(
+                    domain=domain,
+                    ns_nodata=True,
+                    soa_exists=True,
+                    soa_source="soa_query",
+                )
+                if self._soa_answer_exists_for_domain(answer, domain)
+                else DelegationResult(domain=domain, ns_nodata=True, soa_nodata=True)
+            )
+        logger.debug(
+            "DNS delegation NS NODATA SOA fallback completed domain=%s status=%s "
+            "soa_source=%s",
+            domain,
+            result.status,
+            result.soa_source or "soa_query",
+        )
+        return result
+
     def delegation_lookup(self, domain: str) -> DelegationResult:
         """Query NS records for one registrable domain."""
         try:
-            answer = self._resolve_record(domain, "NS", self.delegation_retry_attempts)
+            answer = self._resolve_delegation_record(
+                domain, "NS", self.delegation_retry_attempts
+            )
         except dns.resolver.NXDOMAIN:
             return DelegationResult(domain=domain, ns_nxdomain=True)
-        except dns.resolver.NoAnswer:
-            return DelegationResult(domain=domain, ns_nodata=True)
+        except dns.resolver.NoAnswer as exc:
+            return self._delegation_nodata_with_soa_fallback(domain, exc)
         except RetryableDNSLookupError as exc:
             if exc.is_timeout:
                 return DelegationResult(domain=domain, ns_timeout=True)
@@ -672,7 +825,9 @@ class DomainChecker:
         cname: str | None = None
         addresses: list[str] = []
         try:
-            answer = self._resolve_record(host, record_type, self.host_retry_attempts)
+            answer = self._resolve_host_record(
+                host, record_type, self.host_retry_attempts
+            )
             for rr in answer:
                 if record_type in {"A", "AAAA"}:
                     address = str(rr)
