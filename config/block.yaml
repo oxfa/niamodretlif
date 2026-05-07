@@ -86,12 +86,26 @@ defaults:
     directory: output
 
 runtime:
-  # Delegation concurrency is worker-local root-level NS lookup concurrency.
-  # Host-resolution and geo concurrency remain host-level.
+  # Worker-local async stage concurrency inside one GitHub matrix worker.
+  # Delegation and host-resolution can adapt between minimums and caps; geo is
+  # static in this runtime version. Workflow matrix concurrency is separate.
   stage_workers:
-    delegation: 20
-    host_resolution: 20
-    geo: 8
+    minimums:
+      delegation: 20
+      host_resolution: 20
+      geo: 8
+    adaptive:
+      enabled: true
+      delegation_enabled: true
+      host_resolution_enabled: true
+      supervisor_interval_seconds: 1.0
+      busy_scale_up_after_seconds: 5.0
+      idle_scale_down_after_seconds: 5.0
+      pressure_window_seconds: 5.0
+      queue_pressure_ratio: 0.8
+      max_worker_multiplier: 4
+      scale_up_step: 1
+      scale_down_step: 1
 
 cache:
   classification_ttl_days:
