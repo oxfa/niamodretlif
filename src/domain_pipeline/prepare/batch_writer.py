@@ -23,6 +23,14 @@ from domain_pipeline.prepare.planner import PreparationPlanner
 from domain_pipeline.worker.output.rows import build_review_output_row
 
 
+def _txt_output_value(row: dict[str, Any]) -> str:
+    """Return the public TXT value for one prepare-owned filtered row."""
+    input_name = str(row.get("input_name", "")).strip()
+    if input_name:
+        return input_name
+    return str(row["host"])
+
+
 @dataclass
 class PreparedBatch:
     """All committed batch artifacts written by the prepare step."""
@@ -31,6 +39,7 @@ class PreparedBatch:
     config_name: str
     prepare_aggregate_manifest: PrepareAggregateManifest
     worker_manifests: list[PreparedWorkerManifest]
+    preparation_filtered_output_values: list[str]
     preparation_review_rows: list[dict[str, Any]]
     preparation_terminal_rows: list[dict[str, Any]]
 
@@ -79,7 +88,7 @@ class PreparedBatchWriter:
             prepared_inputs
         )
         total_work_units = len(planning_inputs.root_plans)
-        if total_work_units < 1 and not prepared_inputs.preparation_review_rows:
+        if total_work_units < 1 and not prepared_inputs.preparation_terminal_rows:
             raise ValueError("config produced no input lines to process")
         participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
         if total_work_units > 0 and not participating_worker_ids:
@@ -120,6 +129,11 @@ class PreparedBatchWriter:
             for row in prepared_inputs.preparation_terminal_rows
             if row["host"] not in matched_manual_hosts
         ]
+        preparation_filtered_output_values = sorted(
+            _txt_output_value(row)
+            for row in preparation_terminal_rows
+            if row.get("route") == "filtered"
+        )
         return PreparedBatch(
             batch_id=batch_id,
             config_name=config_name,
@@ -133,6 +147,7 @@ class PreparedBatchWriter:
                     prepared_inputs.config
                 ),
                 worker_ids=[manifest.worker_id for manifest in worker_manifests],
+                preparation_filtered_output_values=preparation_filtered_output_values,
                 preparation_review_output_rows=[
                     dict(build_review_output_row(row))
                     for row in preparation_review_rows
@@ -140,6 +155,7 @@ class PreparedBatchWriter:
                 preparation_terminal_rows=preparation_terminal_rows,
             ),
             worker_manifests=worker_manifests,
+            preparation_filtered_output_values=preparation_filtered_output_values,
             preparation_review_rows=preparation_review_rows,
             preparation_terminal_rows=preparation_terminal_rows,
         )

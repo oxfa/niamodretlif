@@ -12,6 +12,7 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.prepare.config.loader import (
@@ -83,6 +84,22 @@ def _public_suffix_review_row(
         source_context=_source_context_from_job(job),
         entry=prepared_entry.entry,
         pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+        source_id_override=prepared_entry.source_id_override,
+        source_input_label_override=prepared_entry.source_input_label_override,
+        source_ids=prepared_entry.source_ids,
+        source_input_labels=prepared_entry.source_input_labels,
+    )
+
+
+def _manual_filter_pass_public_suffix_row(
+    *,
+    job: SourceJob,
+    prepared_entry: PreparedHostEntry,
+) -> dict[str, Any]:
+    return build_base_row(
+        source_context=_source_context_from_job(job),
+        entry=prepared_entry.entry,
+        pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
         source_id_override=prepared_entry.source_id_override,
         source_input_label_override=prepared_entry.source_input_label_override,
         source_ids=prepared_entry.source_ids,
@@ -378,15 +395,25 @@ class PreparationPlanner:
                 prepared_entry.entry.is_public_suffix_input
                 or not prepared_entry.entry.registrable_domain
             ):
-                row = _public_suffix_review_row(
-                    job=source_jobs_by_id[prepared_entry.source_id],
-                    prepared_entry=prepared_entry,
-                )
-                preparation_review_rows.append(row)
+                if prepared_entry.manual_filter_pass:
+                    pipeline_result_code = (
+                        PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
+                    )
+                    row = _manual_filter_pass_public_suffix_row(
+                        job=source_jobs_by_id[prepared_entry.source_id],
+                        prepared_entry=prepared_entry,
+                    )
+                else:
+                    pipeline_result_code = PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX
+                    row = _public_suffix_review_row(
+                        job=source_jobs_by_id[prepared_entry.source_id],
+                        prepared_entry=prepared_entry,
+                    )
+                    preparation_review_rows.append(row)
                 preparation_terminal_rows.append(
                     _preparation_terminal_row(
                         row=row,
-                        pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+                        pipeline_result_code=pipeline_result_code,
                     )
                 )
                 continue
