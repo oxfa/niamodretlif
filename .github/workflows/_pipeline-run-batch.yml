@@ -302,9 +302,11 @@ jobs:
         continue-on-error: true
         run: |
           set -eo pipefail
-          # The prepare step emits root-atomic worker manifests. Inside this
-          # worker, dns.delegation concurrency processes registrable-domain root
-          # work items and fans each NS lookup result out to host-level stages.
+          # The prepare step emits root-atomic worker manifests. Matrix
+          # max-parallel controls GitHub worker count; runtime.stage_workers
+          # controls worker-local async concurrency. Delegation and
+          # host-resolution may adapt inside this worker while preserving
+          # root-level delegation fanout to host-level stages.
           python -m domain_pipeline.pipeline_run worker \
             --source-root . \
             --state-root . \

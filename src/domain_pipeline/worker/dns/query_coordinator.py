@@ -45,6 +45,37 @@ class DNSProviderRateLimit:
 
 
 @dataclasses.dataclass(frozen=True)
+class DNSTokenBucketSnapshot:
+    """Point-in-time token bucket capacity without consuming a token."""
+
+    capacity: int
+    available_tokens: float
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSPendingQuerySnapshot:
+    """Point-in-time pending-query capacity."""
+
+    max_pending: int
+    in_use: int
+    available: int
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSProviderCapacitySnapshot:  # pylint: disable=too-many-instance-attributes
+    """Process-local DNS provider capacity and recent pressure."""
+
+    provider: str
+    qps_per_worker: float | None
+    burst: int | None
+    max_pending: int | None
+    available_tokens: float | None
+    pending_in_use: int
+    pending_available: int | None
+    recent_pressure: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class DNSQueryCoordinatorConfig:
     """Normalized query coordination settings used by the registry key."""
 
@@ -114,6 +145,7 @@ class TokenBucketRateLimiter:
         self._tokens = float(self.capacity)
         self._updated_at = time.monotonic()
         self._lock = threading.Lock()
+        self._pressure_events: list[float] = []
 
     def _refill_locked(self, now: float) -> None:
         """Refill tokens using a caller-held lock."""
@@ -126,6 +158,7 @@ class TokenBucketRateLimiter:
         with self._lock:
             self._refill_locked(time.monotonic())
             if self._tokens < 1.0:
+                self._record_pressure_locked(time.monotonic())
                 return False
             self._tokens -= 1.0
             return True
@@ -148,19 +181,82 @@ class TokenBucketRateLimiter:
             total_wait_seconds += wait_seconds
             time.sleep(wait_seconds)
 
+    def snapshot(self) -> DNSTokenBucketSnapshot:
+        """Return current token capacity without consuming a token."""
+        with self._lock:
+            self._refill_locked(time.monotonic())
+            return DNSTokenBucketSnapshot(
+                capacity=self.capacity,
+                available_tokens=max(self._tokens, 0.0),
+            )
+
+    def has_recent_pressure(self, *, window_seconds: float) -> bool:
+        """Return whether token pressure was observed within the window."""
+        with self._lock:
+            self._prune_pressure_events_locked(
+                now=time.monotonic(), window_seconds=window_seconds
+            )
+            return bool(self._pressure_events)
+
+    def _record_pressure_locked(self, now: float) -> None:
+        """Record a token wait/shortage event using a caller-held lock."""
+        self._pressure_events.append(now)
+
+    def _prune_pressure_events_locked(
+        self, *, now: float, window_seconds: float
+    ) -> None:
+        """Drop pressure events older than the configured window."""
+        cutoff = now - max(float(window_seconds), 0.0)
+        self._pressure_events = [
+            event_at for event_at in self._pressure_events if event_at >= cutoff
+        ]
+
 
 class PendingQueryLimiter:
     """Thread-safe pending-query guard for one DNS provider."""
 
     def __init__(self, max_pending: int) -> None:
-        self._semaphore = threading.BoundedSemaphore(max(1, int(max_pending)))
+        self._max_pending = max(1, int(max_pending))
+        self._semaphore = threading.BoundedSemaphore(self._max_pending)
+        self._lock = threading.Lock()
+        self._in_use = 0
+        self._pressure_events: list[float] = []
 
     @contextmanager
     def slot(self) -> Iterator[float]:
         """Hold one pending-query slot and yield wait seconds."""
         started_at = time.monotonic()
-        with self._semaphore:
-            yield max(time.monotonic() - started_at, 0.0)
+        self._semaphore.acquire()
+        wait_seconds = max(time.monotonic() - started_at, 0.0)
+        with self._lock:
+            self._in_use += 1
+            if wait_seconds > 0.001:
+                self._pressure_events.append(time.monotonic())
+        try:
+            yield wait_seconds
+        finally:
+            with self._lock:
+                self._in_use -= 1
+            self._semaphore.release()
+
+    def snapshot(self) -> DNSPendingQuerySnapshot:
+        """Return current pending slot usage."""
+        with self._lock:
+            in_use = self._in_use
+        return DNSPendingQuerySnapshot(
+            max_pending=self._max_pending,
+            in_use=in_use,
+            available=max(self._max_pending - in_use, 0),
+        )
+
+    def has_recent_pressure(self, *, window_seconds: float) -> bool:
+        """Return whether pending-slot pressure was observed within the window."""
+        with self._lock:
+            cutoff = time.monotonic() - max(float(window_seconds), 0.0)
+            self._pressure_events = [
+                event_at for event_at in self._pressure_events if event_at >= cutoff
+            ]
+            return bool(self._pressure_events)
 
 
 class DNSQueryCoordinatorBase:
@@ -267,6 +363,55 @@ class DNSQueryCoordinatorBase:
         """Return static limiter counts for deterministic tests."""
         with cls._limiter_lock:
             return len(cls._token_limiters), len(cls._pending_limiters)
+
+    @classmethod
+    def provider_capacity_snapshot(
+        cls, *, rate_limit_enabled: bool, pressure_window_seconds: float
+    ) -> tuple[DNSProviderCapacitySnapshot, ...]:
+        """Return deduped provider-policy capacity snapshots."""
+        if not rate_limit_enabled:
+            return (
+                DNSProviderCapacitySnapshot(
+                    provider="unlimited",
+                    qps_per_worker=None,
+                    burst=None,
+                    max_pending=None,
+                    available_tokens=None,
+                    pending_in_use=0,
+                    pending_available=None,
+                    recent_pressure=False,
+                ),
+            )
+        snapshots: list[DNSProviderCapacitySnapshot] = []
+        with cls._limiter_lock:
+            policy_keys = sorted(cls._token_limiters)
+            for provider, qps_per_worker, burst, max_pending in policy_keys:
+                token_limiter = cls._token_limiters[
+                    (provider, qps_per_worker, burst, max_pending)
+                ]
+                pending_limiter = cls._pending_limiters[
+                    (provider, qps_per_worker, burst, max_pending)
+                ]
+                token_snapshot = token_limiter.snapshot()
+                pending_snapshot = pending_limiter.snapshot()
+                recent_pressure = token_limiter.has_recent_pressure(
+                    window_seconds=pressure_window_seconds
+                ) or pending_limiter.has_recent_pressure(
+                    window_seconds=pressure_window_seconds
+                )
+                snapshots.append(
+                    DNSProviderCapacitySnapshot(
+                        provider=provider,
+                        qps_per_worker=qps_per_worker,
+                        burst=burst,
+                        max_pending=max_pending,
+                        available_tokens=token_snapshot.available_tokens,
+                        pending_in_use=pending_snapshot.in_use,
+                        pending_available=pending_snapshot.available,
+                        recent_pressure=recent_pressure,
+                    )
+                )
+        return tuple(snapshots)
 
     def resolver_key(self) -> str:
         """Return the pool-level resolver cache key."""
@@ -643,6 +788,16 @@ class DNSQueryCoordinatorRegistry:
         with cls._lock:
             cls._coordinators.clear()
         DNSQueryCoordinatorBase.clear_shared_limiters()
+
+    @classmethod
+    def provider_capacity_snapshot(
+        cls, *, rate_limit_enabled: bool, pressure_window_seconds: float
+    ) -> tuple[DNSProviderCapacitySnapshot, ...]:
+        """Return shared DNS provider capacity for adaptive runtime decisions."""
+        return DNSQueryCoordinatorBase.provider_capacity_snapshot(
+            rate_limit_enabled=rate_limit_enabled,
+            pressure_window_seconds=pressure_window_seconds,
+        )
 
 
 def provider_for_nameserver(nameserver: str | None) -> str:

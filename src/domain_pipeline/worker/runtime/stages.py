@@ -22,6 +22,7 @@ from domain_pipeline.worker.runtime.contracts import (
     HostResolutionWorkItem,
     ParsedHostItem,
 )
+from domain_pipeline.worker.runtime.busy_state import BusyReason
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 
 
@@ -34,15 +35,17 @@ class DelegationStage:
     async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume root-level delegation input and route each host result."""
         while True:
-            work_item = await queue_bundle.delegation_input.get()
+            async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
+                work_item = await queue_bundle.delegation_input.get()
             try:
                 if work_item is None:
                     return
-                delegation_result = await self.runtime.lookup_delegation_root(
-                    work_item.delegation_source_context,
-                    work_item.registrable_domain,
-                )
-                await self.route_root(queue_bundle, work_item, delegation_result)
+                async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
+                    delegation_result = await self.runtime.lookup_delegation_root(
+                        work_item.delegation_source_context,
+                        work_item.registrable_domain,
+                    )
+                    await self.route_root(queue_bundle, work_item, delegation_result)
             finally:
                 queue_bundle.delegation_input.task_done()
 
@@ -100,9 +103,12 @@ class DelegationStage:
                 delegation_result=delegation_result,
             )
             return
-        await queue_bundle.delegation_to_host_resolution.put(
-            HostResolutionWorkItem(parsed=parsed, delegation_result=delegation_result)
-        )
+        async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
+            await queue_bundle.delegation_to_host_resolution.put(
+                HostResolutionWorkItem(
+                    parsed=parsed, delegation_result=delegation_result
+                )
+            )
 
 
 class HostResolutionStage:
@@ -114,14 +120,16 @@ class HostResolutionStage:
     async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume host-resolution work and route review, filtered, or geo cases."""
         while True:
-            work_item = await queue_bundle.delegation_to_host_resolution.get()
+            async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
+                work_item = await queue_bundle.delegation_to_host_resolution.get()
             try:
                 if work_item is None:
                     return
-                host_resolution_result = await self.runtime.lookup_host_resolution(
-                    work_item.parsed.source_context, work_item.parsed.entry
-                )
-                await self.route(queue_bundle, work_item, host_resolution_result)
+                async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
+                    host_resolution_result = await self.runtime.lookup_host_resolution(
+                        work_item.parsed.source_context, work_item.parsed.entry
+                    )
+                    await self.route(queue_bundle, work_item, host_resolution_result)
             finally:
                 queue_bundle.delegation_to_host_resolution.task_done()
 
@@ -153,14 +161,15 @@ class HostResolutionStage:
                 host_resolution_result=host_resolution_result,
             )
             return
-        await queue_bundle.host_resolution_to_geo.put(
-            GeoWorkItem(
-                parsed=work_item.parsed,
-                delegation_result=work_item.delegation_result,
-                host_resolution_result=host_resolution_result,
-                pipeline_result_code=host_result_code,
+        async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
+            await queue_bundle.host_resolution_to_geo.put(
+                GeoWorkItem(
+                    parsed=work_item.parsed,
+                    delegation_result=work_item.delegation_result,
+                    host_resolution_result=host_resolution_result,
+                    pipeline_result_code=host_result_code,
+                )
             )
-        )
 
 
 class GeoStage:
@@ -172,25 +181,27 @@ class GeoStage:
     async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume geo work and emit terminal policy results."""
         while True:
-            work_item = await queue_bundle.host_resolution_to_geo.get()
+            async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
+                work_item = await queue_bundle.host_resolution_to_geo.get()
             try:
                 if work_item is None:
                     return
-                geo_result_code, geo_results, geo_policy = (
-                    await self.runtime.lookup_geo(
-                        work_item.parsed.source_context,
-                        work_item.host_resolution_result,
+                async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
+                    geo_result_code, geo_results, geo_policy = (
+                        await self.runtime.lookup_geo(
+                            work_item.parsed.source_context,
+                            work_item.host_resolution_result,
+                        )
                     )
-                )
-                await self.runtime.put_completed(
-                    queue_bundle,
-                    work_item.parsed,
-                    pipeline_result_code=geo_result_code,
-                    delegation_result=work_item.delegation_result,
-                    host_resolution_result=work_item.host_resolution_result,
-                    geo_results=geo_results,
-                    geo_policy=geo_policy,
-                )
+                    await self.runtime.put_completed(
+                        queue_bundle,
+                        work_item.parsed,
+                        pipeline_result_code=geo_result_code,
+                        delegation_result=work_item.delegation_result,
+                        host_resolution_result=work_item.host_resolution_result,
+                        geo_results=geo_results,
+                        geo_policy=geo_policy,
+                    )
             finally:
                 queue_bundle.host_resolution_to_geo.task_done()
 

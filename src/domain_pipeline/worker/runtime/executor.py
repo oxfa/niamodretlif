@@ -7,6 +7,8 @@ import dataclasses
 import logging
 import os
 from collections import Counter
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,19 @@ from domain_pipeline.worker.geo import (
 )
 from domain_pipeline.worker.output import ResultOutputWriter
 from domain_pipeline.worker.runtime.dns_factory import RuntimeDNSCheckerFactory
+from domain_pipeline.worker.dns.query_coordinator import DNSQueryCoordinatorRegistry
+from domain_pipeline.worker.runtime.adaptive import (
+    AdaptiveDNSPressureState,
+    AdaptiveStageDecisionEngine,
+    AdaptiveStageSupervisor,
+)
+from domain_pipeline.worker.runtime.busy_state import BusyReason, BusyStateRecorder
+from domain_pipeline.worker.runtime.capacity import (
+    DNSStageCapacityGroup,
+    RuntimeDNSCapacityGroups,
+    capacity_state_for_groups,
+    discover_dns_capacity_groups,
+)
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 from domain_pipeline.worker.runtime.results import CompletedResultFactory
@@ -75,15 +90,105 @@ class RuntimeStageWorkerCounts:
     geo: int
 
 
+@dataclasses.dataclass(frozen=True)
+class RuntimeStageAdaptiveSettings:
+    """Adaptive sizing for one worker-local runtime stage."""
+
+    minimum: int
+    cap: int
+    enabled: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeStageWorkerSettings:  # pylint: disable=too-many-instance-attributes
+    """Parsed worker-local runtime stage sizing settings."""
+
+    delegation: RuntimeStageAdaptiveSettings
+    host_resolution: RuntimeStageAdaptiveSettings
+    geo: RuntimeStageAdaptiveSettings
+    adaptive_enabled: bool
+    supervisor_interval_seconds: float
+    busy_scale_up_after_seconds: float
+    idle_scale_down_after_seconds: float
+    pressure_window_seconds: float
+    queue_pressure_ratio: float
+    scale_up_step: int
+    scale_down_step: int
+
+
 def _runtime_stage_worker_counts(config: dict[str, Any]) -> RuntimeStageWorkerCounts:
     """Return runtime stage worker counts with defaults for legacy payloads."""
     stage_workers = dict(config.get("runtime", {}).get("stage_workers", {}))
+    minimums = dict(stage_workers.get("minimums", {}))
+    if minimums:
+        stage_workers = minimums
     return RuntimeStageWorkerCounts(
         delegation=int(stage_workers.get("delegation", DNS_DELEGATION_STAGE_WORKERS)),
         host_resolution=int(
             stage_workers.get("host_resolution", DNS_HOST_RESOLUTION_STAGE_WORKERS)
         ),
         geo=int(stage_workers.get("geo", GEO_STAGE_WORKERS)),
+    )
+
+
+def _runtime_stage_worker_settings(
+    config: dict[str, Any],
+) -> RuntimeStageWorkerSettings:
+    """Return parsed runtime worker settings for adaptive and static modes."""
+    counts = _runtime_stage_worker_counts(config)
+    stage_workers = dict(config.get("runtime", {}).get("stage_workers", {}))
+    adaptive = dict(stage_workers.get("adaptive", {}))
+    adaptive_enabled = bool(adaptive.get("enabled", True))
+    multiplier = max(int(adaptive.get("max_worker_multiplier", 4)), 1)
+
+    def stage_settings(
+        minimum: int, *, adaptive_stage: bool = True
+    ) -> RuntimeStageAdaptiveSettings:
+        if not adaptive_enabled or not adaptive_stage:
+            return RuntimeStageAdaptiveSettings(
+                minimum=minimum, cap=minimum, enabled=False
+            )
+        return RuntimeStageAdaptiveSettings(
+            minimum=minimum,
+            cap=minimum * multiplier,
+            enabled=True,
+        )
+
+    return RuntimeStageWorkerSettings(
+        delegation=stage_settings(
+            counts.delegation,
+            adaptive_stage=bool(adaptive.get("delegation_enabled", True)),
+        ),
+        host_resolution=stage_settings(
+            counts.host_resolution,
+            adaptive_stage=bool(adaptive.get("host_resolution_enabled", True)),
+        ),
+        geo=stage_settings(counts.geo, adaptive_stage=False),
+        adaptive_enabled=adaptive_enabled,
+        supervisor_interval_seconds=float(
+            adaptive.get("supervisor_interval_seconds", 1.0)
+        ),
+        busy_scale_up_after_seconds=float(
+            adaptive.get("busy_scale_up_after_seconds", 5.0)
+        ),
+        idle_scale_down_after_seconds=float(
+            adaptive.get("idle_scale_down_after_seconds", 5.0)
+        ),
+        pressure_window_seconds=float(adaptive.get("pressure_window_seconds", 5.0)),
+        queue_pressure_ratio=float(adaptive.get("queue_pressure_ratio", 0.8)),
+        scale_up_step=int(adaptive.get("scale_up_step", 1)),
+        scale_down_step=int(adaptive.get("scale_down_step", 1)),
+    )
+
+
+def _runtime_dns_capacity_groups(
+    config: dict[str, Any],
+    *,
+    prepared_metadata: dict[str, Any] | None,
+) -> RuntimeDNSCapacityGroups:
+    """Return stage-specific DNS capacity groups for this runtime payload."""
+    return discover_dns_capacity_groups(
+        RuntimeItemLoader(config=config, prepared_metadata=prepared_metadata)
     )
 
 
@@ -129,9 +234,23 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         self.cache_reader = self.cache_bundle.reader
         self.cache_stats: Counter[str] = Counter()
         self.stage_workers = _runtime_stage_worker_counts(config)
+        self.stage_settings = _runtime_stage_worker_settings(config)
+        self.dns_capacity_groups = _runtime_dns_capacity_groups(
+            config,
+            prepared_metadata=prepared_metadata,
+        )
+        self.delegation_executor = ThreadPoolExecutor(
+            max_workers=self.stage_settings.delegation.cap,
+            thread_name_prefix="dns-delegation",
+        )
+        self.host_resolution_executor = ThreadPoolExecutor(
+            max_workers=self.stage_settings.host_resolution.cap,
+            thread_name_prefix="dns-host-resolution",
+        )
         self._delegation_tasks: dict[
             tuple[str, str], asyncio.Task[DelegationResult]
         ] = {}
+        self.busy_state = BusyStateRecorder()
 
     @classmethod
     def from_runtime_payload(
@@ -150,7 +269,12 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
 
     def close(self) -> None:
         """Close runtime resources."""
-        return
+        logger.debug(
+            "Runtime DNS executors shutdown requested wait=False "
+            "cancel_futures=True; running DNS calls may continue"
+        )
+        self.delegation_executor.shutdown(wait=False, cancel_futures=True)
+        self.host_resolution_executor.shutdown(wait=False, cancel_futures=True)
 
     def _delegation_from_cache_record(self, record: Any) -> DelegationResult:
         return DelegationResult(
@@ -240,7 +364,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
             self._delegation_tasks[task_key] = task
         try:
-            return await task
+            async with self.busy_state.track(BusyReason.INFLIGHT_JOIN):
+                return await task
         finally:
             if task.done() and self._delegation_tasks.get(task_key) is task:
                 self._delegation_tasks.pop(task_key, None)
@@ -254,14 +379,18 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
     ) -> DelegationResult:
         """Run or cache-read one root-level delegation lookup."""
         now = utc_now()
-        cached, source = await self.cache_reader.get_fresh_delegation_with_source(
-            registrable_domain, resolver_key, now
-        )
+        async with self.busy_state.track(BusyReason.CACHE_READ):
+            cached, source = await self.cache_reader.get_fresh_delegation_with_source(
+                registrable_domain, resolver_key, now
+            )
         if cached is not None:
             self._record_cache_hit("delegation", source)
             return self._delegation_from_cache_record(cached)
         self._record_cache_miss("delegation")
-        result = await AsyncDelegationTransport(checker).lookup(registrable_domain)
+        async with self.busy_state.track(BusyReason.LIVE_DNS):
+            result = await AsyncDelegationTransport(
+                checker, executor=self.delegation_executor
+            ).lookup(registrable_domain)
         if result.status in {"timeout", "servfail"}:
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
@@ -270,21 +399,22 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             if result.actionable
             else int(ttl_config["dns_delegation_unactionable"])
         )
-        await self.cache_bundle.writers[0].queue.put(
-            DelegationCacheWriteRequest(
-                domain=result.domain,
-                resolver_key=resolver_key,
-                ns_exists=result.ns_exists,
-                ns_nodata=result.ns_nodata,
-                ns_nxdomain=result.ns_nxdomain,
-                ns_timeout=result.ns_timeout,
-                ns_servfail=result.ns_servfail,
-                no_nameservers=result.no_nameservers,
-                nameservers=result.nameservers,
-                checked_at=now,
-                ttl_days=ttl_days,
+        async with self.busy_state.track(BusyReason.CACHE_WRITE_QUEUE_PUT):
+            await self.cache_bundle.writers[0].queue.put(
+                DelegationCacheWriteRequest(
+                    domain=result.domain,
+                    resolver_key=resolver_key,
+                    ns_exists=result.ns_exists,
+                    ns_nodata=result.ns_nodata,
+                    ns_nxdomain=result.ns_nxdomain,
+                    ns_timeout=result.ns_timeout,
+                    ns_servfail=result.ns_servfail,
+                    no_nameservers=result.no_nameservers,
+                    nameservers=result.nameservers,
+                    checked_at=now,
+                    ttl_days=ttl_days,
+                )
             )
-        )
         return result
 
     async def lookup_host_resolution(
@@ -294,9 +424,12 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
-        cached, source = await self.cache_reader.get_fresh_host_resolution_with_source(
-            entry.host, resolver_key, now
-        )
+        async with self.busy_state.track(BusyReason.CACHE_READ):
+            cached, source = (
+                await self.cache_reader.get_fresh_host_resolution_with_source(
+                    entry.host, resolver_key, now
+                )
+            )
         if cached is not None:
             cached_result = self._host_resolution_from_cache_record(cached)
             if cached_result.status != "unknown":
@@ -307,28 +440,32 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 entry.host,
             )
         self._record_cache_miss("host_resolution")
-        result = await AsyncHostResolutionTransport(checker).lookup(entry.host)
+        async with self.busy_state.track(BusyReason.LIVE_DNS):
+            result = await AsyncHostResolutionTransport(
+                checker, executor=self.host_resolution_executor
+            ).lookup(entry.host)
         if result.status in {"timeout", "servfail", "unknown"}:
             return result
         ttl_days = self._host_resolution_ttl_days(result)
         if ttl_days <= 0:
             return result
-        await self.cache_bundle.writers[1].queue.put(
-            HostResolutionCacheWriteRequest(
-                host=result.host,
-                resolver_key=resolver_key,
-                a_exists=result.a_exists,
-                a_nodata=result.a_nodata,
-                a_nxdomain=result.a_nxdomain,
-                a_timeout=result.a_timeout,
-                a_servfail=result.a_servfail,
-                canonical_name=result.canonical_name or "",
-                ipv4_addresses=result.ipv4_addresses,
-                ipv6_addresses=result.ipv6_addresses,
-                checked_at=now,
-                ttl_days=ttl_days,
+        async with self.busy_state.track(BusyReason.CACHE_WRITE_QUEUE_PUT):
+            await self.cache_bundle.writers[1].queue.put(
+                HostResolutionCacheWriteRequest(
+                    host=result.host,
+                    resolver_key=resolver_key,
+                    a_exists=result.a_exists,
+                    a_nodata=result.a_nodata,
+                    a_nxdomain=result.a_nxdomain,
+                    a_timeout=result.a_timeout,
+                    a_servfail=result.a_servfail,
+                    canonical_name=result.canonical_name or "",
+                    ipv4_addresses=result.ipv4_addresses,
+                    ipv6_addresses=result.ipv6_addresses,
+                    checked_at=now,
+                    ttl_days=ttl_days,
+                )
             )
-        )
         return result
 
     async def lookup_geo(
@@ -435,23 +572,26 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         geo_policy: Any | None = None,
     ) -> None:
         """Emit one terminal runtime result to the shared result queue."""
-        await queue_bundle.result_queue.put(
-            self._completed_result(
-                source_context=parsed.source_context,
-                entry=parsed.entry,
-                pipeline_result_code=pipeline_result_code,
-                delegation_result=delegation_result,
-                host_resolution_result=host_resolution_result,
-                geo_results=geo_results,
-                geo_policy=geo_policy,
-                provenance={
-                    "source_id_override": parsed.source_id_override,
-                    "source_input_label_override": parsed.source_input_label_override,
-                    "source_ids": parsed.source_ids,
-                    "source_input_labels": parsed.source_input_labels,
-                },
+        async with self.busy_state.track(BusyReason.RESULT_PUT):
+            await queue_bundle.result_queue.put(
+                self._completed_result(
+                    source_context=parsed.source_context,
+                    entry=parsed.entry,
+                    pipeline_result_code=pipeline_result_code,
+                    delegation_result=delegation_result,
+                    host_resolution_result=host_resolution_result,
+                    geo_results=geo_results,
+                    geo_policy=geo_policy,
+                    provenance={
+                        "source_id_override": parsed.source_id_override,
+                        "source_input_label_override": (
+                            parsed.source_input_label_override
+                        ),
+                        "source_ids": parsed.source_ids,
+                        "source_input_labels": parsed.source_input_labels,
+                    },
+                )
             )
-        )
 
     async def _delegation_worker(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume worker-local delegation input and route each result."""
@@ -514,7 +654,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             config=self.config, prepared_metadata=self.prepared_metadata
         ).runtime_items()
 
-    async def _load_delegation_input(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def _load_delegation_input(
+        self, queue_bundle: RuntimeQueueSet, *, send_sentinels: bool = True
+    ) -> None:
         """Seed root-level delegation input from runtime payload entries."""
         loader = RuntimeItemLoader(
             config=self.config, prepared_metadata=self.prepared_metadata
@@ -536,29 +678,85 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
         for work_item in root_work_items:
             await queue_bundle.delegation_input.put(work_item)
-        for _ in range(self.stage_workers.delegation):
-            await queue_bundle.delegation_input.put(None)
-        logger.debug(
-            "Async pipeline loader sent delegation sentinels count=%d",
-            self.stage_workers.delegation,
+        if send_sentinels:
+            for _ in range(self.stage_workers.delegation):
+                await queue_bundle.delegation_input.put(None)
+            logger.debug(
+                "Async pipeline loader sent delegation sentinels count=%d",
+                self.stage_workers.delegation,
+            )
+
+    def _dns_pressure_state(
+        self, groups: tuple[DNSStageCapacityGroup, ...]
+    ) -> AdaptiveDNSPressureState:
+        """Return stage-scoped DNS capacity and recent pressure state."""
+        snapshots = DNSQueryCoordinatorRegistry.provider_capacity_snapshot(
+            rate_limit_enabled=True,
+            pressure_window_seconds=self.stage_settings.pressure_window_seconds,
+        )
+        return capacity_state_for_groups(groups, snapshots)
+
+    def _adaptive_supervisor(
+        self,
+        *,
+        stage_name: str,
+        queue: asyncio.Queue[Any],
+        task_factory: Any,
+        minimum: int,
+        cap: int,
+        capacity_groups: tuple[DNSStageCapacityGroup, ...],
+    ) -> AdaptiveStageSupervisor:
+        """Build one adaptive supervisor for a DNS stage."""
+        return AdaptiveStageSupervisor(
+            stage_name=stage_name,
+            queue=queue,
+            task_factory=task_factory,
+            busy_state=self.busy_state,
+            decision_engine=AdaptiveStageDecisionEngine(
+                minimum=minimum,
+                cap=cap,
+                scale_up_step=self.stage_settings.scale_up_step,
+                scale_down_step=self.stage_settings.scale_down_step,
+                busy_scale_up_after_seconds=(
+                    self.stage_settings.busy_scale_up_after_seconds
+                ),
+                idle_scale_down_after_seconds=(
+                    self.stage_settings.idle_scale_down_after_seconds
+                ),
+                queue_pressure_ratio=self.stage_settings.queue_pressure_ratio,
+            ),
+            interval_seconds=self.stage_settings.supervisor_interval_seconds,
+            dns_pressure_state=lambda: self._dns_pressure_state(capacity_groups),
         )
 
     async def _join_or_raise(
         self,
         queue: asyncio.Queue[Any],
-        watched_tasks: list[asyncio.Task[Any]],
+        watched_tasks: list[asyncio.Task[Any]] | Callable[[], list[asyncio.Task[Any]]],
     ) -> None:
         """Wait for a queue to drain while surfacing worker task failures."""
+
+        def current_tasks() -> list[asyncio.Task[Any]]:
+            return watched_tasks() if callable(watched_tasks) else watched_tasks
+
         join_task = asyncio.create_task(queue.join())
         try:
             while not join_task.done():
-                active_tasks = [task for task in watched_tasks if not task.done()]
+                for task in current_tasks():
+                    if not task.done() or task.cancelled():
+                        continue
+                    exception = task.exception()
+                    if exception is not None:
+                        raise exception
+                active_tasks = [task for task in current_tasks() if not task.done()]
                 done, _pending = await asyncio.wait(
                     [join_task, *active_tasks],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in done:
                     if task is join_task:
+                        continue
+                    if task.cancelled():
                         continue
                     exception = task.exception()
                     if exception is not None:
@@ -585,34 +783,84 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         await asyncio.gather(*cache_tasks)
         logger.debug("Async pipeline cache writers stopped")
 
-    async def run_async(self) -> int:
+    async def run_async(self) -> int:  # pylint: disable=too-many-statements
         """Run the prepared or config-sourced pipeline through async stage queues."""
         queue_bundle = RuntimeQueueSet.create()
         logger.debug(
             "Async pipeline starting worker-local queues delegation_workers=%d "
-            "host_resolution_workers=%d geo_workers=%d prepared_metadata=%s",
+            "host_resolution_workers=%d geo_workers=%d adaptive=%s "
+            "delegation_cap=%d host_resolution_cap=%d "
+            "supervisor_interval_seconds=%.3f pressure_window_seconds=%.3f "
+            "queue_pressure_ratio=%.3f prepared_metadata=%s",
             self.stage_workers.delegation,
             self.stage_workers.host_resolution,
             self.stage_workers.geo,
+            self.stage_settings.adaptive_enabled,
+            self.stage_settings.delegation.cap,
+            self.stage_settings.host_resolution.cap,
+            self.stage_settings.supervisor_interval_seconds,
+            self.stage_settings.pressure_window_seconds,
+            self.stage_settings.queue_pressure_ratio,
             self.prepared_metadata is not None,
         )
-        loader_task = asyncio.create_task(self._load_delegation_input(queue_bundle))
-        delegation_tasks = [
-            asyncio.create_task(self._delegation_worker(queue_bundle))
-            for _ in range(self.stage_workers.delegation)
-        ]
-        host_resolution_tasks = [
-            asyncio.create_task(self._host_resolution_worker(queue_bundle))
-            for _ in range(self.stage_workers.host_resolution)
-        ]
+        adaptive_enabled = self.stage_settings.adaptive_enabled
         geo_tasks = [
-            asyncio.create_task(self._geo_worker(queue_bundle))
-            for _ in range(self.stage_workers.geo)
+            asyncio.create_task(
+                self._geo_worker(queue_bundle), name=f"geo-static-worker-{index}"
+            )
+            for index in range(self.stage_workers.geo)
         ]
-        result_task = asyncio.create_task(self._result_writer(queue_bundle))
+        result_task = asyncio.create_task(
+            self._result_writer(queue_bundle), name="result-writer"
+        )
         cache_tasks = [
-            asyncio.create_task(writer.run()) for writer in self.cache_bundle.writers
+            asyncio.create_task(writer.run(), name=f"cache-writer-{index}")
+            for index, writer in enumerate(self.cache_bundle.writers)
         ]
+        delegation_supervisor: AdaptiveStageSupervisor | None = None
+        host_resolution_supervisor: AdaptiveStageSupervisor | None = None
+        if adaptive_enabled:
+            host_resolution_supervisor = self._adaptive_supervisor(
+                stage_name="host-resolution",
+                queue=queue_bundle.delegation_to_host_resolution,
+                task_factory=lambda: self._host_resolution_worker(queue_bundle),
+                minimum=self.stage_settings.host_resolution.minimum,
+                cap=self.stage_settings.host_resolution.cap,
+                capacity_groups=self.dns_capacity_groups.host_resolution,
+            )
+            delegation_supervisor = self._adaptive_supervisor(
+                stage_name="delegation",
+                queue=queue_bundle.delegation_input,
+                task_factory=lambda: self._delegation_worker(queue_bundle),
+                minimum=self.stage_settings.delegation.minimum,
+                cap=self.stage_settings.delegation.cap,
+                capacity_groups=self.dns_capacity_groups.delegation,
+            )
+            await host_resolution_supervisor.start()
+            await delegation_supervisor.start()
+            delegation_tasks = delegation_supervisor.tasks
+            host_resolution_tasks = host_resolution_supervisor.tasks
+        else:
+            delegation_tasks = [
+                asyncio.create_task(
+                    self._delegation_worker(queue_bundle),
+                    name=f"delegation-static-worker-{index}",
+                )
+                for index in range(self.stage_workers.delegation)
+            ]
+            host_resolution_tasks = [
+                asyncio.create_task(
+                    self._host_resolution_worker(queue_bundle),
+                    name=f"host-resolution-static-worker-{index}",
+                )
+                for index in range(self.stage_workers.host_resolution)
+            ]
+        loader_task = asyncio.create_task(
+            self._load_delegation_input(
+                queue_bundle, send_sentinels=not adaptive_enabled
+            ),
+            name="delegation-loader",
+        )
         all_tasks = [
             loader_task,
             *delegation_tasks,
@@ -624,23 +872,47 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         try:
             await loader_task
             logger.debug("Async pipeline waiting for delegation_input drain")
-            await self._join_or_raise(queue_bundle.delegation_input, delegation_tasks)
-            await asyncio.gather(*delegation_tasks)
-            logger.debug("Async pipeline delegation_input drained")
-            for _ in range(self.stage_workers.host_resolution):
-                await queue_bundle.delegation_to_host_resolution.put(None)
-            logger.debug(
-                "Async pipeline sent host-resolution sentinels count=%d",
-                self.stage_workers.host_resolution,
+            await self._join_or_raise(
+                queue_bundle.delegation_input,
+                (
+                    lambda: (
+                        delegation_supervisor.tasks
+                        if delegation_supervisor is not None
+                        else delegation_tasks
+                    )
+                ),
             )
+            if delegation_supervisor is not None:
+                await delegation_supervisor.stop_after_drain()
+                delegation_tasks = delegation_supervisor.tasks
+            else:
+                await asyncio.gather(*delegation_tasks)
+            logger.debug("Async pipeline delegation_input drained")
+            if host_resolution_supervisor is None:
+                for _ in range(self.stage_workers.host_resolution):
+                    await queue_bundle.delegation_to_host_resolution.put(None)
+                logger.debug(
+                    "Async pipeline sent host-resolution sentinels count=%d",
+                    self.stage_workers.host_resolution,
+                )
             logger.debug(
                 "Async pipeline waiting for delegation_to_host_resolution drain"
             )
             await self._join_or_raise(
                 queue_bundle.delegation_to_host_resolution,
-                host_resolution_tasks,
+                (
+                    lambda: (
+                        host_resolution_supervisor.tasks
+                        if host_resolution_supervisor is not None
+                        else host_resolution_tasks
+                    )
+                ),
             )
-            await asyncio.gather(*host_resolution_tasks)
+            if host_resolution_supervisor is not None:
+                await host_resolution_supervisor.stop_after_drain()
+                host_resolution_tasks = host_resolution_supervisor.tasks
+            else:
+                await asyncio.gather(*host_resolution_tasks)
             logger.debug("Async pipeline delegation_to_host_resolution drained")
             for _ in range(self.stage_workers.geo):
                 await queue_bundle.host_resolution_to_geo.put(None)
@@ -667,6 +939,10 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
             return 0
         except Exception:
+            if delegation_supervisor is not None:
+                await delegation_supervisor.cancel()
+            if host_resolution_supervisor is not None:
+                await host_resolution_supervisor.cancel()
             for task in all_tasks:
                 if not task.done():
                     task.cancel()
