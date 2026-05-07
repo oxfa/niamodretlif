@@ -32,7 +32,7 @@ class DelegationStage:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
-    async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume root-level delegation input and route each host result."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
@@ -117,7 +117,7 @@ class HostResolutionStage:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
-    async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume host-resolution work and route review, filtered, or geo cases."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
@@ -178,7 +178,7 @@ class GeoStage:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
-    async def worker(self, queue_bundle: RuntimeQueueSet) -> None:
+    async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
         """Consume geo work and emit terminal policy results."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):

@@ -1,4 +1,4 @@
-"""Adaptive worker stage decision helpers."""
+"""Adaptive stage concurrency decision helpers."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class AdaptiveStageDecisionEngine:
         now: float,
         active_count: int,
         backlog: int,
-        worker_states: tuple[BusyStateSnapshot, ...],
+        consumer_states: tuple[BusyStateSnapshot, ...],
         recent_dns_pressure: bool,
         dns_capacity_available: bool = True,
     ) -> AdaptiveStageDecision:
@@ -65,7 +65,7 @@ class AdaptiveStageDecisionEngine:
                 now=now,
                 active_count=active_count,
                 backlog=backlog,
-                worker_states=worker_states,
+                consumer_states=consumer_states,
                 recent_dns_pressure=recent_dns_pressure,
             )
             if scale_down:
@@ -75,7 +75,7 @@ class AdaptiveStageDecisionEngine:
             now=now,
             active_count=active_count,
             backlog=backlog,
-            worker_states=worker_states,
+            consumer_states=consumer_states,
             recent_dns_pressure=recent_dns_pressure,
             dns_capacity_available=dns_capacity_available,
         )
@@ -96,11 +96,11 @@ class AdaptiveStageDecisionEngine:
         now: float,
         active_count: int,
         backlog: int,
-        worker_states: tuple[BusyStateSnapshot, ...],
+        consumer_states: tuple[BusyStateSnapshot, ...],
         recent_dns_pressure: bool,
         dns_capacity_available: bool,
     ) -> int:
-        """Return worker creation count for this tick."""
+        """Return consumer creation count for this tick."""
         if (
             backlog <= 0
             or recent_dns_pressure
@@ -110,9 +110,9 @@ class AdaptiveStageDecisionEngine:
             return 0
         if active_count <= 0 or backlog / active_count < self.queue_pressure_ratio:
             return 0
-        if len(worker_states) < active_count:
+        if len(consumer_states) < active_count:
             return 0
-        for state in worker_states:
+        for state in consumer_states:
             if not busy_reason_allows_scale_up(state.reason):
                 return 0
             if now - state.reason_started_at < self.busy_scale_up_after_seconds:
@@ -125,14 +125,14 @@ class AdaptiveStageDecisionEngine:
         now: float,
         active_count: int,
         backlog: int,
-        worker_states: tuple[BusyStateSnapshot, ...],
+        consumer_states: tuple[BusyStateSnapshot, ...],
         recent_dns_pressure: bool,
     ) -> int:
-        """Return idle worker retirement count for this tick."""
+        """Return idle consumer retirement count for this tick."""
         if backlog > 0 and not recent_dns_pressure:
             return 0
         idle_count = 0
-        for state in worker_states:
+        for state in consumer_states:
             if state.reason != BusyReason.QUEUE_WAIT:
                 continue
             if now - state.reason_started_at >= self.idle_scale_down_after_seconds:
@@ -142,7 +142,7 @@ class AdaptiveStageDecisionEngine:
 
 
 class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
-    """Own adaptive asyncio worker creation and idle retirement for one stage."""
+    """Own adaptive asyncio consumer creation and idle retirement for one stage."""
 
     def __init__(
         self,
@@ -177,29 +177,29 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
 
     @property
     def tasks(self) -> list[asyncio.Task[None]]:
-        """Return active and completed worker tasks owned by the supervisor."""
+        """Return active and completed consumer tasks owned by the supervisor."""
         return list(self._tasks)
 
     async def start(self) -> None:
-        """Start minimum workers and the monitor loop."""
+        """Start minimum consumers and the monitor loop."""
         for _ in range(self.decision_engine.minimum):
-            self._create_worker()
+            self._create_consumer()
         self._monitor_task = asyncio.create_task(
             self._monitor(), name=f"{self.stage_name}-adaptive-monitor"
         )
 
     async def stop_after_drain(self) -> None:
-        """Stop monitor, send one sentinel per active worker, and wait for exit."""
+        """Stop monitor, send one sentinel per active consumer, and wait for exit."""
         if self._monitor_task is not None:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)
-        self.raise_worker_failures()
+        self.raise_consumer_failures()
         active_tasks = [task for task in self._tasks if not task.done()]
         for _ in active_tasks:
             await self.queue.put(None)
         if active_tasks:
             await asyncio.gather(*active_tasks)
-        self.raise_worker_failures()
+        self.raise_consumer_failures()
         self._forget_completed()
         logger.debug(
             "Adaptive stage summary stage=%s created=%d retired=%d max_active=%d",
@@ -210,7 +210,7 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
         )
 
     async def cancel(self) -> None:
-        """Cancel monitor and all workers."""
+        """Cancel monitor and all consumers."""
         tasks: list[asyncio.Task[None]] = []
         if self._monitor_task is not None:
             tasks.append(self._monitor_task)
@@ -222,8 +222,8 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
             await asyncio.gather(*tasks, return_exceptions=True)
         self._forget_completed()
 
-    def raise_worker_failures(self) -> None:
-        """Raise the first completed worker exception, including retired tasks."""
+    def raise_consumer_failures(self) -> None:
+        """Raise the first completed consumer exception, including retired tasks."""
         for task in self._tasks:
             if not task.done() or task.cancelled():
                 continue
@@ -231,12 +231,12 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
             if exception is not None:
                 raise exception
 
-    def _create_worker(self) -> None:
-        """Create one stage worker task."""
+    def _create_consumer(self) -> None:
+        """Create one stage consumer task."""
         self._created += 1
         task = asyncio.create_task(
             self.task_factory(),
-            name=f"{self.stage_name}-adaptive-worker-{self._created}",
+            name=f"{self.stage_name}-adaptive-consumer-{self._created}",
         )
         self._tasks.append(task)
         self._max_active = max(self._max_active, len(self._active_tasks()))
@@ -245,7 +245,7 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
         """Periodically apply adaptive scale decisions."""
         while True:
             await asyncio.sleep(self.interval_seconds)
-            self.raise_worker_failures()
+            self.raise_consumer_failures()
             self._forget_completed()
             active_tasks = self._active_tasks()
             now = time.monotonic()
@@ -255,14 +255,14 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
                 now=now,
                 active_count=len(active_tasks),
                 backlog=self.queue.qsize(),
-                worker_states=snapshots,
+                consumer_states=snapshots,
                 recent_dns_pressure=pressure.recent_pressure,
                 dns_capacity_available=pressure.capacity_available,
             )
             for _ in range(decision.scale_up):
-                self._create_worker()
+                self._create_consumer()
             if decision.scale_down:
-                self._retire_idle_workers(decision.scale_down, reason=decision.reason)
+                self._retire_idle_consumers(decision.scale_down, reason=decision.reason)
             self._log_decision(
                 decision,
                 busy_seconds=self._busy_seconds(snapshots, now),
@@ -270,8 +270,8 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
                 pressure_summary=pressure.summary,
             )
 
-    def _retire_idle_workers(self, count: int, *, reason: str) -> None:
-        """Cancel idle queue-waiting workers only."""
+    def _retire_idle_consumers(self, count: int, *, reason: str) -> None:
+        """Cancel idle queue-waiting consumers only."""
         snapshots = {
             snapshot.task_name: snapshot for snapshot in self._stage_snapshots()
         }
@@ -357,18 +357,18 @@ class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
         return max(ages, default=0.0)
 
     def _active_tasks(self) -> list[asyncio.Task[None]]:
-        """Return not-done worker tasks."""
+        """Return not-done consumer tasks."""
         return [task for task in self._tasks if not task.done()]
 
     def _forget_completed(self) -> None:
-        """Forget completed worker task state."""
+        """Forget completed consumer task state."""
         for task in self._tasks:
             if task.done():
                 self.busy_state.forget(task)
 
     def _stage_snapshots(self) -> tuple[BusyStateSnapshot, ...]:
-        """Return busy snapshots for this supervisor's workers."""
-        prefix = f"{self.stage_name}-adaptive-worker-"
+        """Return busy snapshots for this supervisor's consumers."""
+        prefix = f"{self.stage_name}-adaptive-consumer-"
         return tuple(
             snapshot
             for snapshot in self.busy_state.snapshot()

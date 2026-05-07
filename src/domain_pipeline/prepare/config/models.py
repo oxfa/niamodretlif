@@ -19,9 +19,9 @@ from domain_pipeline.worker.geo.constants import (
     GEO_PROVIDER_IPINFO_LITE,
 )
 from domain_pipeline.worker.runtime.constants import (
-    DNS_DELEGATION_STAGE_WORKERS,
-    DNS_HOST_RESOLUTION_STAGE_WORKERS,
-    GEO_STAGE_WORKERS,
+    DNS_DELEGATION_STAGE_CONCURRENCY,
+    DNS_HOST_RESOLUTION_STAGE_CONCURRENCY,
+    GEO_STAGE_CONCURRENCY,
 )
 
 LEGACY_TOP_LEVEL_KEYS = {"rdap", "rdap_global_policy", "whois_fallback"}
@@ -488,23 +488,23 @@ class CacheConfig(StrictModel):
     )
 
 
-class RuntimeStageWorkerMinimumsConfig(StrictModel):
-    """Minimum worker-local async stage worker counts."""
+class RuntimeStageConcurrencyMinimumsConfig(StrictModel):
+    """Minimum worker-local async stage concurrency counts."""
 
-    delegation: int = DNS_DELEGATION_STAGE_WORKERS
-    host_resolution: int = DNS_HOST_RESOLUTION_STAGE_WORKERS
-    geo: int = GEO_STAGE_WORKERS
+    delegation: int = DNS_DELEGATION_STAGE_CONCURRENCY
+    host_resolution: int = DNS_HOST_RESOLUTION_STAGE_CONCURRENCY
+    geo: int = GEO_STAGE_CONCURRENCY
 
     @field_validator("delegation", "host_resolution", "geo", mode="after")
     @classmethod
-    def _validate_stage_workers(cls, value: int) -> int:
+    def _validate_stage_concurrency(cls, value: int) -> int:
         if value < 1:
-            raise ValueError("runtime stage worker counts must be >= 1")
+            raise ValueError("runtime stage concurrency counts must be >= 1")
         return value
 
 
-class RuntimeStageWorkerAdaptiveConfig(StrictModel):
-    """Adaptive worker-local stage worker settings."""
+class RuntimeStageConcurrencyAdaptiveConfig(StrictModel):
+    """Adaptive worker-local stage concurrency settings."""
 
     enabled: bool = True
     delegation_enabled: bool = True
@@ -514,9 +514,25 @@ class RuntimeStageWorkerAdaptiveConfig(StrictModel):
     idle_scale_down_after_seconds: float = 5.0
     pressure_window_seconds: float = 5.0
     queue_pressure_ratio: float = 0.8
-    max_worker_multiplier: int = 4
+    max_concurrency_multiplier: int = 4
     scale_up_step: int = 1
     scale_down_step: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_adaptive_multiplier(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "max_worker_multiplier" not in data:
+            return data
+        if "max_concurrency_multiplier" in data:
+            raise ValueError(
+                "runtime.stage_concurrency.adaptive cannot define both "
+                "max_worker_multiplier and max_concurrency_multiplier"
+            )
+        normalized = dict(data)
+        normalized["max_concurrency_multiplier"] = normalized.pop(
+            "max_worker_multiplier"
+        )
+        return normalized
 
     @field_validator(
         "supervisor_interval_seconds",
@@ -540,11 +556,11 @@ class RuntimeStageWorkerAdaptiveConfig(StrictModel):
             )
         return float(value)
 
-    @field_validator("max_worker_multiplier", mode="after")
+    @field_validator("max_concurrency_multiplier", mode="after")
     @classmethod
-    def _validate_worker_multiplier(cls, value: int) -> int:
+    def _validate_concurrency_multiplier(cls, value: int) -> int:
         if value < 1:
-            raise ValueError("runtime adaptive max_worker_multiplier must be >= 1")
+            raise ValueError("runtime adaptive max_concurrency_multiplier must be >= 1")
         return value
 
     @field_validator("scale_up_step", "scale_down_step", mode="after")
@@ -555,19 +571,19 @@ class RuntimeStageWorkerAdaptiveConfig(StrictModel):
         return value
 
 
-class RuntimeStageWorkersConfig(StrictModel):
-    """Worker-local async stage worker counts and adaptive settings."""
+class RuntimeStageConcurrencyConfig(StrictModel):
+    """Worker-local async stage concurrency counts and adaptive settings."""
 
-    minimums: RuntimeStageWorkerMinimumsConfig = Field(
-        default_factory=RuntimeStageWorkerMinimumsConfig
+    minimums: RuntimeStageConcurrencyMinimumsConfig = Field(
+        default_factory=RuntimeStageConcurrencyMinimumsConfig
     )
-    adaptive: RuntimeStageWorkerAdaptiveConfig = Field(
-        default_factory=RuntimeStageWorkerAdaptiveConfig
+    adaptive: RuntimeStageConcurrencyAdaptiveConfig = Field(
+        default_factory=RuntimeStageConcurrencyAdaptiveConfig
     )
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_flat_stage_workers(cls, data: Any) -> Any:
+    def _normalize_flat_stage_concurrency(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
         legacy_keys = {"delegation", "host_resolution", "geo"}
@@ -575,7 +591,7 @@ class RuntimeStageWorkersConfig(StrictModel):
             return data
         if "minimums" in data:
             raise ValueError(
-                "runtime.stage_workers cannot define both flat counts and minimums"
+                "runtime.stage_concurrency cannot define both flat counts and minimums"
             )
         normalized = dict(data)
         minimums = {
@@ -588,9 +604,22 @@ class RuntimeStageWorkersConfig(StrictModel):
 class RuntimeConfig(StrictModel):
     """Worker-local runtime sizing settings."""
 
-    stage_workers: RuntimeStageWorkersConfig = Field(
-        default_factory=RuntimeStageWorkersConfig
+    stage_concurrency: RuntimeStageConcurrencyConfig = Field(
+        default_factory=RuntimeStageConcurrencyConfig
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_stage_workers(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "stage_workers" not in data:
+            return data
+        if "stage_concurrency" in data:
+            raise ValueError(
+                "runtime cannot define both stage_workers and stage_concurrency"
+            )
+        normalized = dict(data)
+        normalized["stage_concurrency"] = normalized.pop("stage_workers")
+        return normalized
 
 
 class DefaultsConfig(StrictModel):
