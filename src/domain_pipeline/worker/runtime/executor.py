@@ -66,7 +66,12 @@ from domain_pipeline.worker.runtime.capacity import (
 )
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
-from domain_pipeline.worker.runtime.results import CompletedResultFactory
+from domain_pipeline.worker.runtime.results import (
+    CompletedResultFactory,
+    delegation_result_from_cache_record,
+    geo_result_from_cache_record,
+    host_resolution_result_from_cache_record,
+)
 from domain_pipeline.worker.runtime.stages import (
     DelegationStage,
     GeoStage,
@@ -298,44 +303,6 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         self.delegation_executor.shutdown(wait=False, cancel_futures=True)
         self.host_resolution_executor.shutdown(wait=False, cancel_futures=True)
 
-    def _delegation_from_cache_record(self, record: Any) -> DelegationResult:
-        return DelegationResult(
-            domain=record.domain,
-            ns_exists=record.ns_exists,
-            ns_nodata=record.ns_nodata,
-            ns_nxdomain=record.ns_nxdomain,
-            ns_timeout=record.ns_timeout,
-            ns_servfail=record.ns_servfail,
-            no_nameservers=record.no_nameservers,
-            nameservers=record.nameservers,
-            from_cache=True,
-        )
-
-    def _host_resolution_from_cache_record(self, record: Any) -> HostResolutionResult:
-        """Build a host-resolution result from the physical dns_history table."""
-        return HostResolutionResult(
-            host=record.host,
-            a_exists=record.a_exists,
-            a_nodata=record.a_nodata,
-            a_nxdomain=record.a_nxdomain,
-            a_timeout=record.a_timeout,
-            a_servfail=record.a_servfail,
-            canonical_name=record.canonical_name or None,
-            ipv4_addresses=record.ipv4_addresses,
-            ipv6_addresses=record.ipv6_addresses,
-            from_cache=True,
-        )
-
-    def _geo_from_cache_record(self, record: Any) -> IPGeoResult:
-        return IPGeoResult(
-            ip=record.ip,
-            provider=record.provider,
-            country_code=record.country_code,
-            region_code=record.region_code,
-            region_name=record.region_name,
-            status=GEO_STATUS_CACHE_HIT,
-        )
-
     def _host_resolution_ttl_days(self, result: HostResolutionResult) -> int:
         """Return cache retention for one stable host-resolution outcome."""
         ttl_config = self.config["cache"].get("dns_host_resolution_ttl_days", {})
@@ -406,14 +373,28 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 registrable_domain, resolver_key, now
             )
         if cached is not None:
-            self._record_cache_hit("delegation", source)
-            return self._delegation_from_cache_record(cached)
+            cached_result = delegation_result_from_cache_record(cached)
+            if self._delegation_cache_row_requires_soa_revalidation(cached_result):
+                logger.debug(
+                    "Ignoring legacy delegation cache row without SOA evidence "
+                    "domain=%s source=%s",
+                    registrable_domain,
+                    source,
+                )
+            else:
+                self._record_cache_hit("delegation", source)
+                return cached_result
         self._record_cache_miss("delegation")
         async with self.busy_state.track(BusyReason.LIVE_DNS):
             result = await AsyncDelegationTransport(
                 checker, executor=self.delegation_executor
             ).lookup(registrable_domain)
-        if result.status in {"timeout", "servfail"}:
+        if result.status in {
+            "timeout",
+            "servfail",
+            "ns_nodata_soa_timeout",
+            "ns_nodata_soa_servfail",
+        }:
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
         ttl_days = (
@@ -431,6 +412,11 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                     ns_nxdomain=result.ns_nxdomain,
                     ns_timeout=result.ns_timeout,
                     ns_servfail=result.ns_servfail,
+                    soa_exists=result.soa_exists,
+                    soa_nodata=result.soa_nodata,
+                    soa_nxdomain=result.soa_nxdomain,
+                    soa_timeout=result.soa_timeout,
+                    soa_servfail=result.soa_servfail,
                     no_nameservers=result.no_nameservers,
                     nameservers=result.nameservers,
                     checked_at=now,
@@ -438,6 +424,20 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 )
             )
         return result
+
+    @staticmethod
+    def _delegation_cache_row_requires_soa_revalidation(
+        result: DelegationResult,
+    ) -> bool:
+        """Return whether a cached NS NODATA row predates SOA fallback evidence."""
+        return (
+            result.ns_nodata
+            and not result.soa_exists
+            and not result.soa_nodata
+            and not result.soa_nxdomain
+            and not result.soa_timeout
+            and not result.soa_servfail
+        )
 
     async def lookup_host_resolution(
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
@@ -453,7 +453,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 )
             )
         if cached is not None:
-            cached_result = self._host_resolution_from_cache_record(cached)
+            cached_result = host_resolution_result_from_cache_record(cached)
             if cached_result.status != "unknown":
                 self._record_cache_hit("host_resolution", source)
                 return cached_result
@@ -510,7 +510,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
             if cached is not None:
                 self._record_cache_hit("geo", source)
-                cached_results[ip] = self._geo_from_cache_record(cached)
+                cached_results[ip] = geo_result_from_cache_record(cached)
                 continue
             if ip not in seen_missing_ips:
                 self.cache_stats["geo_cache_misses"] += 1

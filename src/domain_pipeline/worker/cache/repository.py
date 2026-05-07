@@ -10,13 +10,38 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
 DELEGATION_TABLE = "delegation_history"
 DNS_TABLE = "dns_history"
 GEO_TABLE = "geo_history"
+DELEGATION_COLUMNS = (
+    "domain",
+    "resolver_key",
+    "ns_exists",
+    "ns_nodata",
+    "ns_nxdomain",
+    "ns_timeout",
+    "ns_servfail",
+    "soa_exists",
+    "soa_nodata",
+    "soa_nxdomain",
+    "soa_timeout",
+    "soa_servfail",
+    "no_nameservers",
+    "nameservers",
+    "checked_at",
+    "expires_at",
+)
+DELEGATION_SOA_COLUMN_DEFAULTS = {
+    "soa_exists": 0,
+    "soa_nodata": 0,
+    "soa_nxdomain": 0,
+    "soa_timeout": 0,
+    "soa_servfail": 0,
+}
 
 
 def utc_now() -> datetime:
@@ -52,6 +77,11 @@ class DelegationHistoryRecord:
     ns_nxdomain: bool
     ns_timeout: bool
     ns_servfail: bool
+    soa_exists: bool
+    soa_nodata: bool
+    soa_nxdomain: bool
+    soa_timeout: bool
+    soa_servfail: bool
     no_nameservers: bool
     nameservers: list[str]
     checked_at: datetime
@@ -68,6 +98,11 @@ class DelegationHistoryRecord:
             ns_nxdomain=bool(row["ns_nxdomain"]),
             ns_timeout=bool(row["ns_timeout"]),
             ns_servfail=bool(row["ns_servfail"]),
+            soa_exists=bool(row["soa_exists"]),
+            soa_nodata=bool(row["soa_nodata"]),
+            soa_nxdomain=bool(row["soa_nxdomain"]),
+            soa_timeout=bool(row["soa_timeout"]),
+            soa_servfail=bool(row["soa_servfail"]),
             no_nameservers=bool(row["no_nameservers"]),
             nameservers=_parse_string_list(str(row["nameservers"])),
             checked_at=_parse_datetime(str(row["checked_at"])),
@@ -177,6 +212,11 @@ class CacheRepository:
                 ns_nxdomain INTEGER NOT NULL,
                 ns_timeout INTEGER NOT NULL,
                 ns_servfail INTEGER NOT NULL,
+                soa_exists INTEGER NOT NULL DEFAULT 0,
+                soa_nodata INTEGER NOT NULL DEFAULT 0,
+                soa_nxdomain INTEGER NOT NULL DEFAULT 0,
+                soa_timeout INTEGER NOT NULL DEFAULT 0,
+                soa_servfail INTEGER NOT NULL DEFAULT 0,
                 no_nameservers INTEGER NOT NULL,
                 nameservers TEXT NOT NULL,
                 checked_at TEXT NOT NULL,
@@ -184,6 +224,7 @@ class CacheRepository:
                 PRIMARY KEY (domain, resolver_key)
             )
             """)
+        self._ensure_delegation_soa_columns()
         self._connection.execute(f"""
             CREATE TABLE IF NOT EXISTS {DNS_TABLE} (
                 host TEXT NOT NULL,
@@ -215,6 +256,22 @@ class CacheRepository:
             """)
         self._connection.commit()
 
+    def _ensure_delegation_soa_columns(self) -> None:
+        """Add SOA fallback columns to restored delegation caches when missing."""
+        existing_columns = {
+            str(row["name"])
+            for row in self._connection.execute(
+                f"PRAGMA table_info({DELEGATION_TABLE})"
+            )
+        }
+        for column_name, default_value in DELEGATION_SOA_COLUMN_DEFAULTS.items():
+            if column_name in existing_columns:
+                continue
+            self._connection.execute(f"""
+                ALTER TABLE {DELEGATION_TABLE}
+                ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT {default_value}
+                """)
+
     def get_delegation(
         self, domain: str, resolver_key: str, now: datetime
     ) -> DelegationHistoryRecord | None:
@@ -242,6 +299,11 @@ class CacheRepository:
         nameservers: list[str],
         checked_at: datetime,
         ttl_days: int,
+        soa_exists: bool = False,
+        soa_nodata: bool = False,
+        soa_nxdomain: bool = False,
+        soa_timeout: bool = False,
+        soa_servfail: bool = False,
     ) -> None:
         """Store one delegation lookup result."""
         expires_at = checked_at + timedelta(days=ttl_days)
@@ -249,8 +311,9 @@ class CacheRepository:
             f"""
             INSERT OR REPLACE INTO {DELEGATION_TABLE} (
                 domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
-                ns_servfail, no_nameservers, nameservers, checked_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ns_servfail, soa_exists, soa_nodata, soa_nxdomain, soa_timeout,
+                soa_servfail, no_nameservers, nameservers, checked_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 domain,
@@ -260,6 +323,11 @@ class CacheRepository:
                 int(ns_nxdomain),
                 int(ns_timeout),
                 int(ns_servfail),
+                int(soa_exists),
+                int(soa_nodata),
+                int(soa_nxdomain),
+                int(soa_timeout),
+                int(soa_servfail),
                 int(no_nameservers),
                 json.dumps(nameservers, sort_keys=True),
                 checked_at.isoformat(),
@@ -382,10 +450,11 @@ class CacheRepository:
                 f"""
                 INSERT OR REPLACE INTO {DELEGATION_TABLE} (
                     domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
-                    ns_servfail, no_nameservers, nameservers, checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ns_servfail, soa_exists, soa_nodata, soa_nxdomain, soa_timeout,
+                    soa_servfail, no_nameservers, nameservers, checked_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(row[column] for column in row.keys()),
+                self._delegation_row_values(row),
             )
         for row in dns_rows:
             self._connection.execute(
@@ -408,6 +477,18 @@ class CacheRepository:
                 tuple(row[column] for column in row.keys()),
             )
         self._connection.commit()
+
+    def _delegation_row_values(self, row: sqlite3.Row) -> tuple[Any, ...]:
+        """Return delegation row values normalized to the current cache schema."""
+        row_keys = set(row.keys())
+        return tuple(
+            (
+                DELEGATION_SOA_COLUMN_DEFAULTS[column]
+                if column in DELEGATION_SOA_COLUMN_DEFAULTS and column not in row_keys
+                else row[column]
+            )
+            for column in DELEGATION_COLUMNS
+        )
 
     def close(self) -> None:
         """Close the cache database."""
