@@ -7444,6 +7444,7 @@ ad.vryeye.com
 ad.walkgame.com
 ad.weibo.com
 ad.weixin.qq.com
+ad.where.com
 ad.winrar.com.cn
 ad.wretch.cc
 ad.wsod.com
@@ -10830,6 +10831,7 @@ analytics.clubic.com
 analytics.cmn.com
 analytics.cnblogs.com
 analytics.cnd-motionmedia.de
+analytics.cnfanart.com
 analytics.cnnchile.com
 analytics.cocolog-nifty.com
 analytics.code.dccouncil.gov
@@ -11357,6 +11359,8 @@ analyzee.io
 analyzer.fc2.com
 analyzer2.fc2.com
 analyzeunsettled.com
+analyzz.com
+anametrix.com
 anametrix.net
 anamuel-careslie.com
 anapirate.com
@@ -15189,6 +15193,7 @@ bdp.cn
 bdpgjmobltabc.space
 bdplus.baidu.com
 bdqzcj.micuento.com
+bdrvfuqkgp.com
 bds.hainan.net
 bds.snssdk.com
 bds.soarfi.cn
@@ -21195,6 +21200,7 @@ computers.panasonic.eu
 compuware.actonservice.com
 comscore.com
 comtelitalia.alcatel-lucent.com
+comunicacao.edpcomunicacao.com.br
 comunicacion.usj.es
 comunicaciones.davivienda.com.pa
 comunicaciones.daviviendacorredores.com
@@ -21692,6 +21698,7 @@ content.yole365.com
 content.youmiam.com
 content22.bmo.com
 content22.citi.eu
+content22.citibank.com.au
 content22.citibank.com.sg
 content22.citibankonline.com
 content22.online.citi.com
@@ -23347,6 +23354,7 @@ cy2.vortex.data.microsoft.com.akadns.net
 cy98g9wuwn0n.angularjs.poc.glenigan.com
 cya2.net
 cyad.cc
+cyad1.cyworld.com
 cyad1.nate.com
 cyaijllypnzgl.online
 cyan92010.com
@@ -25712,6 +25720,7 @@ dd.selogerneuf.com
 dd.sina.com.cn
 dd.viator.com
 dd.wx16999.com
+dd1.diymianmo.com
 dd1.freep.cn
 dd133.com
 dd1xbevqx.com
@@ -29588,6 +29597,7 @@ edolsbjawiinj.website
 edonwiqgwlvmc.online
 edp2.adriver.ru
 edprivatedqualize.org
+edpsmart.edpcomunicacao.com.br
 edqwztrptkdna.online
 edrakiber.com
 edriving.actonservice.com
@@ -31404,6 +31414,7 @@ estadisticas.lanacion.com.ar
 estadisticasgratis.com
 estadonline.publiguias.cl
 estara.com
+estat.com
 estatueofthea.info
 esteemcountryside.com
 esteemed-ability.pro
@@ -32122,6 +32133,7 @@ experience.deceuninck.be
 experience.faiu.com
 experience.fbbrands.com
 experience.jcu.edu.au
+experience.limelight.com
 experience.micromine.kz
 experience.phenomenex.com
 experience.rochesterregional.org
@@ -36102,6 +36114,7 @@ gjxoqgdozssvh.website
 gjxqkypxmgevy.website
 gjzpwnuifk.com
 gk.gkservices.com
+gk1.582582.com
 gk1.zjbiz.net
 gkazhtoelmsok.site
 gkbpmrtixkzui.one
@@ -36714,6 +36727,7 @@ go.mashable.com
 go.mashery.com
 go.medicall.cc
 go.mercedesbenzsouthorlando.com
+go.merqueo.com
 go.metalgoodsmfg.com
 go.metallic.com
 go.mexicancupid.date
@@ -41658,6 +41672,7 @@ img.foodspring.dk
 img.foodspring.es
 img.foodspring.fi
 img.foodspring.fr
+img.foodspring.hr
 img.foodspring.it
 img.foodspring.nl
 img.foodspring.se
@@ -44063,6 +44078,7 @@ ivx.lacompagnie.com
 ivxbrwcdafjzr.site
 ivxwdikrmtzfc.online
 ivy.pcauto.com.cn
+ivy.pcbaby.com.cn
 ivy.pclady.com.cn
 ivy.pconline.com.cn
 ivykiosk.com
@@ -44072,6 +44088,7 @@ ivza0m05f.com
 ivzaq2irg.com
 iw.pentonmarketingsvcs.com
 iwa.iplsc.com
+iwalujwa.com
 iwan.sogou.com
 iwantglobal.actonservice.com
 iwanttodeliver.com
@@ -46976,6 +46993,7 @@ kxewpz.com
 kxfnuquwjicjt.site
 kxhtomtutvs.com
 kxid.cn
+kxjbvnvvjpi.com
 kxjxjuoyfawwf.website
 kxkask.icu
 kxkevndharpyq.website
@@ -49958,6 +49976,7 @@ lp.demo9.demoamericas275.adobe.com
 lp.dmillersb.journeyusshared.adobe.com
 lp.dmillersbdev.journeyusshared.adobe.com
 lp.dynabook.com
+lp.edpcomunicacao.com.br
 lp.egghead.link
 lp.em.viking.com
 lp.email-kpn.cjm.adobe.com
@@ -52088,6 +52107,7 @@ marketing.echohealthinc.com
 marketing.echostarmobile.com
 marketing.ecosystemintegrity.com
 marketing.ecslearn.com
+marketing.edpcomunicacao.com.br
 marketing.efleets.com
 marketing.ehimrx.com
 marketing.ehy.com
@@ -53499,6 +53519,7 @@ mdt.qq.com
 mdtnjvcsdbc02-eth1-0.net.mydays.de
 mdugiz.jdsports.de
 mdumaldf.com
+mdvovqpiuabzar.com
 mdws.1stchoicesavings.ca
 mdws.advancesavings.ca
 mdws.aldergrovecu.ca
@@ -61132,6 +61153,7 @@ oppressiveindifferent.com
 oppuz.com
 oproi.com
 ops.sunpowercorp.com
+opstag.com
 opsveda.actonservice.com
 opt-intelligence.com
 opt.delta.com
@@ -66888,6 +66910,7 @@ qmyytcdhtvvcy.website
 qmyzawzrqryjj.top
 qn-cdnfile1pcdn.msstatic.com
 qn.bejson.com
+qnahgxwt.com
 qnankopyneryv.space
 qnaswrrnkgynvcd.net
 qnayqnqdcuatz.space
@@ -67129,6 +67152,7 @@ qticisaxnav.in
 qtj0.destinia.pl
 qtmcctlezxmvt.online
 qtmkgpcvdk.com
+qtmojo.com
 qtnhmmqmoyxzd.space
 qtotkxbumapye.website
 qtozietgp.com
@@ -68472,6 +68496,7 @@ rekuyy.com
 rel-link.californiapsychics.com
 rel-s.com
 relaamlrijdxq.site
+relacionamento.edpcomunicacao.com.br
 relap.io
 relap.mail.ru
 relappro.com
@@ -70157,6 +70182,8 @@ rum.condenastdigital.com
 rum.corewebvitals.io
 rum.cronitor.io
 rum.hlx.page
+rum.ingress.layer0.co
+rum.layer0.co
 rum.marquardmedia.hu
 rum.mauve.eu
 rum.optimizely.com
@@ -71445,6 +71472,7 @@ sanalytics.cdf.cl
 sanalytics.cha-ching.com
 sanalytics.chilevision.cl
 sanalytics.chvnoticias.cl
+sanalytics.cnfanart.com
 sanalytics.cnnchile.com
 sanalytics.combatefreestyle.com
 sanalytics.disneyplus.com
@@ -74186,6 +74214,7 @@ similarnatural.pro
 similarpresence.com
 similarshine.pro
 similartoweldeep.com
+simility.com
 simmeringsuitableunwoven.com
 simonsignal.com
 simpio.com
@@ -75411,6 +75440,7 @@ smetrics.citibank.ae
 smetrics.citibank.cn
 smetrics.citibank.co.th
 smetrics.citibank.co.uk
+smetrics.citibank.com.au
 smetrics.citibank.com.hk
 smetrics.citibank.com.my
 smetrics.citibank.com.ph
@@ -78219,6 +78249,7 @@ solutions.wellspring.com
 solutions.westrock.com
 solutions2.risk.lexisnexis.com
 solutionsadultes.com
+solutionshindsight.net
 solve.cranepi.com
 solvebots.com
 solvemilitaryconsulate.com
@@ -78787,6 +78818,7 @@ spectacular-temporary.com
 spectacularimmunity.com
 spectacularpercentage.com
 spectacularstamp.com
+spectate.com
 spectkuchean.com
 spectrum.gettyimages.com
 spectrumirriplaceableirriplaceable.com
@@ -79681,6 +79713,7 @@ sstats.deloitte.com
 sstats.deluxe.com
 sstats.dice.com
 sstats.dignityhealth.org
+sstats.directgeneral.com
 sstats.drugstore.com
 sstats.ds-pharma.com
 sstats.ds-pharma.jp
@@ -80169,6 +80202,7 @@ stat.cnmo.com
 stat.cqwb.com.cn
 stat.cuadernosdepedagogia.com
 stat.cutv.com
+stat.cyworld.com
 stat.dauc.cz
 stat.dbschenker.com
 stat.dedecms.com
@@ -88408,6 +88442,7 @@ tranquilplume.com
 tranquilveil.com
 tranquilveranda.com
 transact.blackboard.com
+transactionale.com
 transactionproducer.com
 transactionscookclotted.com
 transcend.io
@@ -89079,6 +89114,7 @@ trueloveonlinee.com
 truemfg.actonservice.com
 truenat.bid
 truendo.com
+truepush.com
 trueselfkeys.com
 truevaultcdn.com
 truffeleveche.com
@@ -90012,6 +90048,7 @@ uczzd.com
 uczzd.net
 ud.galaxus.de
 udash.umengcloud.com
+udata.mixmarket.biz
 udbaa.com
 udblog.huya.com
 udc.yahoo.com
@@ -99159,6 +99196,7 @@ ylakmr.expressionscatalog.com
 ylbcwkazxnmjp.online
 ylblrqhpurxxo.website
 ylcajkhefghaf.online
+yldbt.com
 yldmgrimg.net
 yldr.io
 yldxtcgvchrck.site
