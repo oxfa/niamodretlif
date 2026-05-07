@@ -100,9 +100,12 @@ class AggregateBatchRunner:
         try:
             self.output_merger.merge_host_value_payloads(
                 [
-                    (manifest.worker_id, manifest.filtered_output_values)
-                    for manifest in worker_manifests
-                    if manifest.handoff_finalized
+                    ("prepare", prepare_manifest.preparation_filtered_output_values),
+                    *[
+                        (manifest.worker_id, manifest.filtered_output_values)
+                        for manifest in worker_manifests
+                        if manifest.handoff_finalized
+                    ],
                 ],
                 final_output_paths["filtered"],
             )

@@ -9,6 +9,7 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.worker.dns.result_codes import (
@@ -139,6 +140,9 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         ),
         PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
             "manual_filter_pass entry was not present in any configured source"
+        ),
+        PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX: (
+            "public suffix input was explicitly allowed by manual_filter_pass"
         ),
         PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT: (
             "host was explicitly sent to review by manual_filter_out"

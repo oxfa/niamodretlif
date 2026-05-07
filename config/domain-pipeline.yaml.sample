@@ -9,17 +9,19 @@ version: 2
 # - input/manual_filter_pass/<config-stem>.txt
 # - input/manual_filter_out/<config-stem>.txt
 # - input/manual_add/<config-stem>.txt
-# manual_filter_pass and manual_add entries still require DNS delegation on the
-# registrable domain. If delegation is actionable, they skip host-resolution
-# and geo and route to filtered. manual_add takes precedence over matching
-# source entries for the same host. If delegation is not actionable, they route
-# to unactionable or review using the normal delegation result. Unmatched
-# manual_add entries require all enabled sources to share delegation/output
-# behavior. Unmatched manual_filter_pass entries route to review without
-# delegation or host-resolution lookup because they are operator reconciliation
-# rows. manual_filter_out is exact-host-only, takes precedence over matching
-# source entries, bypasses delegation, host resolution, and geo entirely, and
-# routes to review. Public suffix inputs are prepare-owned
+# manual_filter_pass and manual_add entries require DNS delegation on the
+# registrable domain. Source-matched public suffix manual_filter_pass entries
+# route to filtered during prepare because there is no registrable domain to
+# query. If delegation is actionable, manual_filter_pass and manual_add skip
+# host-resolution and geo and route to filtered. manual_add takes precedence
+# over matching source entries for the same host. If delegation is not
+# actionable, they route to unactionable or review using the normal delegation
+# result. Unmatched manual_add entries require all enabled sources to share
+# delegation/output behavior. Unmatched manual_filter_pass entries route to
+# review without delegation or host-resolution lookup because they are operator
+# reconciliation rows. manual_filter_out is exact-host-only, takes precedence
+# over matching source entries, bypasses delegation, host resolution, and geo
+# entirely, and routes to review. Other public suffix inputs are prepare-owned
 # review/audit rows because there is no registrable domain to query.
 #
 # Runtime rows use three terminal routes:

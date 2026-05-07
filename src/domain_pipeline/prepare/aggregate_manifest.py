@@ -7,7 +7,7 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from domain_pipeline.paths import PathLayout
 
@@ -59,6 +59,7 @@ class PrepareAggregateManifest(PrepareAggregateModel):
     worker_ids: list[str]
     preparation_review_output_rows: list[dict[str, str]]
     preparation_terminal_rows: list[dict[str, Any]]
+    preparation_filtered_output_values: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_prepared_batch(
@@ -71,6 +72,7 @@ class PrepareAggregateManifest(PrepareAggregateModel):
         worker_ids: list[str],
         preparation_review_output_rows: Sequence[Mapping[str, Any]],
         preparation_terminal_rows: Sequence[Mapping[str, Any]],
+        preparation_filtered_output_values: Sequence[str] = (),
     ) -> "PrepareAggregateManifest":
         """Build one prepare-to-aggregate manifest from prepared batch state."""
         return cls(
@@ -79,6 +81,9 @@ class PrepareAggregateManifest(PrepareAggregateModel):
             config_identity=config_identity,
             aggregate_output_spec=aggregate_output_spec,
             worker_ids=list(worker_ids),
+            preparation_filtered_output_values=[
+                str(value) for value in preparation_filtered_output_values
+            ],
             preparation_review_output_rows=[
                 dict(row) for row in preparation_review_output_rows
             ],
