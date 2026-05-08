@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.aggregate_manifest import (
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     AggregateOutputSpec,
-    ConfigIdentity as AggregateConfigIdentity,
+    PrepareAggregateConfigIdentity,
 )
-from domain_pipeline.prepare.worker_manifest import (
-    ConfigIdentity as WorkerConfigIdentity,
+from domain_pipeline.prepare.prepare_to_worker_manifest import (
+    PrepareWorkerConfigIdentity,
     PrepareWorkerManifest,
     PreparedDelegationRootMetadata,
     PreparedHostEntryMetadata,
@@ -80,10 +80,12 @@ def prepare_worker_manifest_relative_path(*, batch_id: str, worker_id: str) -> P
     )
 
 
-def worker_config_identity_from_config(config: dict[str, Any]) -> WorkerConfigIdentity:
+def worker_config_identity_from_config(
+    config: dict[str, Any],
+) -> PrepareWorkerConfigIdentity:
     """Return the worker-manifest config identity captured during preparation."""
     config_path = Path(str(config["config_path"]))
-    return WorkerConfigIdentity(
+    return PrepareWorkerConfigIdentity(
         config_name=str(config["config_name"]),
         config_path=str(config_path),
         config_file_name=config_path.name,
@@ -92,10 +94,10 @@ def worker_config_identity_from_config(config: dict[str, Any]) -> WorkerConfigId
 
 def aggregate_config_identity_from_config(
     config: dict[str, Any],
-) -> AggregateConfigIdentity:
+) -> PrepareAggregateConfigIdentity:
     """Return the aggregate-manifest config identity captured during preparation."""
     config_path = Path(str(config["config_path"]))
-    return AggregateConfigIdentity(
+    return PrepareAggregateConfigIdentity(
         config_name=str(config["config_name"]),
         config_path=str(config_path),
         config_file_name=config_path.name,
@@ -296,32 +298,33 @@ class WorkerAssignmentPlanner:
                 "worker runtime spec references unavailable configured sources: "
                 + ", ".join(missing_source_ids)
             )
-        return WorkerRuntimeSpec(
-            config_identity=config_identity,
-            cache={
-                "cache_file": relative_path(worker_paths.cache),
-                "baseline_cache_file": relative_path(
-                    _workflow_paths().runtime_cache_path()
-                ),
-                "classification_ttl_days": json.loads(
-                    json.dumps(config["cache"]["classification_ttl_days"])
-                ),
-                "dns_host_resolution_ttl_days": json.loads(
-                    json.dumps(config["cache"]["dns_host_resolution_ttl_days"])
-                ),
-                "dns_ttl_days": config["cache"]["dns_ttl_days"],
+        return WorkerRuntimeSpec.model_validate(
+            {
+                "config_identity": config_identity.model_dump(mode="json"),
+                "cache": {
+                    "cache_file": relative_path(worker_paths.cache),
+                    "baseline_cache_file": relative_path(
+                        _workflow_paths().runtime_cache_path()
+                    ),
+                    "classification_ttl_days": json.loads(
+                        json.dumps(config["cache"]["classification_ttl_days"])
+                    ),
+                    "host_resolution_ttl_days": json.loads(
+                        json.dumps(config["cache"]["host_resolution_ttl_days"])
+                    ),
+                },
+                "runtime": json.loads(json.dumps(config.get("runtime", {}))),
+                "sources": source_configs,
+                "output_spec": WorkerOutputSpec(
+                    result_root=relative_path(worker_paths.result_root),
+                    filtered=relative_path(worker_paths.filtered),
+                    unactionable=relative_path(worker_paths.unactionable),
+                    review=relative_path(worker_paths.review),
+                    terminal_rows=relative_path(worker_paths.terminal_rows),
+                    cache=relative_path(worker_paths.cache),
+                ).model_dump(mode="json"),
+                "debug_log_path": relative_path(worker_paths.debug_log),
             },
-            runtime=json.loads(json.dumps(config.get("runtime", {}))),
-            sources=source_configs,
-            output_spec=WorkerOutputSpec(
-                result_root=relative_path(worker_paths.result_root),
-                filtered=relative_path(worker_paths.filtered),
-                unactionable=relative_path(worker_paths.unactionable),
-                review=relative_path(worker_paths.review),
-                terminal_rows=relative_path(worker_paths.terminal_rows),
-                cache=relative_path(worker_paths.cache),
-            ),
-            debug_log_path=relative_path(worker_paths.debug_log),
         )
 
     def _prepared_runtime_metadata_from_assignment(

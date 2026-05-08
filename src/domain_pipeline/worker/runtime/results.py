@@ -9,8 +9,12 @@ from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 from domain_pipeline.worker.output import (
     build_base_row,
 )
-from domain_pipeline.worker.dns import DelegationResult, HostResolutionResult
-from domain_pipeline.worker.geo import GEO_STATUS_CACHE_HIT, IPGeoResult
+from domain_pipeline.worker.delegation import DelegationResult
+from domain_pipeline.worker.host_resolution import HostResolutionResult
+from domain_pipeline.worker.ip_location import (
+    IP_LOCATION_STATUS_CACHE_HIT,
+    IPLocationResult,
+)
 from domain_pipeline.worker.runtime.contracts import (
     CompletedHostResult,
     WorkerSourceContext,
@@ -28,8 +32,8 @@ class CompletedResultFactory:
         pipeline_result_code: str,
         delegation_result: DelegationResult | None = None,
         host_resolution_result: HostResolutionResult | None = None,
-        geo_results: list[IPGeoResult] | None = None,
-        geo_policy: Any | None = None,
+        ip_location_results: list[IPLocationResult] | None = None,
+        ip_location_policy: Any | None = None,
         provenance: dict[str, Any] | None = None,
         row_overrides: dict[str, Any] | None = None,
     ) -> CompletedHostResult:
@@ -41,8 +45,8 @@ class CompletedResultFactory:
             pipeline_result_code=pipeline_result_code,
             delegation_result=delegation_result,
             host_resolution_result=host_resolution_result,
-            geo_results=geo_results or [],
-            geo_policy=geo_policy,
+            ip_location_results=ip_location_results or [],
+            ip_location_policy=ip_location_policy,
             source_id_override=provenance.get("source_id_override"),
             source_input_label_override=provenance.get("source_input_label_override"),
             source_ids=tuple(provenance.get("source_ids", ())),
@@ -58,8 +62,8 @@ class CompletedResultFactory:
             row=row,
             delegation_result=delegation_result,
             host_resolution_result=host_resolution_result,
-            geo_results=geo_results or [],
-            geo_policy=geo_policy,
+            ip_location_results=ip_location_results or [],
+            ip_location_policy=ip_location_policy,
         )
 
 
@@ -85,7 +89,7 @@ def delegation_result_from_cache_record(record: Any) -> DelegationResult:
 
 
 def host_resolution_result_from_cache_record(record: Any) -> HostResolutionResult:
-    """Build a host-resolution result from the physical dns_history table."""
+    """Build a host-resolution result from the physical host_resolution_history table."""
     return HostResolutionResult(
         host=record.host,
         a_exists=record.a_exists,
@@ -100,21 +104,21 @@ def host_resolution_result_from_cache_record(record: Any) -> HostResolutionResul
     )
 
 
-def geo_result_from_cache_record(record: Any) -> IPGeoResult:
-    """Build a geo result from one cached geo row."""
-    return IPGeoResult(
+def ip_location_result_from_cache_record(record: Any) -> IPLocationResult:
+    """Build a ip location result from one cached ip location row."""
+    return IPLocationResult(
         ip=record.ip,
         provider=record.provider,
         country_code=record.country_code,
         region_code=record.region_code,
         region_name=record.region_name,
-        status=GEO_STATUS_CACHE_HIT,
+        status=IP_LOCATION_STATUS_CACHE_HIT,
     )
 
 
 __all__ = [
     "CompletedResultFactory",
     "delegation_result_from_cache_record",
-    "geo_result_from_cache_record",
+    "ip_location_result_from_cache_record",
     "host_resolution_result_from_cache_record",
 ]

@@ -12,8 +12,8 @@ from domain_pipeline.prepare.assignment import relative_path
 from domain_pipeline.worker.cache.repository import (
     CacheRepository,
     DELEGATION_TABLE,
-    DNS_TABLE,
-    GEO_TABLE,
+    IP_LOCATION_TABLE,
+    HOST_RESOLUTION_TABLE,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ class AggregateCacheMerger:
         target_cache = CacheRepository.load(target_path)
         rows_by_key: dict[str, dict[tuple[str, ...], sqlite3.Row]] = {
             DELEGATION_TABLE: {},
-            DNS_TABLE: {},
-            GEO_TABLE: {},
+            HOST_RESOLUTION_TABLE: {},
+            IP_LOCATION_TABLE: {},
         }
         target_delegation_rows = self._merge_cache_table(
             rows_by_key=rows_by_key[DELEGATION_TABLE],
@@ -44,24 +44,25 @@ class AggregateCacheMerger:
             table_name=DELEGATION_TABLE,
             key_columns=("domain", "resolver_key"),
         )
-        target_dns_rows = self._merge_cache_table(
-            rows_by_key=rows_by_key[DNS_TABLE],
+        target_host_resolution_rows = self._merge_cache_table(
+            rows_by_key=rows_by_key[HOST_RESOLUTION_TABLE],
             cache_path=target_path,
-            table_name=DNS_TABLE,
+            table_name=HOST_RESOLUTION_TABLE,
             key_columns=("host", "resolver_key"),
         )
-        target_geo_rows = self._merge_cache_table(
-            rows_by_key=rows_by_key[GEO_TABLE],
+        target_ip_location_rows = self._merge_cache_table(
+            rows_by_key=rows_by_key[IP_LOCATION_TABLE],
             cache_path=target_path,
-            table_name=GEO_TABLE,
+            table_name=IP_LOCATION_TABLE,
             key_columns=("provider", "ip"),
         )
         logger.debug(
-            "Seeded cache merge target %s with delegation_rows=%d dns_rows=%d geo_rows=%d",
+            "Seeded cache merge target %s with delegation_rows=%d "
+            "host_resolution_rows=%d ip_location_rows=%d",
             target_path,
             target_delegation_rows,
-            target_dns_rows,
-            target_geo_rows,
+            target_host_resolution_rows,
+            target_ip_location_rows,
         )
         merged_cache_count = 0
         missing_cache_count = 0
@@ -79,16 +80,16 @@ class AggregateCacheMerger:
                         table_name=DELEGATION_TABLE,
                         key_columns=("domain", "resolver_key"),
                     )
-                    source_dns_rows = self._merge_cache_table(
-                        rows_by_key=rows_by_key[DNS_TABLE],
+                    source_host_resolution_rows = self._merge_cache_table(
+                        rows_by_key=rows_by_key[HOST_RESOLUTION_TABLE],
                         cache_path=cache_path,
-                        table_name=DNS_TABLE,
+                        table_name=HOST_RESOLUTION_TABLE,
                         key_columns=("host", "resolver_key"),
                     )
-                    source_geo_rows = self._merge_cache_table(
-                        rows_by_key=rows_by_key[GEO_TABLE],
+                    source_ip_location_rows = self._merge_cache_table(
+                        rows_by_key=rows_by_key[IP_LOCATION_TABLE],
                         cache_path=cache_path,
-                        table_name=GEO_TABLE,
+                        table_name=IP_LOCATION_TABLE,
                         key_columns=("provider", "ip"),
                     )
                 except sqlite3.DatabaseError as exc:
@@ -99,24 +100,26 @@ class AggregateCacheMerger:
                     continue
                 merged_cache_count += 1
                 logger.debug(
-                    "Merged worker cache %s with delegation_rows=%d dns_rows=%d geo_rows=%d",
+                    "Merged worker cache %s with delegation_rows=%d "
+                    "host_resolution_rows=%d ip_location_rows=%d",
                     cache_path,
                     source_delegation_rows,
-                    source_dns_rows,
-                    source_geo_rows,
+                    source_host_resolution_rows,
+                    source_ip_location_rows,
                 )
             target_cache.replace_cache_table_rows(
                 delegation_rows=rows_by_key[DELEGATION_TABLE].values(),
-                dns_rows=rows_by_key[DNS_TABLE].values(),
-                geo_rows=rows_by_key[GEO_TABLE].values(),
+                host_resolution_rows=rows_by_key[HOST_RESOLUTION_TABLE].values(),
+                ip_location_rows=rows_by_key[IP_LOCATION_TABLE].values(),
             )
             logger.debug(
-                "Finished cache merge into %s with delegation_rows=%d dns_rows=%d geo_rows=%d "
+                "Finished cache merge into %s with delegation_rows=%d "
+                "host_resolution_rows=%d ip_location_rows=%d "
                 "merged_cache_count=%d missing_cache_count=%d invalid_cache_count=%d",
                 target_path,
                 len(rows_by_key[DELEGATION_TABLE]),
-                len(rows_by_key[DNS_TABLE]),
-                len(rows_by_key[GEO_TABLE]),
+                len(rows_by_key[HOST_RESOLUTION_TABLE]),
+                len(rows_by_key[IP_LOCATION_TABLE]),
                 merged_cache_count,
                 missing_cache_count,
                 invalid_cache_count,

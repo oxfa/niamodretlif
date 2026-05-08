@@ -21,7 +21,7 @@ permissions:
 # manual_filter_pass and manual_add require delegation before routing to
 # filtered, except source-matched public suffix manual_filter_pass entries,
 # which route to filtered during prepare because there is no registrable domain
-# to query. manual_filter_out bypasses delegation, host resolution, and geo and
+# to query. manual_filter_out bypasses delegation, host resolution, and ip location and
 # routes to review.
 jobs:
   batch:

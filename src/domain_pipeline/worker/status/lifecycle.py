@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.aggregate_manifest import (
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
 )
-from domain_pipeline.prepare.worker_manifest import (
+from domain_pipeline.prepare.prepare_to_worker_manifest import (
     load_prepare_worker_manifest_for_worker,
 )
-from domain_pipeline.worker.aggregate_manifest import (
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
     worker_aggregate_manifest_paths,
     write_worker_aggregate_manifest,
@@ -45,11 +45,29 @@ class WorkerStatusLifecycle:
         state_root: Path,
     ) -> dict[str, Any]:
         """Write one in-progress worker status when a worker manifest exists."""
-        prepare_manifest = load_prepare_worker_manifest_for_worker(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            state_root=state_root,
-        )
+        try:
+            prepare_manifest = load_prepare_worker_manifest_for_worker(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+            )
+        except ValueError as exc:
+            failure_reason = str(exc)
+            status_path = self.record_failure(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+                failure_reason=failure_reason,
+            )
+            return {
+                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
+                "batch_id": batch_id,
+                "worker_id": worker_id,
+                "participates": True,
+                "conclusion": STATUS_FAILURE,
+                "failure_reason": failure_reason,
+                "status_path": status_path,
+            }
         if prepare_manifest is None:
             return {
                 "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
@@ -110,12 +128,27 @@ class WorkerStatusLifecycle:
         finished_at: str | None = None,
     ) -> list[str]:
         """Finalize one worker status file after processing."""
-        if (
-            load_prepare_worker_manifest_for_worker(
+        try:
+            prepare_manifest = load_prepare_worker_manifest_for_worker(
                 batch_id=batch_id, worker_id=worker_id, state_root=state_root
             )
-            is None
-        ):
+        except ValueError as exc:
+            manifest_exists = True
+            status_path = self.store.status_path(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+            )
+            if not status_path.is_file():
+                self.record_failure(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    state_root=state_root,
+                    failure_reason=str(exc),
+                )
+        else:
+            manifest_exists = prepare_manifest is not None
+        if not manifest_exists:
             return []
         status_path = self.store.status_path(
             batch_id=batch_id,
@@ -253,6 +286,41 @@ class WorkerStatusLifecycle:
             "retry_count": push_retry_count,
             "failure_reason": failure_reason,
         }
+
+    def record_failure(
+        self,
+        *,
+        batch_id: str,
+        worker_id: str,
+        state_root: Path,
+        failure_reason: str,
+        finished_at: str | None = None,
+    ) -> str:
+        """Write a terminal worker failure status without trusting manifest paths."""
+        finished_timestamp = finished_at or utc_now()
+        status_path = self.store.status_path(
+            batch_id=batch_id,
+            worker_id=worker_id,
+            state_root=state_root,
+        )
+        template = self._status_template(batch_id=batch_id, worker_id=worker_id)
+        if status_path.exists():
+            existing_payload = self.store.read_status(status_path)
+            started_at = existing_payload.get("timestamps", {}).get("started_at")
+            if started_at is not None:
+                template["started_at"] = started_at
+        self.store.write_status(
+            status_path,
+            self._status_payload_from_template(
+                template=template,
+                output_commit_sha="",
+                push_retry_count=0,
+                finished_at=finished_timestamp,
+                conclusion=STATUS_FAILURE,
+                failure_reason=failure_reason,
+            ),
+        )
+        return self.store.status_relative_path(batch_id=batch_id, worker_id=worker_id)
 
 
 def initialize_worker_statuses(

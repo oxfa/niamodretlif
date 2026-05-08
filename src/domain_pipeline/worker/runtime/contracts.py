@@ -1,7 +1,5 @@
 """Worker runtime contracts and payload types."""
 
-# pylint: disable=too-many-instance-attributes
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,8 +7,9 @@ from typing import Any
 
 from domain_pipeline.routing import ResultRoute
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.worker.dns import DelegationResult, HostResolutionResult
-from domain_pipeline.worker.geo import GeoPolicyDecision, IPGeoResult
+from domain_pipeline.worker.delegation import DelegationResult
+from domain_pipeline.worker.host_resolution import HostResolutionResult
+from domain_pipeline.worker.ip_location import LocationPolicyDecision, IPLocationResult
 
 
 @dataclass(frozen=True)
@@ -58,8 +57,8 @@ class HostResolutionWorkItem:
 
 
 @dataclass(frozen=True)
-class GeoWorkItem:
-    """Item emitted by host resolution for geo processing."""
+class IpLocationWorkItem:
+    """Item emitted by host resolution for ip location processing."""
 
     parsed: ParsedHostItem
     delegation_result: DelegationResult
@@ -78,6 +77,6 @@ class CompletedHostResult:
     row: dict[str, Any]
     delegation_result: DelegationResult | None = None
     host_resolution_result: HostResolutionResult | None = None
-    geo_results: list[IPGeoResult] = field(default_factory=list)
-    geo_policy: GeoPolicyDecision | None = None
-    geo_attempts: list[dict[str, Any]] = field(default_factory=list)
+    ip_location_results: list[IPLocationResult] = field(default_factory=list)
+    ip_location_policy: LocationPolicyDecision | None = None
+    ip_location_attempts: list[dict[str, Any]] = field(default_factory=list)

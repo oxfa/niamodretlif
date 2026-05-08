@@ -27,7 +27,7 @@ class BatchPathSpec:
 
 
 @dataclass(frozen=True)
-class WorkerPathSpec:  # pylint: disable=too-many-instance-attributes
+class WorkerPathSpec:
     """Repo path locations used during one worker execution."""
 
     result_root: Path

@@ -62,7 +62,7 @@ class DNSPendingQuerySnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
-class DNSProviderCapacitySnapshot:  # pylint: disable=too-many-instance-attributes
+class DNSProviderCapacitySnapshot:
     """Process-local DNS provider capacity and recent pressure."""
 
     provider: str
@@ -726,18 +726,6 @@ class DNSQueryCoordinatorBase:
                         )
                     return endpoint.resolver.resolve(name, record_type)
         return endpoint.resolver.resolve(name, record_type)
-
-
-class DNSDelegationQueryCoordinator(DNSQueryCoordinatorBase):
-    """Coordinator for the dns.delegation stage."""
-
-    stage = "delegation"
-
-
-class DNSHostResolutionQueryCoordinator(DNSQueryCoordinatorBase):
-    """Coordinator for the dns.host_resolution stage."""
-
-    stage = "host_resolution"
 
 
 def _answer_values(answer: Any) -> list[str]:

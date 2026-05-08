@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from domain_pipeline.prepare.worker_manifest import (
+from domain_pipeline.prepare.prepare_to_worker_manifest import (
     load_prepare_worker_manifest_for_worker,
 )
 from domain_pipeline.worker.runtime.executor import run_prepared_pipeline_async
@@ -70,11 +70,31 @@ class WorkerBatchRunner:
         max_runtime_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Process one worker from its prepare-owned runtime manifest."""
-        prepare_manifest = load_prepare_worker_manifest_for_worker(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            state_root=state_root,
-        )
+        try:
+            prepare_manifest = load_prepare_worker_manifest_for_worker(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+            )
+        except ValueError as exc:
+            error_reason = str(exc)
+            status_path = self.status_lifecycle.record_failure(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+                failure_reason=error_reason,
+            )
+            log.exception("Worker %s manifest validation failed", worker_id)
+            return {
+                "automation_format_version": 2,
+                "batch_id": batch_id,
+                "worker_id": worker_id,
+                "participates": True,
+                "overall_conclusion": STATUS_FAILURE,
+                "conclusion": STATUS_FAILURE,
+                "error_reason": error_reason,
+                "status_path": status_path,
+            }
         if prepare_manifest is None:
             return {
                 "automation_format_version": 2,
@@ -120,7 +140,7 @@ class WorkerBatchRunner:
                 )
             if exit_code != 0:
                 raise RuntimeError(f"pipeline exited with status {exit_code}")
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             overall_conclusion = STATUS_FAILURE
             conclusion = STATUS_FAILURE
             error_reason = str(exc)

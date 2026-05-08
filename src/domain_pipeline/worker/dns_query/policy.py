@@ -6,7 +6,7 @@ import ipaddress
 import math
 from typing import Any
 
-from domain_pipeline.worker.dns.constants import SYSTEM_DNS_NAMESERVER
+from domain_pipeline.worker.dns_query.constants import SYSTEM_DNS_NAMESERVER
 
 
 class DNSConfigPolicy:
@@ -45,13 +45,13 @@ class DNSConfigPolicy:
     def validate_timeout(self, value: float) -> float:
         """Return a normalized positive DNS timeout."""
         if not math.isfinite(value) or value <= 0:
-            raise ValueError("dns.timeout must be finite and positive")
+            raise ValueError("dns_query.timeout must be finite and positive")
         return float(value)
 
     def validate_retry_backoff_base_seconds(self, value: float) -> float:
         """Return a normalized positive DNS retry backoff base delay."""
         if not math.isfinite(value) or value <= 0:
             raise ValueError(
-                "dns.retry_backoff_base_seconds must be finite and positive"
+                "dns_query.retry_backoff_base_seconds must be finite and positive"
             )
         return float(value)

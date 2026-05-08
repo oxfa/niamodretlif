@@ -9,14 +9,16 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from domain_pipeline.prepare.config import models
-from domain_pipeline.worker.geo.policy import GeoConfigPolicy
+from domain_pipeline.worker.ip_location.policy import IPLocationConfigPolicy
 
 
 class ConfigNormalizer:
-    """Merge defaults, source overrides, cache defaults, and geo effective fields."""
+    """Merge defaults, source overrides, cache defaults, and ip location effective fields."""
 
-    def __init__(self, *, geo_policy: GeoConfigPolicy | None = None) -> None:
-        self.geo_policy = geo_policy or GeoConfigPolicy()
+    def __init__(
+        self, *, ip_location_policy: IPLocationConfigPolicy | None = None
+    ) -> None:
+        self.ip_location_policy = ip_location_policy or IPLocationConfigPolicy()
 
     def explicit_model_dump(self, model: BaseModel) -> dict[str, Any]:
         """Return only fields explicitly provided by the user."""
@@ -58,16 +60,15 @@ class ConfigNormalizer:
 
     def finalize_dns_stage_defaults(self, source_payload: dict[str, Any]) -> None:
         """Apply derived host-resolution defaults after source/default merging."""
-        dns_payload = source_payload["dns"]
-        host_resolution = dns_payload["host_resolution"]
+        host_resolution = source_payload["host_resolution"]
         if host_resolution.get("enabled") is None:
-            host_resolution["enabled"] = bool(source_payload["geo"]["enabled"])
+            host_resolution["enabled"] = bool(source_payload["ip_location"]["enabled"])
 
     def finalize_cache_defaults(self, cache_payload: dict[str, Any]) -> None:
-        """Apply legacy host-resolution TTL fallback to normalized cache settings."""
-        host_ttls = cache_payload["dns_host_resolution_ttl_days"]
+        """Apply host-resolution cache TTL defaults to normalized settings."""
+        host_ttls = cache_payload["host_resolution_ttl_days"]
         if host_ttls.get("resolved") is None:
-            host_ttls["resolved"] = int(cache_payload.get("dns_ttl_days", 1))
+            host_ttls["resolved"] = 1
 
     def format_validation_error(self, exc: ValidationError) -> str:
         """Return the first pydantic validation error as an actionable path."""
@@ -135,15 +136,17 @@ class ConfigNormalizer:
             )
 
         normalized_payload = normalized_config.model_dump()
-        self.geo_policy.inject_effective_fields(normalized_payload["defaults"]["geo"])
+        self.ip_location_policy.inject_effective_fields(
+            normalized_payload["defaults"]["ip_location"]
+        )
         for source in normalized_payload["sources"]:
-            self.geo_policy.inject_effective_fields(source["geo"])
-            self.geo_policy.validate_geojs_region_rules(
-                source["geo"], source_label=f"sources[{source['id']!r}]"
+            self.ip_location_policy.inject_effective_fields(source["ip_location"])
+            self.ip_location_policy.validate_ip_locationjs_region_rules(
+                source["ip_location"], source_label=f"sources[{source['id']!r}]"
             )
             if source["enabled"] and validate_runtime_credentials:
-                self.geo_policy.validate_provider_credentials(
-                    source["geo"], source_label=f"sources[{source['id']!r}]"
+                self.ip_location_policy.validate_provider_credentials(
+                    source["ip_location"], source_label=f"sources[{source['id']!r}]"
                 )
         return normalized_payload
 

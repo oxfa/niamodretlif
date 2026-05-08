@@ -1,7 +1,5 @@
 """Prepare-step data models."""
 
-# pylint: disable=too-many-instance-attributes
-
 from __future__ import annotations
 
 import dataclasses

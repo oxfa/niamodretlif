@@ -13,20 +13,20 @@ from typing import Any, Literal
 
 from domain_pipeline.worker.cache.constants import (
     DELEGATION_WRITER_QUEUE_SIZE,
-    GEO_WRITER_QUEUE_SIZE,
+    IP_LOCATION_WRITER_QUEUE_SIZE,
     HOST_RESOLUTION_WRITER_QUEUE_SIZE,
 )
 from domain_pipeline.worker.cache.requests import (
     DelegationCacheWriteRequest,
-    GeoCacheWriteRequest,
+    IpLocationCacheWriteRequest,
     HostResolutionCacheWriteRequest,
 )
 from domain_pipeline.worker.cache.repository import (
     DELEGATION_TABLE,
-    DNS_TABLE,
-    GEO_TABLE,
+    IP_LOCATION_TABLE,
+    HOST_RESOLUTION_TABLE,
     DelegationHistoryRecord,
-    GeoHistoryRecord,
+    IpLocationHistoryRecord,
     HostResolutionHistoryRecord,
     CacheRepository,
 )
@@ -75,12 +75,12 @@ class AsyncCacheService:
             self._get_fresh_host_resolution_sync_with_source, host, resolver_key, now
         )
 
-    async def get_fresh_geo_with_source(
+    async def get_fresh_ip_location_with_source(
         self, provider: str, ip: str, now: Any
-    ) -> tuple[GeoHistoryRecord | None, CacheHitSource | None]:
-        """Return a fresh geo record and cache-hit source."""
+    ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
+        """Return a fresh ip location record and cache-hit source."""
         return await asyncio.to_thread(
-            self._get_fresh_geo_sync_with_source, provider, ip, now
+            self._get_fresh_ip_location_sync_with_source, provider, ip, now
         )
 
     def _fetch_one(
@@ -131,7 +131,7 @@ class AsyncCacheService:
         self, host: str, resolver_key: str, now: Any
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
-            table_name=DNS_TABLE,
+            table_name=HOST_RESOLUTION_TABLE,
             columns="*",
             where_sql="host = ? AND resolver_key = ?",
             values=(host, resolver_key),
@@ -139,15 +139,15 @@ class AsyncCacheService:
             now=now,
         )
 
-    def _get_fresh_geo_sync_with_source(
+    def _get_fresh_ip_location_sync_with_source(
         self, provider: str, ip: str, now: Any
-    ) -> tuple[GeoHistoryRecord | None, CacheHitSource | None]:
+    ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
-            table_name=GEO_TABLE,
+            table_name=IP_LOCATION_TABLE,
             columns="*",
             where_sql="provider = ? AND ip = ?",
             values=(provider, ip),
-            record_factory=GeoHistoryRecord.from_row,
+            record_factory=IpLocationHistoryRecord.from_row,
             now=now,
         )
 
@@ -198,8 +198,10 @@ def _write_host_resolution(
     cache.put_host_resolution(**request.__dict__)
 
 
-def _write_geo(cache: CacheRepository, request: GeoCacheWriteRequest) -> None:
-    cache.put_geo(**request.__dict__)
+def _write_ip_location(
+    cache: CacheRepository, request: IpLocationCacheWriteRequest
+) -> None:
+    cache.put_ip_location(**request.__dict__)
 
 
 def build_delegation_cache_writer(path: Path) -> CacheWriteDispatcher:
@@ -212,9 +214,9 @@ def build_host_resolution_cache_writer(path: Path) -> CacheWriteDispatcher:
     return CacheWriteDispatcher(path, _write_host_resolution)
 
 
-def build_geo_cache_writer(path: Path) -> CacheWriteDispatcher:
-    """Build the async writer responsible for geo cache rows."""
-    return CacheWriteDispatcher(path, _write_geo)
+def build_ip_location_cache_writer(path: Path) -> CacheWriteDispatcher:
+    """Build the async writer responsible for ip location cache rows."""
+    return CacheWriteDispatcher(path, _write_ip_location)
 
 
 def build_cache_bundle(
@@ -228,9 +230,9 @@ def build_cache_bundle(
     host_resolution_writer.queue = asyncio.Queue(
         maxsize=HOST_RESOLUTION_WRITER_QUEUE_SIZE
     )
-    geo_writer = build_geo_cache_writer(cache_path)
-    geo_writer.queue = asyncio.Queue(maxsize=GEO_WRITER_QUEUE_SIZE)
+    ip_location_writer = build_ip_location_cache_writer(cache_path)
+    ip_location_writer.queue = asyncio.Queue(maxsize=IP_LOCATION_WRITER_QUEUE_SIZE)
     return CacheBundle(
         reader=reader,
-        writers=[delegation_writer, host_resolution_writer, geo_writer],
+        writers=[delegation_writer, host_resolution_writer, ip_location_writer],
     )

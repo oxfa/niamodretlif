@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.prepare.worker_manifest import (
+from domain_pipeline.prepare.prepare_to_worker_manifest import (
     PrepareWorkerManifest,
     load_prepare_worker_manifest_for_worker,
 )
@@ -257,11 +257,21 @@ def finalize_worker_aggregate_handoff(
     state_root: Path,
 ) -> dict[str, Any]:
     """Finalize one worker-to-aggregate handoff from worker-local sidecars."""
-    prepare_manifest = load_prepare_worker_manifest_for_worker(
-        batch_id=batch_id,
-        worker_id=worker_id,
-        state_root=state_root,
-    )
+    try:
+        prepare_manifest = load_prepare_worker_manifest_for_worker(
+            batch_id=batch_id,
+            worker_id=worker_id,
+            state_root=state_root,
+        )
+    except ValueError as exc:
+        return {
+            "automation_format_version": 2,
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "participates": True,
+            "handoff_finalized": False,
+            "error_reason": str(exc),
+        }
     if prepare_manifest is None:
         return {
             "automation_format_version": 2,

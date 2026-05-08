@@ -30,7 +30,7 @@ from domain_pipeline.prepare.models import (
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
 from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
 from domain_pipeline.routing import route_for_pipeline_result_code
-from domain_pipeline.worker.dns import host_resolution_dns_profile
+from domain_pipeline.worker.host_resolution import host_resolution_dns_profile
 from domain_pipeline.worker.output.rows import build_base_row
 
 
@@ -286,7 +286,7 @@ class PreparationPlanner:
         previous = host_fingerprints.get(host)
         if previous is not None and previous != fingerprint:
             raise ValueError(
-                f"duplicate host {host!r} has conflicting dns/geo/output behavior"
+                f"duplicate host {host!r} has conflicting stage/output behavior"
             )
         host_fingerprints[host] = fingerprint
 
@@ -496,7 +496,7 @@ class PreparationPlanner:
             )
             fingerprints_by_source = {
                 entry.source_id: delegation_behavior_fingerprint(
-                    source_jobs_by_id[entry.source_id].config["dns"]
+                    source_jobs_by_id[entry.source_id].config
                 )
                 for entry in ordered_entries
             }
@@ -519,39 +519,43 @@ class PreparationPlanner:
             )
         return root_plans
 
-    def _canonical_delegation_dns_behavior(
-        self, dns_config: dict[str, Any]
-    ) -> dict[str, Any]:
-        return json.loads(delegation_behavior_fingerprint(dns_config))
+    def _stage_dns_config(self, source_config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **dict(source_config["dns_query"]),
+            "delegation": dict(source_config["delegation"]),
+            "host_resolution": dict(source_config["host_resolution"]),
+        }
 
-    def _canonical_host_resolution_dns_behavior(
-        self, dns_config: dict[str, Any]
+    def _canonical_delegation_behavior(
+        self, source_config: dict[str, Any]
     ) -> dict[str, Any]:
-        host_resolution_config = dict(dns_config["host_resolution"])
+        return json.loads(delegation_behavior_fingerprint(source_config))
+
+    def _canonical_host_resolution_behavior(
+        self, source_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        dns_config = self._stage_dns_config(source_config)
+        host_resolution_config = dict(source_config["host_resolution"])
         return {
             **host_resolution_dns_profile(dns_config),
             "enabled": host_resolution_config["enabled"],
             "retry_attempts": host_resolution_config["retry_attempts"],
         }
 
-    def _canonical_dns_behavior(self, dns_config: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "delegation": self._canonical_delegation_dns_behavior(dns_config),
-            "host_resolution": self._canonical_host_resolution_dns_behavior(dns_config),
-        }
-
     def _source_behavior_fingerprint(self, source_config: dict[str, Any]) -> str:
         payload = {
-            "dns": self._canonical_dns_behavior(source_config["dns"]),
-            "geo": source_config["geo"],
+            "dns_query": source_config["dns_query"],
+            "delegation": self._canonical_delegation_behavior(source_config),
+            "host_resolution": self._canonical_host_resolution_behavior(source_config),
+            "ip_location": source_config["ip_location"],
             "output": source_config["output"],
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def _manual_add_behavior_fingerprint(self, source_config: dict[str, Any]) -> str:
-        dns_config = source_config["dns"]
         payload = {
-            "dns": {"delegation": self._canonical_delegation_dns_behavior(dns_config)},
+            "dns_query": source_config["dns_query"],
+            "delegation": self._canonical_delegation_behavior(source_config),
             "output": source_config["output"],
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))

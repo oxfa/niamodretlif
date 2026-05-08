@@ -7,10 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.aggregate_manifest import (
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
 )
-from domain_pipeline.worker.aggregate_manifest import (
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
     load_worker_aggregate_manifest,
     worker_aggregate_manifest_paths,
 )

@@ -67,7 +67,8 @@ def _icann_public_suffix_list() -> publicsuffix2.PublicSuffixList:
 
 # The parsed record intentionally keeps a stable, explicit shape for runtime
 # output and test assertions.
-# pylint: disable=too-many-instance-attributes
+
+
 @dataclasses.dataclass(frozen=True)
 class ParsedDomainEntry:
     """A normalized host entry paired with its registrable domain."""

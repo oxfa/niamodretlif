@@ -12,39 +12,42 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
-from domain_pipeline.worker.dns.result_codes import (
-    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_ABSENT,
-    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL,
-    PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT,
-    PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL,
-    PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT,
-    PIPELINE_RESULT_CODE_DNS_HOST_NODATA,
-    PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN,
-    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES,
-    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL,
-    PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT,
+from domain_pipeline.worker.delegation.result_codes import (
+    PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_ABSENT,
+    PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL,
+    PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_TIMEOUT,
+    PIPELINE_RESULT_CODE_DELEGATION_SERVFAIL,
+    PIPELINE_RESULT_CODE_DELEGATION_TIMEOUT,
+)
+from domain_pipeline.worker.host_resolution.result_codes import (
+    PIPELINE_RESULT_CODE_HOST_RESOLUTION_NODATA,
+    PIPELINE_RESULT_CODE_HOST_RESOLUTION_NXDOMAIN,
+    PIPELINE_RESULT_CODE_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES,
+    PIPELINE_RESULT_CODE_HOST_RESOLUTION_SERVFAIL,
+    PIPELINE_RESULT_CODE_HOST_RESOLUTION_TIMEOUT,
     HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES,
 )
-from domain_pipeline.worker.geo.result_codes import (
-    PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
-    PIPELINE_RESULT_CODE_GEO_POLICY_REJECTED,
-    PIPELINE_RESULT_CODE_GEO_REGION_NAME_UNAVAILABLE,
-    GEO_REVIEW_PIPELINE_RESULT_CODES,
+from domain_pipeline.worker.ip_location.result_codes import (
+    PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED,
+    PIPELINE_RESULT_CODE_IP_LOCATION_POLICY_REJECTED,
+    PIPELINE_RESULT_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE,
+    IP_LOCATION_REVIEW_PIPELINE_RESULT_CODES,
 )
 from domain_pipeline.worker.output.review_labels import (
-    REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL,
-    REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT,
-    REVIEW_LABEL_DNS_DELEGATION_SERVFAIL,
-    REVIEW_LABEL_DNS_DELEGATION_TIMEOUT,
-    REVIEW_LABEL_DNS_HOST_RESOLUTION_FILTERED_OUT,
-    REVIEW_LABEL_GEO_FILTERED_OUT,
+    REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_SERVFAIL,
+    REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_TIMEOUT,
+    REVIEW_LABEL_DELEGATION_SERVFAIL,
+    REVIEW_LABEL_DELEGATION_TIMEOUT,
+    REVIEW_LABEL_HOST_RESOLUTION_FILTERED_OUT,
+    REVIEW_LABEL_IP_LOCATION_FILTERED_OUT,
     REVIEW_LABEL_INPUT_PUBLIC_SUFFIX,
     REVIEW_LABEL_MANUAL_FILTERED_OUT,
     REVIEW_LABEL_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.worker.dns import DelegationResult, HostResolutionResult
-from domain_pipeline.worker.geo import GeoPolicyDecision, IPGeoResult
+from domain_pipeline.worker.delegation import DelegationResult
+from domain_pipeline.worker.host_resolution import HostResolutionResult
+from domain_pipeline.worker.ip_location import LocationPolicyDecision, IPLocationResult
 
 REVIEW_OUTPUT_COLUMNS = (
     "input_name",
@@ -56,11 +59,11 @@ REVIEW_OUTPUT_COLUMNS = (
     "delegation_reason",
     "host_resolution_status",
     "host_resolution_reason",
-    "geo_status",
-    "geo_reason",
-    "geo_policy_status",
-    "geo_policy_reason",
-    "geo_provider",
+    "ip_location_status",
+    "ip_location_reason",
+    "ip_location_policy_status",
+    "ip_location_policy_reason",
+    "ip_location_provider",
     "source_id",
     "source_input_label",
     "source_ids",
@@ -94,11 +97,11 @@ class ReviewOutputRow(TypedDict):
     delegation_reason: str
     host_resolution_status: str
     host_resolution_reason: str
-    geo_status: str
-    geo_reason: str
-    geo_policy_status: str
-    geo_policy_reason: str
-    geo_provider: str
+    ip_location_status: str
+    ip_location_reason: str
+    ip_location_policy_status: str
+    ip_location_policy_reason: str
+    ip_location_provider: str
     source_id: str
     source_input_label: str
     source_ids: str
@@ -117,24 +120,18 @@ def public_review_label(row: dict[str, Any]) -> str:
         PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
     }:
         return REVIEW_LABEL_MANUAL_FILTERED_OUT
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT:
-        return REVIEW_LABEL_DNS_DELEGATION_TIMEOUT
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL:
-        return REVIEW_LABEL_DNS_DELEGATION_SERVFAIL
-    if (
-        pipeline_result_code
-        == PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT
-    ):
-        return REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT
-    if (
-        pipeline_result_code
-        == PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL
-    ):
-        return REVIEW_LABEL_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL
+    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_TIMEOUT:
+        return REVIEW_LABEL_DELEGATION_TIMEOUT
+    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_SERVFAIL:
+        return REVIEW_LABEL_DELEGATION_SERVFAIL
+    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_TIMEOUT:
+        return REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_TIMEOUT
+    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL:
+        return REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_SERVFAIL
     if pipeline_result_code in HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES:
-        return REVIEW_LABEL_DNS_HOST_RESOLUTION_FILTERED_OUT
-    if pipeline_result_code in GEO_REVIEW_PIPELINE_RESULT_CODES:
-        return REVIEW_LABEL_GEO_FILTERED_OUT
+        return REVIEW_LABEL_HOST_RESOLUTION_FILTERED_OUT
+    if pipeline_result_code in IP_LOCATION_REVIEW_PIPELINE_RESULT_CODES:
+        return REVIEW_LABEL_IP_LOCATION_FILTERED_OUT
     return pipeline_result_code
 
 
@@ -165,37 +162,45 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
             "manual_filter_out entry was not present in any configured source"
         ),
-        PIPELINE_RESULT_CODE_DNS_DELEGATION_TIMEOUT: (
-            "NS delegation lookup timed out after retries"
+        PIPELINE_RESULT_CODE_DELEGATION_TIMEOUT: (
+            "delegation authority check timed out after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_DELEGATION_SERVFAIL: (
-            "NS delegation lookup returned SERVFAIL after retries"
+        PIPELINE_RESULT_CODE_DELEGATION_SERVFAIL: (
+            "delegation authority check returned SERVFAIL after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_ABSENT: (
-            "NS delegation returned NODATA and SOA was absent"
+        PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_ABSENT: (
+            "delegation NS query returned NODATA and SOA was absent"
         ),
-        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_TIMEOUT: (
-            "NS delegation returned NODATA and SOA fallback timed out after retries"
+        PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_TIMEOUT: (
+            "delegation NS query returned NODATA and SOA fallback timed out "
+            "after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_DELEGATION_NS_NODATA_SOA_SERVFAIL: (
-            "NS delegation returned NODATA and SOA fallback returned SERVFAIL after retries"
+        PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL: (
+            "delegation NS query returned NODATA and SOA fallback returned "
+            "SERVFAIL after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_HOST_NXDOMAIN: "host resolution returned NXDOMAIN",
-        PIPELINE_RESULT_CODE_DNS_HOST_NODATA: "host resolution returned NODATA",
-        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_TIMEOUT: (
+        PIPELINE_RESULT_CODE_HOST_RESOLUTION_NXDOMAIN: (
+            "host resolution returned NXDOMAIN"
+        ),
+        PIPELINE_RESULT_CODE_HOST_RESOLUTION_NODATA: "host resolution returned NODATA",
+        PIPELINE_RESULT_CODE_HOST_RESOLUTION_TIMEOUT: (
             "host resolution timed out after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_SERVFAIL: (
+        PIPELINE_RESULT_CODE_HOST_RESOLUTION_SERVFAIL: (
             "host resolution returned SERVFAIL after retries"
         ),
-        PIPELINE_RESULT_CODE_DNS_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES: (
+        PIPELINE_RESULT_CODE_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES: (
             "host resolution produced no usable IP addresses"
         ),
-        PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED: "geo lookup did not produce usable data",
-        PIPELINE_RESULT_CODE_GEO_REGION_NAME_UNAVAILABLE: (
-            "geo policy required a region name unavailable from the provider"
+        PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED: (
+            "ip_location lookup did not produce usable data"
         ),
-        PIPELINE_RESULT_CODE_GEO_POLICY_REJECTED: "geo policy rejected the resolved IP set",
+        PIPELINE_RESULT_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE: (
+            "ip location policy required a region name unavailable from the provider"
+        ),
+        PIPELINE_RESULT_CODE_IP_LOCATION_POLICY_REJECTED: (
+            "ip location policy rejected the resolved IP set"
+        ),
     }
     return reason_by_pipeline_result_code.get(
         pipeline_result_code, pipeline_result_code
@@ -213,8 +218,8 @@ def build_base_row(
     pipeline_result_code: str,
     delegation_result: DelegationResult | None = None,
     host_resolution_result: HostResolutionResult | None = None,
-    geo_results: list[IPGeoResult] | None = None,
-    geo_policy: GeoPolicyDecision | None = None,
+    ip_location_results: list[IPLocationResult] | None = None,
+    ip_location_policy: LocationPolicyDecision | None = None,
     source_id_override: str | None = None,
     source_input_label_override: str | None = None,
     source_ids: tuple[str, ...] = (),
@@ -226,7 +231,9 @@ def build_base_row(
         if host_resolution_result is not None
         else []
     )
-    usable_geo_results = [result for result in geo_results or [] if result.usable]
+    usable_ip_location_results = [
+        result for result in ip_location_results or [] if result.usable
+    ]
     row: dict[str, Any] = {
         "input_name": entry.input_name or entry.host,
         "host": entry.host,
@@ -265,23 +272,41 @@ def build_base_row(
             else ""
         ),
         "resolved_ips": resolved_ips,
-        "geo_status": geo_policy.status if geo_policy is not None else "skipped",
-        "geo_reason": geo_policy.reason if geo_policy is not None else "skipped",
-        "geo_policy_status": geo_policy.status if geo_policy is not None else "skipped",
-        "geo_policy_reason": geo_policy.reason if geo_policy is not None else "skipped",
-        "geo_provider": usable_geo_results[0].provider if usable_geo_results else "",
-        "geo_countries": sorted(
+        "ip_location_status": (
+            ip_location_policy.status if ip_location_policy is not None else "skipped"
+        ),
+        "ip_location_reason": (
+            ip_location_policy.reason if ip_location_policy is not None else "skipped"
+        ),
+        "ip_location_policy_status": (
+            ip_location_policy.status if ip_location_policy is not None else "skipped"
+        ),
+        "ip_location_policy_reason": (
+            ip_location_policy.reason if ip_location_policy is not None else "skipped"
+        ),
+        "ip_location_provider": (
+            usable_ip_location_results[0].provider if usable_ip_location_results else ""
+        ),
+        "ip_location_countries": sorted(
             {
                 result.country_code
-                for result in usable_geo_results
+                for result in usable_ip_location_results
                 if result.country_code
             }
         ),
-        "geo_region_codes": sorted(
-            {result.region_code for result in usable_geo_results if result.region_code}
+        "ip_location_region_codes": sorted(
+            {
+                result.region_code
+                for result in usable_ip_location_results
+                if result.region_code
+            }
         ),
-        "geo_region_names": sorted(
-            {result.region_name for result in usable_geo_results if result.region_name}
+        "ip_location_region_names": sorted(
+            {
+                result.region_name
+                for result in usable_ip_location_results
+                if result.region_name
+            }
         ),
         "source_id": source_id_override or source_context.source_id,
         "source_input_label": source_input_label_override or source_context.input_label,
@@ -306,11 +331,11 @@ def build_review_output_row(row: dict[str, Any]) -> ReviewOutputRow:
         "delegation_reason": str(row.get("delegation_reason", "")),
         "host_resolution_status": str(row.get("host_resolution_status", "")),
         "host_resolution_reason": str(row.get("host_resolution_reason", "")),
-        "geo_status": str(row.get("geo_status", "")),
-        "geo_reason": str(row.get("geo_reason", "")),
-        "geo_policy_status": str(row.get("geo_policy_status", "")),
-        "geo_policy_reason": str(row.get("geo_policy_reason", "")),
-        "geo_provider": str(row.get("geo_provider", "")),
+        "ip_location_status": str(row.get("ip_location_status", "")),
+        "ip_location_reason": str(row.get("ip_location_reason", "")),
+        "ip_location_policy_status": str(row.get("ip_location_policy_status", "")),
+        "ip_location_policy_reason": str(row.get("ip_location_policy_reason", "")),
+        "ip_location_provider": str(row.get("ip_location_provider", "")),
         "source_id": str(row.get("source_id", "")),
         "source_input_label": str(row.get("source_input_label", "")),
         "source_ids": _json_list(

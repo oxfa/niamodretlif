@@ -1,26 +1,35 @@
-"""Prepare/runtime helpers for delegation-root compatibility."""
+"""Prepare/runtime helpers for delegation-root grouping."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from domain_pipeline.worker.dns import delegation_dns_profile
+from domain_pipeline.worker.delegation import delegation_stage_dns_profile
 
 
-def delegation_behavior_payload(dns_config: dict[str, Any]) -> dict[str, Any]:
-    """Return DNS behavior that affects one live delegation NS lookup."""
-    delegation_config = dict(dns_config["delegation"])
+def delegation_dns_config(source_config: dict[str, Any]) -> dict[str, Any]:
+    """Return the shared DNS-query payload plus delegation settings."""
     return {
-        **delegation_dns_profile(dns_config),
+        **dict(source_config["dns_query"]),
+        "delegation": dict(source_config["delegation"]),
+    }
+
+
+def delegation_behavior_payload(source_config: dict[str, Any]) -> dict[str, Any]:
+    """Return DNS behavior that affects one live delegation check."""
+    dns_config = delegation_dns_config(source_config)
+    delegation_config = dict(source_config["delegation"])
+    return {
+        **delegation_stage_dns_profile(dns_config),
         "retry_attempts": delegation_config["retry_attempts"],
     }
 
 
-def delegation_behavior_fingerprint(dns_config: dict[str, Any]) -> str:
-    """Return a deterministic compatibility key for delegation root grouping."""
+def delegation_behavior_fingerprint(source_config: dict[str, Any]) -> str:
+    """Return a deterministic behavior key for delegation root grouping."""
     return json.dumps(
-        delegation_behavior_payload(dns_config),
+        delegation_behavior_payload(source_config),
         sort_keys=True,
         separators=(",", ":"),
     )

@@ -15,33 +15,33 @@ from domain_pipeline.worker.runtime.runner import (
 )
 from domain_pipeline.worker.runtime.stages import (
     DelegationStage,
-    GeoStage,
+    IpLocationStage,
     HostResolutionStage,
 )
 from domain_pipeline.worker.runtime.contracts import (
     CompletedHostResult,
     DelegationRootWorkItem,
-    GeoWorkItem,
+    IpLocationWorkItem,
     HostResolutionWorkItem,
     ParsedHostItem,
     WorkerSourceContext,
 )
 from domain_pipeline.worker.runtime.transports import (
     AsyncDelegationTransport,
-    AsyncGeoTransport,
+    AsyncIpLocationTransport,
     AsyncHostResolutionTransport,
 )
 
 __all__ = [
     "AsyncDelegationTransport",
-    "AsyncGeoTransport",
+    "AsyncIpLocationTransport",
     "AsyncHostResolutionTransport",
     "CompletedHostResult",
     "CompletedResultFactory",
     "DelegationStage",
     "DelegationRootWorkItem",
-    "GeoStage",
-    "GeoWorkItem",
+    "IpLocationStage",
+    "IpLocationWorkItem",
     "HostResolutionStage",
     "HostResolutionWorkItem",
     "PipelineExecutor",

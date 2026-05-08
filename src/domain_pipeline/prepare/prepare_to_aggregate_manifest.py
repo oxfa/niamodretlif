@@ -18,7 +18,7 @@ class PrepareAggregateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class ConfigIdentity(PrepareAggregateModel):
+class PrepareAggregateConfigIdentity(PrepareAggregateModel):
     """Stable config identity captured during batch preparation."""
 
     config_name: str
@@ -54,7 +54,7 @@ class PrepareAggregateManifest(PrepareAggregateModel):
 
     automation_format_version: int
     batch_id: str
-    config_identity: ConfigIdentity
+    config_identity: PrepareAggregateConfigIdentity
     aggregate_output_spec: AggregateOutputSpec
     worker_ids: list[str]
     preparation_review_output_rows: list[dict[str, str]]
@@ -67,7 +67,7 @@ class PrepareAggregateManifest(PrepareAggregateModel):
         *,
         automation_format_version: int,
         batch_id: str,
-        config_identity: ConfigIdentity,
+        config_identity: PrepareAggregateConfigIdentity,
         aggregate_output_spec: AggregateOutputSpec,
         worker_ids: list[str],
         preparation_review_output_rows: Sequence[Mapping[str, Any]],

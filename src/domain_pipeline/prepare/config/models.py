@@ -14,14 +14,11 @@ from pydantic import (
     model_validator,
 )
 
-from domain_pipeline.worker.dns.policy import DNSConfigPolicy
-from domain_pipeline.worker.geo.constants import (
-    GEO_PROVIDER_IPINFO_LITE,
-)
+from domain_pipeline.worker.dns_query.policy import DNSConfigPolicy
 from domain_pipeline.worker.runtime.constants import (
-    DNS_DELEGATION_STAGE_CONCURRENCY,
+    DELEGATION_STAGE_CONCURRENCY,
     DNS_HOST_RESOLUTION_STAGE_CONCURRENCY,
-    GEO_STAGE_CONCURRENCY,
+    IP_LOCATION_STAGE_CONCURRENCY,
 )
 
 LEGACY_TOP_LEVEL_KEYS = {"rdap", "rdap_global_policy", "whois_fallback"}
@@ -32,6 +29,14 @@ LEGACY_CACHE_TTL_KEYS = {
     "dead",
     "alive",
 }
+MAPPING_DEFAULT_FIELDS = {
+    "fetch",
+    "dns_query",
+    "delegation",
+    "host_resolution",
+    "ip_location",
+    "output",
+}
 
 
 class StrictModel(BaseModel):
@@ -40,7 +45,7 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class GeoMatchList(StrictModel):
+class IpLocationMatchList(StrictModel):
     """Normalized include/exclude country and region lists."""
 
     countries: list[str] = Field(default_factory=list)
@@ -58,31 +63,30 @@ class GeoMatchList(StrictModel):
         for value in values:
             stripped = value.strip()
             if not stripped:
-                raise ValueError("geo policy region entries must be non-empty strings")
+                raise ValueError(
+                    "ip_location policy region entries must be non-empty strings"
+                )
             normalized.append(stripped)
         return normalized
 
 
-class GeoPolicyConfig(StrictModel):
-    """Geolocation policy settings."""
+class LocationPolicyConfig(StrictModel):
+    """IpLocationlocation policy settings."""
 
     enabled: bool = False
     match_scope: Literal["all_ips", "any_ip"] = "all_ips"
-    include: GeoMatchList = Field(default_factory=GeoMatchList)
-    exclude: GeoMatchList = Field(default_factory=GeoMatchList)
+    include: IpLocationMatchList = Field(default_factory=IpLocationMatchList)
+    exclude: IpLocationMatchList = Field(default_factory=IpLocationMatchList)
 
 
-class GeoConfig(StrictModel):
-    """Source or default geo configuration."""
+class IPLocationConfig(StrictModel):
+    """Source or default ip location configuration."""
 
     enabled: bool = False
-    provider: Literal["ipwhois", "ip_api", "ipinfo_lite", "geojs", "ip2location_io"] = (
-        GEO_PROVIDER_IPINFO_LITE
-    )
     timeout: float = 5.0
     cache_ttl_days: int = 7
     token: str = ""
-    policy: GeoPolicyConfig = Field(default_factory=GeoPolicyConfig)
+    policy: LocationPolicyConfig = Field(default_factory=LocationPolicyConfig)
 
 
 class FetchConfig(StrictModel):
@@ -175,21 +179,6 @@ class DNSRateLimitProvidersConfig(StrictModel):
         )
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_legacy_custom_provider(cls, data: Any) -> Any:
-        """Accept the legacy custom resolver bucket as unrecognized_resolver."""
-        if not isinstance(data, dict) or "custom" not in data:
-            return data
-        if "unrecognized_resolver" in data:
-            raise ValueError(
-                "dns.query_rate_limit.providers cannot define both custom "
-                "and unrecognized_resolver"
-            )
-        normalized = dict(data)
-        normalized["unrecognized_resolver"] = normalized.pop("custom")
-        return normalized
-
 
 class DNSQueryRateLimitConfig(StrictModel):
     """DNS query rate limiting settings."""
@@ -242,7 +231,7 @@ class DNSECSConfig(StrictModel):
             network = ipaddress.ip_network(stripped, strict=False)
         except ValueError as exc:
             raise ValueError(
-                "dns.host_resolution.ecs.subnet must be a valid CIDR subnet"
+                "host_resolution.ecs.subnet must be a valid CIDR subnet"
             ) from exc
         return network.with_prefixlen
 
@@ -252,13 +241,13 @@ class DNSECSConfig(StrictModel):
             return self
         if not self.subnet:
             raise ValueError(
-                "dns.host_resolution.ecs.enabled=true requires "
-                "dns.host_resolution.ecs.subnet"
+                "host_resolution.ecs.enabled=true requires "
+                "host_resolution.ecs.subnet"
             )
         network = ipaddress.ip_network(self.subnet, strict=False)
         if not 0 <= self.scope_prefix_length <= network.max_prefixlen:
             raise ValueError(
-                "dns.host_resolution.ecs.scope_prefix_length must be within "
+                "host_resolution.ecs.scope_prefix_length must be within "
                 "the subnet address family range"
             )
         return self
@@ -305,8 +294,8 @@ class DNSStageResolverConfig(StrictModel):
         )
 
 
-class DNSDelegationConfig(DNSStageResolverConfig):
-    """Mandatory delegation-stage DNS resolver settings."""
+class DelegationConfig(DNSStageResolverConfig):
+    """Mandatory delegation resolver settings."""
 
     retry_attempts: int = 3
 
@@ -315,8 +304,8 @@ class DNSDelegationConfig(DNSStageResolverConfig):
     def _reject_host_resolution_only_fields(cls, value: Any) -> Any:
         if isinstance(value, dict) and "ecs" in value:
             raise ValueError(
-                "dns.delegation.ecs is unsupported; ECS only applies to "
-                "dns.host_resolution.ecs"
+                "delegation.ecs is unsupported; ECS only applies to "
+                "host_resolution.ecs"
             )
         return value
 
@@ -324,11 +313,11 @@ class DNSDelegationConfig(DNSStageResolverConfig):
     @classmethod
     def _validate_retry_attempts(cls, value: int) -> int:
         if value < 1:
-            raise ValueError("dns.delegation.retry_attempts must be >= 1")
+            raise ValueError("delegation.retry_attempts must be >= 1")
         return value
 
 
-class DNSHostResolutionConfig(DNSStageResolverConfig):
+class HostResolutionConfig(DNSStageResolverConfig):
     """Optional host-resolution stage settings."""
 
     enabled: bool | None = None
@@ -339,12 +328,12 @@ class DNSHostResolutionConfig(DNSStageResolverConfig):
     @classmethod
     def _validate_retry_attempts(cls, value: int) -> int:
         if value < 1:
-            raise ValueError("dns.host_resolution.retry_attempts must be >= 1")
+            raise ValueError("host_resolution.retry_attempts must be >= 1")
         return value
 
 
-class DNSConfig(StrictModel):
-    """DNS resolver pool settings and DNS stages."""
+class DNSQueryConfig(StrictModel):
+    """Shared DNS query resolver pool settings."""
 
     default_resolvers: list[DNSResolverConfig] = Field(default_factory=list)
     timeout: float = 5.0
@@ -352,33 +341,38 @@ class DNSConfig(StrictModel):
     query_rate_limit: DNSQueryRateLimitConfig = Field(
         default_factory=DNSQueryRateLimitConfig
     )
-    delegation: DNSDelegationConfig = Field(default_factory=DNSDelegationConfig)
-    host_resolution: DNSHostResolutionConfig = Field(
-        default_factory=DNSHostResolutionConfig
-    )
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_legacy_enabled(cls, value: Any) -> Any:
+    def _reject_removed_nested_stage_fields(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
         if "enabled" in value:
-            raise ValueError("dns.enabled is unsupported; dns.delegation is mandatory")
+            raise ValueError(
+                "dns_query.enabled is unsupported; delegation is mandatory"
+            )
+        if "delegation" in value:
+            raise ValueError("dns_query.delegation is unsupported; use delegation")
+        if "host_resolution" in value:
+            raise ValueError(
+                "dns_query.host_resolution is unsupported; use host_resolution"
+            )
         if "default_nameservers" in value:
             raise ValueError(
-                "dns.default_nameservers is unsupported; use dns.default_resolvers"
+                "dns_query.default_nameservers is unsupported; "
+                "use dns_query.default_resolvers"
             )
         if "nameservers" in value:
             raise ValueError(
-                "dns.nameservers is unsupported; use dns.default_resolvers or "
-                "stage-specific dns.delegation.resolvers / "
-                "dns.host_resolution.resolvers"
+                "dns_query.nameservers is unsupported; use dns_query.default_resolvers "
+                "or stage-specific delegation.resolvers / "
+                "host_resolution.resolvers"
             )
         if "ecs" in value:
-            raise ValueError("dns.ecs is unsupported; use dns.host_resolution.ecs")
+            raise ValueError("dns_query.ecs is unsupported; use host_resolution.ecs")
         if "query_balancer" in value:
             raise ValueError(
-                "dns.query_balancer is unsupported; put weight on each stage resolver"
+                "dns_query.query_balancer is unsupported; put weight on each stage resolver"
             )
         return value
 
@@ -388,7 +382,7 @@ class DNSConfig(StrictModel):
         cls, values: list[DNSResolverConfig]
     ) -> list[DNSResolverConfig]:
         return DNSConfigPolicy().validate_resolver_weights(
-            values, field_name="dns.default_resolvers"
+            values, field_name="dns_query.default_resolvers"
         )
 
     @field_validator("timeout", mode="after")
@@ -444,8 +438,8 @@ class InputConfig(StrictModel):
 class ClassificationTTLConfig(StrictModel):
     """DNS actionability cache TTLs."""
 
-    dns_delegation_actionable: int = 7
-    dns_delegation_unactionable: int = 1
+    delegation_actionable: int = 7
+    delegation_unactionable: int = 1
 
     @model_validator(mode="before")
     @classmethod
@@ -460,7 +454,7 @@ class ClassificationTTLConfig(StrictModel):
         return value
 
 
-class DNSHostResolutionTTLConfig(StrictModel):
+class HostResolutionTTLConfig(StrictModel):
     """Cache TTLs for stable exact-host resolution outcomes."""
 
     resolved: int | None = None
@@ -482,20 +476,30 @@ class CacheConfig(StrictModel):
     classification_ttl_days: ClassificationTTLConfig = Field(
         default_factory=ClassificationTTLConfig
     )
-    dns_ttl_days: int = 1
-    dns_host_resolution_ttl_days: DNSHostResolutionTTLConfig = Field(
-        default_factory=DNSHostResolutionTTLConfig
+    host_resolution_ttl_days: HostResolutionTTLConfig = Field(
+        default_factory=HostResolutionTTLConfig
     )
 
 
 class RuntimeStageConcurrencyMinimumsConfig(StrictModel):
     """Minimum worker-local async stage concurrency counts."""
 
-    delegation: int = DNS_DELEGATION_STAGE_CONCURRENCY
+    delegation: int = DELEGATION_STAGE_CONCURRENCY
     host_resolution: int = DNS_HOST_RESOLUTION_STAGE_CONCURRENCY
-    geo: int = GEO_STAGE_CONCURRENCY
+    ip_location: int = IP_LOCATION_STAGE_CONCURRENCY
 
-    @field_validator("delegation", "host_resolution", "geo", mode="after")
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_stage_names(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            if "geo" in value:
+                raise ValueError(
+                    "runtime.stage_concurrency.minimums.geo is unsupported; "
+                    "use ip_location"
+                )
+        return value
+
+    @field_validator("delegation", "host_resolution", "ip_location", mode="after")
     @classmethod
     def _validate_stage_concurrency(cls, value: int) -> int:
         if value < 1:
@@ -517,22 +521,6 @@ class RuntimeStageConcurrencyAdaptiveConfig(StrictModel):
     max_concurrency_multiplier: int = 4
     scale_up_step: int = 1
     scale_down_step: int = 1
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_legacy_adaptive_multiplier(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "max_worker_multiplier" not in data:
-            return data
-        if "max_concurrency_multiplier" in data:
-            raise ValueError(
-                "runtime.stage_concurrency.adaptive cannot define both "
-                "max_worker_multiplier and max_concurrency_multiplier"
-            )
-        normalized = dict(data)
-        normalized["max_concurrency_multiplier"] = normalized.pop(
-            "max_worker_multiplier"
-        )
-        return normalized
 
     @field_validator(
         "supervisor_interval_seconds",
@@ -581,25 +569,6 @@ class RuntimeStageConcurrencyConfig(StrictModel):
         default_factory=RuntimeStageConcurrencyAdaptiveConfig
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_flat_stage_concurrency(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        legacy_keys = {"delegation", "host_resolution", "geo"}
-        if not legacy_keys.intersection(data):
-            return data
-        if "minimums" in data:
-            raise ValueError(
-                "runtime.stage_concurrency cannot define both flat counts and minimums"
-            )
-        normalized = dict(data)
-        minimums = {
-            key: normalized.pop(key) for key in legacy_keys if key in normalized
-        }
-        normalized["minimums"] = minimums
-        return normalized
-
 
 class RuntimeConfig(StrictModel):
     """Worker-local runtime sizing settings."""
@@ -608,27 +577,34 @@ class RuntimeConfig(StrictModel):
         default_factory=RuntimeStageConcurrencyConfig
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_legacy_stage_workers(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "stage_workers" not in data:
-            return data
-        if "stage_concurrency" in data:
-            raise ValueError(
-                "runtime cannot define both stage_workers and stage_concurrency"
-            )
-        normalized = dict(data)
-        normalized["stage_concurrency"] = normalized.pop("stage_workers")
-        return normalized
-
 
 class DefaultsConfig(StrictModel):
     """Default settings inherited by each source."""
 
     fetch: FetchConfig = Field(default_factory=FetchConfig)
-    dns: DNSConfig = Field(default_factory=DNSConfig)
-    geo: GeoConfig = Field(default_factory=GeoConfig)
+    dns_query: DNSQueryConfig = Field(default_factory=DNSQueryConfig)
+    delegation: DelegationConfig = Field(default_factory=DelegationConfig)
+    host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
+    ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_defaults_names(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in MAPPING_DEFAULT_FIELDS:
+                if value.get(key) is None:
+                    value[key] = {}
+            if "dns" in value:
+                raise ValueError(
+                    "defaults.dns is unsupported; use defaults.dns_query, "
+                    "defaults.delegation, and defaults.host_resolution"
+                )
+            if "geo" in value:
+                raise ValueError(
+                    "defaults.geo is unsupported; use defaults.ip_location"
+                )
+        return value
 
 
 class SourceOverrideConfig(StrictModel):
@@ -638,8 +614,10 @@ class SourceOverrideConfig(StrictModel):
     enabled: bool = True
     input: InputConfig
     fetch: FetchConfig | None = None
-    dns: DNSConfig | None = None
-    geo: GeoConfig | None = None
+    dns_query: DNSQueryConfig | None = None
+    delegation: DelegationConfig | None = None
+    host_resolution: HostResolutionConfig | None = None
+    ip_location: IPLocationConfig | None = None
     output: OutputConfig | None = None
 
     @field_validator("id", mode="after")
@@ -650,6 +628,24 @@ class SourceOverrideConfig(StrictModel):
             raise ValueError("sources[].id must be a non-empty string")
         return stripped
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_source_names(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in MAPPING_DEFAULT_FIELDS - {"input"}:
+                if value.get(key) is None:
+                    value[key] = {}
+            if "dns" in value:
+                raise ValueError(
+                    "sources[].dns is unsupported; use sources[].dns_query, "
+                    "sources[].delegation, and sources[].host_resolution"
+                )
+            if "geo" in value:
+                raise ValueError(
+                    "sources[].geo is unsupported; use sources[].ip_location"
+                )
+        return value
+
 
 class EffectiveSourceConfig(StrictModel):
     """Fully merged source configuration."""
@@ -658,8 +654,10 @@ class EffectiveSourceConfig(StrictModel):
     enabled: bool = True
     input: InputConfig
     fetch: FetchConfig = Field(default_factory=FetchConfig)
-    dns: DNSConfig = Field(default_factory=DNSConfig)
-    geo: GeoConfig = Field(default_factory=GeoConfig)
+    dns_query: DNSQueryConfig = Field(default_factory=DNSQueryConfig)
+    delegation: DelegationConfig = Field(default_factory=DelegationConfig)
+    host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
+    ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
 
