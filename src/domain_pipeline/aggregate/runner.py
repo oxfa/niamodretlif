@@ -18,12 +18,12 @@ from domain_pipeline.aggregate.log_merge import AggregateLogMerger
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
 from domain_pipeline.aggregate.readiness import AggregateReadinessChecker
 from domain_pipeline.paths import PathLayout, WorkflowPathLayout
-from domain_pipeline.prepare.aggregate_manifest import (
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     PrepareAggregateManifest,
     load_prepare_aggregate_manifest_for_batch,
 )
 from domain_pipeline.prepare.assignment import relative_path
-from domain_pipeline.worker.aggregate_manifest import (
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
     load_worker_aggregate_manifest_for_worker,
 )

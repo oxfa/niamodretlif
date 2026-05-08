@@ -48,7 +48,7 @@ jobs:
       PIPELINE_RUN_MAX_PARALLEL_WORKERS: ${{ vars.PIPELINE_RUN_MAX_PARALLEL_WORKERS }}
       PIPELINE_PUBLISH_TARGET_BRANCH: ${{ vars.PIPELINE_PUBLISH_TARGET_BRANCH }}
       PIPELINE_MAX_RUNTIME_SECONDS: ${{ vars.PIPELINE_MAX_RUNTIME_SECONDS }}
-      GEO_IPINFO_TOKEN: ${{ secrets.GEO_IPINFO_TOKEN }}
+      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IP_LOCATION_IPINFO_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -153,7 +153,7 @@ jobs:
       matrix:
         worker_id: ${{ fromJSON(needs.prepare_run.outputs.worker_ids_json) }}
     env:
-      GEO_IPINFO_TOKEN: ${{ secrets.GEO_IPINFO_TOKEN }}
+      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IP_LOCATION_IPINFO_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -180,10 +180,10 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-
+            domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-
       - name: Log worker baseline cache restore
         run: |
           set -eo pipefail
@@ -214,8 +214,8 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "worker baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
-          echo "worker baseline cache primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
-          echo "worker baseline cache restore_prefixes=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-dns-sqlite-${{ inputs.config_name }}-" | tee -a "${worker_cache_log_path}"
+          echo "worker baseline cache primary_key=domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
+          echo "worker baseline cache restore_prefixes=domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache cache-hit=${cache_hit}" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache restore_result=${restore_result}" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache restored_paths=${summary}" | tee -a "${worker_cache_log_path}"
@@ -229,7 +229,7 @@ jobs:
           mkdir -p "$(dirname "${worker_cache_log_path}")"
           cache_hit="${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -307,7 +307,7 @@ jobs:
           # controls worker-local async concurrency. Delegation and
           # host-resolution may adapt inside this worker while preserving
           # root-level delegation fanout to host-level stages. Delegation runs
-          # NS lookup plus SOA fallback for NS NODATA before host fanout.
+          # an NS query plus SOA fallback for NS NODATA before host fanout.
           python -m domain_pipeline.pipeline_run worker \
             --source-root . \
             --state-root . \
@@ -484,10 +484,10 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-
-            domain-pipeline-dns-sqlite-${{ inputs.config_name }}-
+            domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-
       - name: Log aggregate baseline cache restore
         run: |
           set -eo pipefail
@@ -517,8 +517,8 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "aggregate baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
-          echo "aggregate baseline cache primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
-          echo "aggregate baseline cache restore_prefixes=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-dns-sqlite-${{ inputs.config_name }}-" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache primary_key=domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache restore_prefixes=domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache cache-hit=${cache_hit}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache restore_result=${restore_result}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache restored_paths=${summary}" | tee -a "${CACHE_LOG_PATH}"
@@ -531,7 +531,7 @@ jobs:
           mkdir -p "$(dirname "${CACHE_LOG_PATH}")"
           cache_hit="${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="domain-pipeline-dns-sqlite-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -739,7 +739,7 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p "$(dirname "${CACHE_LOG_PATH}")"
-          echo "aggregate baseline cache save primary_key=domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache save primary_key=domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache save should_save=${{ steps.inspect_aggregate_cache_bundle.outputs.should_save }}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache save bundle_summary=${{ steps.inspect_aggregate_cache_bundle.outputs.bundle_summary }}" | tee -a "${CACHE_LOG_PATH}"
       - name: Save aggregate baseline cache
@@ -750,7 +750,7 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-dns-sqlite-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-v2-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Validate publish candidate sizes
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' }}
         run: |

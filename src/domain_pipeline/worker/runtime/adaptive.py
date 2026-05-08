@@ -141,7 +141,7 @@ class AdaptiveStageDecisionEngine:
         return min(self.scale_down_step, surplus, idle_count)
 
 
-class AdaptiveStageSupervisor:  # pylint: disable=too-many-instance-attributes
+class AdaptiveStageSupervisor:
     """Own adaptive asyncio consumer creation and idle retirement for one stage."""
 
     def __init__(

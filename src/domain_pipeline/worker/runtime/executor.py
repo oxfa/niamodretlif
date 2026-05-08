@@ -15,12 +15,12 @@ from typing import Any
 from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
 )
-from domain_pipeline.worker.geo.result_codes import (
-    PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED,
+from domain_pipeline.worker.ip_location.result_codes import (
+    PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED,
 )
 from domain_pipeline.worker.cache.requests import (
     DelegationCacheWriteRequest,
-    GeoCacheWriteRequest,
+    IpLocationCacheWriteRequest,
     HostResolutionCacheWriteRequest,
 )
 from domain_pipeline.worker.runtime.contracts import (
@@ -35,23 +35,26 @@ from domain_pipeline.worker.cache.service import (
     CacheHitSource,
     build_cache_bundle,
 )
-from domain_pipeline.worker.geo import geo_policy_result_code
+from domain_pipeline.worker.ip_location import ip_location_policy_result_code
 from domain_pipeline.worker.runtime.transports import (
     AsyncDelegationTransport,
-    AsyncGeoTransport,
+    AsyncIpLocationTransport,
     AsyncHostResolutionTransport,
 )
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.worker.dns import DelegationResult, HostResolutionResult
-from domain_pipeline.worker.geo import (
-    GEO_STATUS_CACHE_HIT,
-    IPGeoResult,
-    build_geo_provider,
-    evaluate_geo_policy,
+from domain_pipeline.worker.delegation import DelegationResult
+from domain_pipeline.worker.host_resolution import HostResolutionResult
+from domain_pipeline.worker.ip_location import (
+    IP_LOCATION_STATUS_CACHE_HIT,
+    IPLocationResult,
+    build_ip_location_provider,
+    evaluate_ip_location_policy,
 )
 from domain_pipeline.worker.output import ResultOutputWriter
 from domain_pipeline.worker.runtime.dns_factory import RuntimeDNSCheckerFactory
-from domain_pipeline.worker.dns.query_coordinator import DNSQueryCoordinatorRegistry
+from domain_pipeline.worker.dns_query.query_coordinator import (
+    DNSQueryCoordinatorRegistry,
+)
 from domain_pipeline.worker.runtime.adaptive import (
     AdaptiveDNSPressureState,
     AdaptiveStageDecisionEngine,
@@ -64,23 +67,27 @@ from domain_pipeline.worker.runtime.capacity import (
     capacity_state_for_groups,
     discover_dns_capacity_groups,
 )
+from domain_pipeline.worker.runtime.config_validation import (
+    runtime_cache_payload,
+    runtime_stage_concurrency_payload,
+)
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 from domain_pipeline.worker.runtime.results import (
     CompletedResultFactory,
     delegation_result_from_cache_record,
-    geo_result_from_cache_record,
+    ip_location_result_from_cache_record,
     host_resolution_result_from_cache_record,
 )
 from domain_pipeline.worker.runtime.stages import (
     DelegationStage,
-    GeoStage,
+    IpLocationStage,
     HostResolutionStage,
 )
 from domain_pipeline.worker.runtime.constants import (
-    DNS_DELEGATION_STAGE_CONCURRENCY,
+    DELEGATION_STAGE_CONCURRENCY,
     DNS_HOST_RESOLUTION_STAGE_CONCURRENCY,
-    GEO_STAGE_CONCURRENCY,
+    IP_LOCATION_STAGE_CONCURRENCY,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,7 +99,7 @@ class RuntimeStageConcurrencyCounts:
 
     delegation: int
     host_resolution: int
-    geo: int
+    ip_location: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,12 +112,12 @@ class RuntimeStageConcurrencyLimits:
 
 
 @dataclasses.dataclass(frozen=True)
-class RuntimeStageConcurrencySettings:  # pylint: disable=too-many-instance-attributes
+class RuntimeStageConcurrencySettings:
     """Parsed worker-local runtime stage sizing settings."""
 
     delegation: RuntimeStageConcurrencyLimits
     host_resolution: RuntimeStageConcurrencyLimits
-    geo: RuntimeStageConcurrencyLimits
+    ip_location: RuntimeStageConcurrencyLimits
     adaptive_enabled: bool
     supervisor_interval_seconds: float
     busy_scale_up_after_seconds: float
@@ -122,31 +129,22 @@ class RuntimeStageConcurrencySettings:  # pylint: disable=too-many-instance-attr
 
 
 def _runtime_stage_concurrency_payload(config: dict[str, Any]) -> dict[str, Any]:
-    """Return canonical stage concurrency payload, accepting legacy manifests."""
-    runtime_payload = dict(config.get("runtime", {}))
-    if "stage_concurrency" in runtime_payload:
-        return dict(runtime_payload["stage_concurrency"])
-    return dict(runtime_payload.get("stage_workers", {}))
+    """Return canonical stage concurrency payload."""
+    return runtime_stage_concurrency_payload(config)
 
 
 def _runtime_stage_concurrency_counts(
     config: dict[str, Any],
 ) -> RuntimeStageConcurrencyCounts:
-    """Return runtime stage concurrency counts with defaults for legacy payloads."""
+    """Return runtime stage concurrency counts with defaults."""
     stage_concurrency = _runtime_stage_concurrency_payload(config)
     minimums = dict(stage_concurrency.get("minimums", {}))
-    if minimums:
-        stage_concurrency = minimums
     return RuntimeStageConcurrencyCounts(
-        delegation=int(
-            stage_concurrency.get("delegation", DNS_DELEGATION_STAGE_CONCURRENCY)
-        ),
+        delegation=int(minimums.get("delegation", DELEGATION_STAGE_CONCURRENCY)),
         host_resolution=int(
-            stage_concurrency.get(
-                "host_resolution", DNS_HOST_RESOLUTION_STAGE_CONCURRENCY
-            )
+            minimums.get("host_resolution", DNS_HOST_RESOLUTION_STAGE_CONCURRENCY)
         ),
-        geo=int(stage_concurrency.get("geo", GEO_STAGE_CONCURRENCY)),
+        ip_location=int(minimums.get("ip_location", IP_LOCATION_STAGE_CONCURRENCY)),
     )
 
 
@@ -158,15 +156,7 @@ def _runtime_stage_concurrency_settings(
     stage_concurrency = _runtime_stage_concurrency_payload(config)
     adaptive = dict(stage_concurrency.get("adaptive", {}))
     adaptive_enabled = bool(adaptive.get("enabled", True))
-    multiplier = max(
-        int(
-            adaptive.get(
-                "max_concurrency_multiplier",
-                adaptive.get("max_worker_multiplier", 4),
-            )
-        ),
-        1,
-    )
+    multiplier = max(int(adaptive.get("max_concurrency_multiplier", 4)), 1)
 
     def concurrency_settings(
         minimum: int, *, adaptive_stage: bool = True
@@ -190,7 +180,7 @@ def _runtime_stage_concurrency_settings(
             counts.host_resolution,
             adaptive_stage=bool(adaptive.get("host_resolution_enabled", True)),
         ),
-        geo=concurrency_settings(counts.geo, adaptive_stage=False),
+        ip_location=concurrency_settings(counts.ip_location, adaptive_stage=False),
         adaptive_enabled=adaptive_enabled,
         supervisor_interval_seconds=float(
             adaptive.get("supervisor_interval_seconds", 1.0)
@@ -219,21 +209,21 @@ def _runtime_dns_capacity_groups(
     )
 
 
-def _geo_provider_token(geo_config: dict[str, Any]) -> str:
-    """Return runtime-only geo token without persisting environment secrets."""
-    config_token = str(geo_config.get("token", "")).strip()
+def _ip_location_provider_token(ip_location_config: dict[str, Any]) -> str:
+    """Return runtime-only ip location token without persisting environment secrets."""
+    config_token = str(ip_location_config.get("token", "")).strip()
     if config_token:
-        logger.debug("Geo provider token source=config")
+        logger.debug("IpLocation provider token source=config")
         return config_token
-    env_token = os.environ.get("GEO_IPINFO_TOKEN", "").strip()
+    env_token = os.environ.get("IP_LOCATION_IPINFO_TOKEN", "").strip()
     logger.debug(
-        "Geo provider token source=%s",
-        "GEO_IPINFO_TOKEN" if env_token else "empty",
+        "IpLocation provider token source=%s",
+        "IP_LOCATION_IPINFO_TOKEN" if env_token else "empty",
     )
     return env_token
 
 
-class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
+class PipelineExecutor:
     """Worker-local async DAG for prepared and config-sourced runtime payloads."""
 
     def __init__(
@@ -247,9 +237,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         self.config = config
         self.prepared_metadata = prepared_metadata
         self.writer = ResultOutputWriter()
-        cache_payload = config.get("cache", {})
+        cache_payload = runtime_cache_payload(config)
         cache_file = str(cache_payload.get("cache_file", "")).strip()
-        cache_path = Path(cache_file) if cache_file else Path(".cache.sqlite3")
+        cache_path = Path(cache_file)
         baseline_cache_file = str(cache_payload.get("baseline_cache_file", "")).strip()
         baseline_cache_path = Path(baseline_cache_file) if baseline_cache_file else None
         cache = CacheRepository.load(cache_path)
@@ -305,31 +295,23 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
 
     def _host_resolution_ttl_days(self, result: HostResolutionResult) -> int:
         """Return cache retention for one stable host-resolution outcome."""
-        ttl_config = self.config["cache"].get("dns_host_resolution_ttl_days", {})
-        return int(
-            ttl_config.get(result.status, self.config["cache"].get("dns_ttl_days", 1))
-        )
+        ttl_config = self.config["cache"].get("host_resolution_ttl_days", {})
+        return int(ttl_config.get(result.status, 1))
 
     def _record_cache_hit(self, prefix: str, source: CacheHitSource | None) -> None:
         """Record cache hit counters, including overlay/baseline source."""
         self.cache_stats[f"{prefix}_cache_hits"] += 1
         if source is not None:
             self.cache_stats[f"{prefix}_{source}_cache_hits"] += 1
-        if prefix == "host_resolution":
-            self.cache_stats["dns_cache_hits"] += 1
-            if source is not None:
-                self.cache_stats[f"dns_{source}_cache_hits"] += 1
 
     def _record_cache_miss(self, prefix: str) -> None:
-        """Record cache misses with legacy dns_* aliases for host resolution."""
+        """Record cache misses for one cache family."""
         self.cache_stats[f"{prefix}_cache_misses"] += 1
-        if prefix == "host_resolution":
-            self.cache_stats["dns_cache_misses"] += 1
 
     async def lookup_delegation(
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> DelegationResult:
-        """Run or cache-read the required dns.delegation stage."""
+        """Run or cache-read the required delegation stage."""
         return await self.lookup_delegation_root(
             source_context, entry.registrable_domain
         )
@@ -337,7 +319,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
     async def lookup_delegation_root(
         self, source_context: WorkerSourceContext, registrable_domain: str
     ) -> DelegationResult:
-        """Run or join one root-level dns.delegation lookup."""
+        """Run or join one root-level delegation lookup."""
         checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.delegation_resolver_key()
         task_key = (registrable_domain, resolver_key)
@@ -374,16 +356,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
         if cached is not None:
             cached_result = delegation_result_from_cache_record(cached)
-            if self._delegation_cache_row_requires_soa_revalidation(cached_result):
-                logger.debug(
-                    "Ignoring legacy delegation cache row without SOA evidence "
-                    "domain=%s source=%s",
-                    registrable_domain,
-                    source,
-                )
-            else:
-                self._record_cache_hit("delegation", source)
-                return cached_result
+            self._record_cache_hit("delegation", source)
+            return cached_result
         self._record_cache_miss("delegation")
         async with self.busy_state.track(BusyReason.LIVE_DNS):
             result = await AsyncDelegationTransport(
@@ -398,9 +372,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
         ttl_days = (
-            int(ttl_config["dns_delegation_actionable"])
+            int(ttl_config["delegation_actionable"])
             if result.actionable
-            else int(ttl_config["dns_delegation_unactionable"])
+            else int(ttl_config["delegation_unactionable"])
         )
         async with self.busy_state.track(BusyReason.CACHE_WRITE_QUEUE_PUT):
             await self.cache_bundle.writers[0].queue.put(
@@ -425,24 +399,10 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
         return result
 
-    @staticmethod
-    def _delegation_cache_row_requires_soa_revalidation(
-        result: DelegationResult,
-    ) -> bool:
-        """Return whether a cached NS NODATA row predates SOA fallback evidence."""
-        return (
-            result.ns_nodata
-            and not result.soa_exists
-            and not result.soa_nodata
-            and not result.soa_nxdomain
-            and not result.soa_timeout
-            and not result.soa_servfail
-        )
-
     async def lookup_host_resolution(
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
-        """Run or cache-read the optional dns.host_resolution stage."""
+        """Run or cache-read the optional host_resolution stage."""
         checker = RuntimeDNSCheckerFactory().build(source_context.config)
         resolver_key = checker.host_resolution_resolver_key()
         now = utc_now()
@@ -490,56 +450,54 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             )
         return result
 
-    async def lookup_geo(
+    async def lookup_ip_location(
         self,
         source_context: WorkerSourceContext,
         host_resolution_result: HostResolutionResult,
-    ) -> tuple[str, list[IPGeoResult], Any | None]:
-        """Run or cache-read the optional geo stage and evaluate its policy."""
-        geo_config = source_context.config["geo"]
-        provider_name = str(
-            geo_config.get("effective_provider") or geo_config.get("provider")
-        )
+    ) -> tuple[str, list[IPLocationResult], Any | None]:
+        """Run or cache-read the optional ip location stage and evaluate its policy."""
+        ip_location_config = source_context.config["ip_location"]
+        provider_name = str(ip_location_config.get("effective_provider", ""))
         now = utc_now()
-        cached_results: dict[str, IPGeoResult] = {}
+        cached_results: dict[str, IPLocationResult] = {}
         missing_ips: list[str] = []
         seen_missing_ips: set[str] = set()
         for ip in host_resolution_result.resolved_ips:
-            cached, source = await self.cache_reader.get_fresh_geo_with_source(
+            cached, source = await self.cache_reader.get_fresh_ip_location_with_source(
                 provider_name, ip, now
             )
             if cached is not None:
-                self._record_cache_hit("geo", source)
-                cached_results[ip] = geo_result_from_cache_record(cached)
+                self._record_cache_hit("ip_location", source)
+                cached_results[ip] = ip_location_result_from_cache_record(cached)
                 continue
             if ip not in seen_missing_ips:
-                self.cache_stats["geo_cache_misses"] += 1
+                self.cache_stats["ip_location_cache_misses"] += 1
                 missing_ips.append(ip)
                 seen_missing_ips.add(ip)
         try:
-            fetched_results: list[IPGeoResult] = []
+            fetched_results: list[IPLocationResult] = []
             if missing_ips:
-                provider = build_geo_provider(
+                provider = build_ip_location_provider(
                     provider_name,
-                    timeout=float(geo_config.get("timeout", 5.0)),
-                    token=_geo_provider_token(geo_config),
+                    timeout=float(ip_location_config.get("timeout", 5.0)),
+                    token=_ip_location_provider_token(ip_location_config),
                 )
-                fetched_results = await AsyncGeoTransport(provider).lookup_ips(
+                fetched_results = await AsyncIpLocationTransport(provider).lookup_ips(
                     missing_ips
                 )
             fetched_by_ip = {result.ip: result for result in fetched_results}
             for result in fetched_results:
-                if not result.usable or result.status == GEO_STATUS_CACHE_HIT:
+                if not result.usable or result.status == IP_LOCATION_STATUS_CACHE_HIT:
                     continue
                 await self.cache_bundle.writers[2].queue.put(
-                    GeoCacheWriteRequest(
+                    IpLocationCacheWriteRequest(
                         provider=provider_name,
                         ip=result.ip,
                         country_code=result.country_code,
                         region_code=result.region_code,
                         region_name=result.region_name,
                         checked_at=now,
-                        ttl_days=int(geo_config.get("cache_ttl_days", 7)),
+                        ttl_days=int(ip_location_config.get("cache_ttl_days", 7)),
                     )
                 )
             results = [
@@ -547,14 +505,16 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                 for ip in host_resolution_result.resolved_ips
                 if ip in cached_results or ip in fetched_by_ip
             ]
-            policy = evaluate_geo_policy(results, geo_config["policy"])
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+            policy = evaluate_ip_location_policy(results, ip_location_config["policy"])
+        except Exception as exc:
             logger.warning(
-                "Geo lookup failed for %s: %s", host_resolution_result.host, exc
+                "IpLocation lookup failed for %s: %s", host_resolution_result.host, exc
             )
-            return PIPELINE_RESULT_CODE_GEO_LOOKUP_FAILED, [], None
+            return PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED, [], None
         return (
-            geo_policy_result_code(policy, results, geo_config["policy"]),
+            ip_location_policy_result_code(
+                policy, results, ip_location_config["policy"]
+            ),
             results,
             policy,
         )
@@ -567,8 +527,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         pipeline_result_code: str,
         delegation_result: DelegationResult | None = None,
         host_resolution_result: HostResolutionResult | None = None,
-        geo_results: list[IPGeoResult] | None = None,
-        geo_policy: Any | None = None,
+        ip_location_results: list[IPLocationResult] | None = None,
+        ip_location_policy: Any | None = None,
         provenance: dict[str, Any] | None = None,
     ) -> CompletedHostResult:
         return CompletedResultFactory().build(
@@ -577,8 +537,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             pipeline_result_code=pipeline_result_code,
             delegation_result=delegation_result,
             host_resolution_result=host_resolution_result,
-            geo_results=geo_results,
-            geo_policy=geo_policy,
+            ip_location_results=ip_location_results,
+            ip_location_policy=ip_location_policy,
             provenance=provenance,
         )
 
@@ -590,8 +550,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         pipeline_result_code: str,
         delegation_result: DelegationResult | None = None,
         host_resolution_result: HostResolutionResult | None = None,
-        geo_results: list[IPGeoResult] | None = None,
-        geo_policy: Any | None = None,
+        ip_location_results: list[IPLocationResult] | None = None,
+        ip_location_policy: Any | None = None,
     ) -> None:
         """Emit one terminal runtime result to the shared result queue."""
         async with self.busy_state.track(BusyReason.RESULT_PUT):
@@ -602,8 +562,8 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
                     pipeline_result_code=pipeline_result_code,
                     delegation_result=delegation_result,
                     host_resolution_result=host_resolution_result,
-                    geo_results=geo_results,
-                    geo_policy=geo_policy,
+                    ip_location_results=ip_location_results,
+                    ip_location_policy=ip_location_policy,
                     provenance={
                         "source_id_override": parsed.source_id_override,
                         "source_input_label_override": (
@@ -630,7 +590,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
     async def _host_resolution_stage_consumer(
         self, queue_bundle: RuntimeQueueSet
     ) -> None:
-        """Consume host-resolution work and route review, filtered, or geo cases."""
+        """Consume host-resolution work and route review, filtered, or ip location cases."""
         await HostResolutionStage(self).consume(queue_bundle)
 
     async def _route_host_resolution_result(
@@ -643,9 +603,9 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             queue_bundle, work_item, host_resolution_result
         )
 
-    async def _geo_stage_consumer(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume geo work and emit terminal policy results."""
-        await GeoStage(self).consume(queue_bundle)
+    async def _ip_location_stage_consumer(self, queue_bundle: RuntimeQueueSet) -> None:
+        """Consume ip location work and emit terminal policy results."""
+        await IpLocationStage(self).consume(queue_bundle)
 
     def log_delegation_fanout(self, registrable_domain: str, item_count: int) -> None:
         """Log the host fanout size for one root-owned delegation result."""
@@ -807,18 +767,18 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
         await asyncio.gather(*cache_tasks)
         logger.debug("Async pipeline cache writers stopped")
 
-    async def run_async(self) -> int:  # pylint: disable=too-many-statements
+    async def run_async(self) -> int:
         """Run the prepared or config-sourced pipeline through async stage queues."""
         queue_bundle = RuntimeQueueSet.create()
         logger.debug(
             "Async pipeline starting worker-local queues delegation_concurrency=%d "
-            "host_resolution_concurrency=%d geo_concurrency=%d adaptive=%s "
+            "host_resolution_concurrency=%d ip_location_concurrency=%d adaptive=%s "
             "delegation_cap=%d host_resolution_cap=%d "
             "supervisor_interval_seconds=%.3f pressure_window_seconds=%.3f "
             "queue_pressure_ratio=%.3f prepared_metadata=%s",
             self.stage_concurrency.delegation,
             self.stage_concurrency.host_resolution,
-            self.stage_concurrency.geo,
+            self.stage_concurrency.ip_location,
             self.concurrency_settings.adaptive_enabled,
             self.concurrency_settings.delegation.cap,
             self.concurrency_settings.host_resolution.cap,
@@ -828,12 +788,12 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             self.prepared_metadata is not None,
         )
         adaptive_enabled = self.concurrency_settings.adaptive_enabled
-        geo_tasks = [
+        ip_location_tasks = [
             asyncio.create_task(
-                self._geo_stage_consumer(queue_bundle),
-                name=f"geo-static-consumer-{index}",
+                self._ip_location_stage_consumer(queue_bundle),
+                name=f"ip-location-static-consumer-{index}",
             )
-            for index in range(self.stage_concurrency.geo)
+            for index in range(self.stage_concurrency.ip_location)
         ]
         result_task = asyncio.create_task(
             self._result_writer(queue_bundle), name="result-writer"
@@ -890,7 +850,7 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             loader_task,
             *delegation_tasks,
             *host_resolution_tasks,
-            *geo_tasks,
+            *ip_location_tasks,
             result_task,
             *cache_tasks,
         ]
@@ -939,16 +899,20 @@ class PipelineExecutor:  # pylint: disable=too-many-instance-attributes
             else:
                 await asyncio.gather(*host_resolution_tasks)
             logger.debug("Async pipeline delegation_to_host_resolution drained")
-            for _ in range(self.stage_concurrency.geo):
-                await queue_bundle.host_resolution_to_geo.put(None)
+            for _ in range(self.stage_concurrency.ip_location):
+                await queue_bundle.host_resolution_to_ip_location.put(None)
             logger.debug(
-                "Async pipeline sent geo sentinels count=%d",
-                self.stage_concurrency.geo,
+                "Async pipeline sent ip location sentinels count=%d",
+                self.stage_concurrency.ip_location,
             )
-            logger.debug("Async pipeline waiting for host_resolution_to_geo drain")
-            await self._join_or_raise(queue_bundle.host_resolution_to_geo, geo_tasks)
-            await asyncio.gather(*geo_tasks)
-            logger.debug("Async pipeline host_resolution_to_geo drained")
+            logger.debug(
+                "Async pipeline waiting for host_resolution_to_ip_location drain"
+            )
+            await self._join_or_raise(
+                queue_bundle.host_resolution_to_ip_location, ip_location_tasks
+            )
+            await asyncio.gather(*ip_location_tasks)
+            logger.debug("Async pipeline host_resolution_to_ip_location drained")
             logger.debug("Async pipeline waiting for result_queue drain")
             await self._join_or_raise(queue_bundle.result_queue, [result_task])
             await queue_bundle.result_queue.put(None)

@@ -9,20 +9,22 @@ version: 2
 # - input/manual_filter_pass/<config-stem>.txt
 # - input/manual_filter_out/<config-stem>.txt
 # - input/manual_add/<config-stem>.txt
-# manual_filter_pass and manual_add entries require DNS delegation on the
-# registrable domain. Source-matched public suffix manual_filter_pass entries
-# route to filtered during prepare because there is no registrable domain to
-# query. Delegation is actionable when NS records exist, or when NS returns
-# NODATA and same-owner SOA exists. If delegation is actionable,
-# manual_filter_pass and manual_add skip host-resolution and geo and route to
+# manual_filter_pass and manual_add entries require an actionable delegation
+# result for the registrable domain. Source-matched public suffix
+# manual_filter_pass entries route to filtered during prepare because there is
+# no registrable domain to query. Delegation is actionable when NS records
+# exist, or when NS returns NODATA and the registrable domain is proven to have
+# same-owner SOA, either from the original NS negative-response authority
+# section or from a separate delegation SOA query. If delegation is actionable,
+# manual_filter_pass and manual_add skip host-resolution and ip location and route to
 # filtered. manual_add takes precedence over matching source entries for the
 # same host. If delegation is not actionable, they route to unactionable or
-# review using the normal delegation
-# result. Unmatched manual_add entries require all enabled sources to share
+# review using the normal delegation result. Unmatched manual_add entries
+# require all enabled sources to share
 # delegation/output behavior. Unmatched manual_filter_pass entries route to
 # review without delegation or host-resolution lookup because they are operator
 # reconciliation rows. manual_filter_out is exact-host-only, takes precedence
-# over matching source entries, bypasses delegation, host resolution, and geo
+# over matching source entries, bypasses delegation, host resolution, and ip_location
 # entirely, and routes to review. Other public suffix inputs are prepare-owned
 # review/audit rows because there is no registrable domain to query.
 #
@@ -31,17 +33,17 @@ version: 2
 # - review: uncertain or operator-attention rows.
 # - unactionable: rows whose registrable domain has no actionable delegation,
 #   including NS NODATA with SOA absent.
-# Duplicate host collapse is keyed by final host and compares dns.delegation,
-# dns.host_resolution, geo, and output behavior across enabled sources. For
+# Duplicate host collapse is keyed by final host and compares delegation,
+# host_resolution, ip_location, and output behavior across enabled sources. For
 # manual_add-matched hosts, only delegation/output behavior must match because
-# manual_add bypasses host-resolution and geo after delegation passes.
+# manual_add bypasses host-resolution and ip location after delegation passes.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
     # pipeline gives up on the fetch step.
     request_timeout: 30.0
 
-  dns:
+  dns_query:
     # Fallback resolver pool used by DNS stages that do not set their own
     # resolvers. Entries use resolver: <IPv4/IPv6/system_resolver>. Omit
     # weight on every entry for equal traffic share, or set weight on every
@@ -91,74 +93,76 @@ defaults:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
-    # Mandatory NS lookup for the parsed registrable domain, with same-stage
-    # SOA fallback when NS returns NODATA. Delegation does not use ECS.
+    # Mandatory delegation authority check for the parsed registrable domain.
+    # The check starts with an NS query and uses SOA fallback only when NS
+    # returns NODATA. The original NS response is reused only when its authority
+    # section contains same-owner SOA; otherwise the runtime creates a separate
+    # SOA query because NS and SOA answers have different DNS cache keys.
+    # Delegation does not use ECS.
     # Stage-level resolvers/timeout/query_rate_limit override the top-level
     # DNS defaults when present. Timeout/SERVFAIL, including SOA fallback
     # timeout/SERVFAIL, are retried up to this stage-specific attempt count and
     # are not cached after retry exhaustion.
-    delegation:
-      # Example non-ECS delegation pool:
-      # resolvers:
-      #   - resolver: system_resolver
-      #   - resolver: 1.1.1.1
-      #   - resolver: 1.0.0.1
-      #   - resolver: 76.76.2.0
-      #   - resolver: 76.76.10.0
-      #   - resolver: 185.222.222.222
-      #   - resolver: 45.11.45.11
-      # Example weighted delegation pool:
-      # resolvers:
-      #   - resolver: system_resolver
-      #     weight: 2
-      #   - resolver: 1.1.1.1
-      #     weight: 1
-      retry_attempts: 4
+  delegation:
+    # Example non-ECS delegation pool:
+    # resolvers:
+    #   - resolver: system_resolver
+    #   - resolver: 1.1.1.1
+    #   - resolver: 1.0.0.1
+    #   - resolver: 76.76.2.0
+    #   - resolver: 76.76.10.0
+    #   - resolver: 185.222.222.222
+    #   - resolver: 45.11.45.11
+    # Example weighted delegation pool:
+    # resolvers:
+    #   - resolver: system_resolver
+    #     weight: 2
+    #   - resolver: 1.1.1.1
+    #     weight: 1
+    retry_attempts: 4
     # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
-    # coordinator from delegation. It inherits dns.default_resolvers unless
+    # coordinator from delegation. It inherits dns_query.default_resolvers unless
     # resolvers is provided here. ECS applies only to host resolution; when
     # enabled, use resolvers that preserve ECS behavior, such as Google Public
     # DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS (9.9.9.11, 149.112.112.11).
     # Cloudflare 1.1.1.1 and Cisco Umbrella are not default ECS targets here
     # because their public ECS behavior differs. If enabled is omitted, the
-    # runtime defaults it to true when geo.enabled=true and false otherwise.
+    # runtime defaults it to true when ip_location.enabled=true and false otherwise.
     # Timeout/SERVFAIL use this stage-specific retry budget and are not cached
     # after retry exhaustion.
-    host_resolution:
+  host_resolution:
+    enabled: false
+    # resolvers:
+    #   - resolver: 8.8.8.8
+    #   - resolver: 8.8.4.4
+    # Optional EDNS Client Subnet (ECS) settings. Set enabled=true and provide
+    # a CIDR subnet when querying a resolver that accepts client-supplied ECS.
+    ecs:
       enabled: false
-      # resolvers:
-      #   - resolver: 8.8.8.8
-      #   - resolver: 8.8.4.4
-      # Optional EDNS Client Subnet (ECS) settings. Set enabled=true and provide
-      # a CIDR subnet when querying a resolver that accepts client-supplied ECS.
-      ecs:
-        enabled: false
-        # Example: 203.0.113.0/24 or 2001:db8::/48
-        subnet: ""
-        # Scope to advertise in the ECS option. Leave at 0 unless you have a
-        # specific resolver-side requirement.
-        scope_prefix_length: 0
-      retry_attempts: 3
+      # Example: 203.0.113.0/24 or 2001:db8::/48
+      subnet: ""
+      # Scope to advertise in the ECS option. Leave at 0 unless you have a
+      # specific resolver-side requirement.
+      scope_prefix_length: 0
+    retry_attempts: 3
 
-  geo:
-    # Enable geo lookups and evaluate the resolved IPs against the policy block
-    # below. Geo only runs after delegation passes and host_resolution passes
+  ip_location:
+    # Enable ip location lookups and evaluate the resolved IPs against the policy block
+    # below. IpLocation only runs after delegation passes and host_resolution passes
     # when host_resolution is enabled.
     enabled: false
-    # Compatibility/readability field. Runtime provider selection is inferred
-    # from the policy below:
+    # Runtime provider selection is inferred from the policy below:
     # - no region rules -> ipinfo_lite
     # - any region rules -> geojs
-    provider: ipinfo_lite
-    # Per-request timeout, in seconds, for geo lookups.
+    # Per-request timeout, in seconds, for ip location lookups.
     timeout: 5.0
-    # Number of days to keep successful usable geo results cached. Provider
+    # Number of days to keep successful usable ip location results cached. Provider
     # failures, invalid payloads, rate limits, exceptions, and non-usable
     # results are not cached.
     cache_ttl_days: 7
-    # In GitHub Actions, pass GEO_IPINFO_TOKEN through step-level env for
+    # In GitHub Actions, pass IP_LOCATION_IPINFO_TOKEN through step-level env for
     # country-only ipinfo_lite lookups. Runtime consumes that env token without
-    # writing it into prepare-to-worker manifests; leave geo.token blank unless
+    # writing it into prepare-to-worker manifests; leave ip_location.token blank unless
     # you intentionally commit an explicit config token.
     policy:
       enabled: false
@@ -183,15 +187,15 @@ defaults:
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub
   # matrix worker. Delegation consumes registrable-domain root work and fans
-  # results out to host rows; host_resolution and geo stay host-level. Delegation
+  # results out to host rows; host_resolution and ip location stay host-level. Delegation
   # and host_resolution can adapt between minimums and caps when DNS provider
-  # capacity is not pressured; geo is static in this runtime version. GitHub
+  # capacity is not pressured; ip location is static in this runtime version. GitHub
   # matrix concurrency is controlled separately by workflow settings.
   stage_concurrency:
     minimums:
       delegation: 20
       host_resolution: 20
-      geo: 8
+      ip_location: 8
     adaptive:
       enabled: true
       delegation_enabled: true
@@ -209,19 +213,16 @@ cache:
   classification_ttl_days:
     # Cache retention, in days, for actionable registrable domains: NS-present
     # or NS-NODATA with same-owner SOA present.
-    dns_delegation_actionable: 7
+    delegation_actionable: 7
     # Cache retention, in days, for stable unactionable delegation, including
-    # NS-NODATA with SOA absent. Transient timeout/SERVFAIL delegation results
-    # are not cached.
-    dns_delegation_unactionable: 1
-  # Cache retention, in days, for stable exact-host dns.host_resolution results.
-  # This legacy scalar remains the fallback for resolved host-resolution rows.
-  dns_ttl_days: 1
-  # Cache retention, in days, by final exact-host dns.host_resolution outcome.
+    # explicitly checked NS-NODATA with SOA absent. Transient timeout/SERVFAIL
+    # delegation results are not cached.
+    delegation_unactionable: 1
+  # Cache retention, in days, for stable exact-host host_resolution results.
   # CNAME aliases are followed before the final outcome is chosen. Transient
   # timeout/SERVFAIL and inconsistent unknown host-resolution results are not
   # cached after retry exhaustion.
-  dns_host_resolution_ttl_days:
+  host_resolution_ttl_days:
     resolved: 1
     nodata: 1
     nxdomain: 1
@@ -239,24 +240,23 @@ sources:
       format: auto
     fetch:
       request_timeout: 30.0
-    dns:
+    dns_query:
       default_resolvers: []
       timeout: 25.0
       retry_backoff_base_seconds: 1.0
       query_rate_limit:
         enabled: true
-      delegation:
-        retry_attempts: 4
-      host_resolution:
-        enabled: false
-        ecs:
-          enabled: false
-          subnet: ""
-          scope_prefix_length: 0
-        retry_attempts: 3
-    geo:
+    delegation:
+      retry_attempts: 4
+    host_resolution:
       enabled: false
-      provider: ipinfo_lite
+      ecs:
+        enabled: false
+        subnet: ""
+        scope_prefix_length: 0
+      retry_attempts: 3
+    ip_location:
+      enabled: false
       timeout: 5.0
       cache_ttl_days: 7
       policy:

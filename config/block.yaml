@@ -8,23 +8,27 @@ version: 2
 # have a registrable domain. Source-matched public suffix manual_filter_pass
 # entries route to filtered during prepare because there is no registrable
 # domain to query. Actionable delegation means NS records exist, or NS returns
-# NODATA while same-owner SOA exists. When delegation is actionable they bypass
-# host-resolution and geo checks and route to filtered. manual_add takes precedence over
-# matching source entries for the same host. manual_filter_out skips
-# delegation, host resolution, and geo and routes to review. Other
+# NODATA and the registrable domain is proven to have same-owner SOA, either
+# from the original NS negative-response authority section or from a separate
+# delegation SOA query. When delegation is actionable they bypass
+# host-resolution and ip location checks and route to filtered. manual_add takes
+# precedence over matching source entries for the same host. manual_filter_out
+# skips delegation, host resolution, and ip location and routes to review. Other
 # public-suffix inputs are prepare-owned review/audit rows.
 
 defaults:
   fetch:
     request_timeout: 30.0
 
-  dns:
+  dns_query:
     # Delegation-only block checks use the platform resolver plus Cloudflare
-    # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled for NS
-    # queries and SOA fallback after NS NODATA. Resolver weights are stage-local
-    # traffic preference, not rate control. Per-provider
-    # qps_per_worker values are worker-local project safety caps, not
-    # provider-published guarantees.
+    # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled. Delegation
+    # starts with NS queries and uses separate SOA fallback queries after
+    # NS NODATA. SOA fallback stays in delegation because it determines
+    # registrable-domain actionability, not host A/AAAA resolution. Resolver
+    # weights are stage-local traffic preference, not rate control.
+    # Per-provider qps_per_worker values are worker-local project safety caps,
+    # not provider-published guarantees.
     default_resolvers: []
     timeout: 25.0
     # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
@@ -65,39 +69,39 @@ defaults:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
-    delegation:
-      resolvers:
-        - resolver: system_resolver
-          weight: 4
-        - resolver: 1.1.1.1
-          weight: 3
-        # - resolver: 1.0.0.1
-        #   weight: 3
-        - resolver: 76.76.2.0
-          weight: 2
-        # - resolver: 76.76.10.0
-        #   weight: 2
-        - resolver: 185.222.222.222
-          weight: 2
-        # - resolver: 45.11.45.11
-        #   weight: 2
-      retry_attempts: 4
-    host_resolution:
-      enabled: false
-      retry_attempts: 3
+  delegation:
+    resolvers:
+      - resolver: system_resolver
+        weight: 4
+      - resolver: 1.1.1.1
+        weight: 3
+      # - resolver: 1.0.0.1
+      #   weight: 3
+      - resolver: 76.76.2.0
+        weight: 2
+      # - resolver: 76.76.10.0
+      #   weight: 2
+      - resolver: 185.222.222.222
+        weight: 2
+      # - resolver: 45.11.45.11
+      #   weight: 2
+    retry_attempts: 4
+  host_resolution:
+    enabled: false
+    retry_attempts: 3
 
   output:
     directory: output
 
 runtime:
   # Worker-local async stage concurrency inside one GitHub matrix worker.
-  # Delegation and host-resolution can adapt between minimums and caps; geo is
+  # Delegation and host-resolution can adapt between minimums and caps; ip location is
   # static in this runtime version. Workflow matrix concurrency is separate.
   stage_concurrency:
     minimums:
       delegation: 20
       host_resolution: 20
-      geo: 8
+      ip_location: 8
     adaptive:
       enabled: true
       delegation_enabled: true
@@ -114,11 +118,11 @@ runtime:
 cache:
   classification_ttl_days:
     # NS-present and NS-NODATA with same-owner SOA use the actionable TTL.
-    dns_delegation_actionable: 7
-    # Stable unactionable delegation, including NS-NODATA with SOA absent.
-    dns_delegation_unactionable: 1
-  dns_ttl_days: 7
-  dns_host_resolution_ttl_days:
+    delegation_actionable: 7
+    # Stable unactionable delegation, including explicitly checked NS-NODATA
+    # with SOA absent.
+    delegation_unactionable: 1
+  host_resolution_ttl_days:
     resolved: 7
     nodata: 1
     nxdomain: 1
@@ -130,5 +134,5 @@ sources:
     input:
       type: url
       location: https://is.gd/vQFXgT
-    geo:
+    ip_location:
       enabled: false

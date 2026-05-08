@@ -20,8 +20,8 @@ jobs:
     env:
       KEEP_COUNT: "2"
       CACHE_PREFIXES: |
-        domain-pipeline-dns-sqlite-block-
-        domain-pipeline-dns-sqlite-direct-
+        domain-pipeline-runtime-cache-v2-block-
+        domain-pipeline-runtime-cache-v2-direct-
       WORKFLOW_HISTORY_FILES: |
         pipeline-block.yml
         pipeline-direct.yml

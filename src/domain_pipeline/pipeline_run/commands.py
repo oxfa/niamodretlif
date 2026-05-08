@@ -32,7 +32,9 @@ from domain_pipeline.publish import (
     validate_publish_candidate_sizes,
 )
 from domain_pipeline.worker.runtime import run_worker
-from domain_pipeline.worker.aggregate_manifest import finalize_worker_aggregate_handoff
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
+    finalize_worker_aggregate_handoff,
+)
 from domain_pipeline.worker.status import (
     finalize_worker_statuses,
     initialize_worker_statuses,

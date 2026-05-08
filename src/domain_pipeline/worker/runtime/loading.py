@@ -211,7 +211,7 @@ class RuntimeItemLoader:
             else:
                 fingerprints_by_source = {
                     item.source_context.source_id: delegation_behavior_fingerprint(
-                        item.source_context.config["dns"]
+                        item.source_context.config
                     )
                     for item in ordered_items
                 }
@@ -233,7 +233,7 @@ class RuntimeItemLoader:
                     f"{delegation_config_source_id!r}"
                 )
             source_fingerprint = delegation_behavior_fingerprint(
-                delegation_source_context.config["dns"]
+                delegation_source_context.config
             )
             if fingerprint != source_fingerprint:
                 raise ValueError(

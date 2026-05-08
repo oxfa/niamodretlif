@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.aggregate_manifest import PrepareAggregateManifest
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
+    PrepareAggregateManifest,
+)
 from domain_pipeline.prepare.assignment import (
     PIPELINE_RUN_FORMAT_VERSION,
     PreparedWorkerManifest,

@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from domain_pipeline.worker.runtime.constants import (
     DELEGATION_INPUT_QUEUE_SIZE,
     DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE,
-    HOST_RESOLUTION_TO_GEO_QUEUE_SIZE,
+    HOST_RESOLUTION_TO_IP_LOCATION_QUEUE_SIZE,
     RESULT_QUEUE_SIZE,
 )
 from domain_pipeline.worker.runtime.contracts import (
     CompletedHostResult,
     DelegationRootWorkItem,
-    GeoWorkItem,
+    IpLocationWorkItem,
     HostResolutionWorkItem,
 )
 
@@ -25,7 +25,7 @@ class RuntimeQueueSet:
 
     delegation_input: asyncio.Queue[DelegationRootWorkItem | None]
     delegation_to_host_resolution: asyncio.Queue[HostResolutionWorkItem | None]
-    host_resolution_to_geo: asyncio.Queue[GeoWorkItem | None]
+    host_resolution_to_ip_location: asyncio.Queue[IpLocationWorkItem | None]
     result_queue: asyncio.Queue[CompletedHostResult | None]
 
     @classmethod
@@ -36,8 +36,8 @@ class RuntimeQueueSet:
             delegation_to_host_resolution=asyncio.Queue(
                 maxsize=DELEGATION_TO_HOST_RESOLUTION_QUEUE_SIZE
             ),
-            host_resolution_to_geo=asyncio.Queue(
-                maxsize=HOST_RESOLUTION_TO_GEO_QUEUE_SIZE
+            host_resolution_to_ip_location=asyncio.Queue(
+                maxsize=HOST_RESOLUTION_TO_IP_LOCATION_QUEUE_SIZE
             ),
             result_queue=asyncio.Queue(maxsize=RESULT_QUEUE_SIZE),
         )

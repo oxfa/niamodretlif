@@ -58,7 +58,7 @@ GroupKey = tuple[Path, Path, Path, Path]
 
 
 @dataclass
-class OutputGroupBuffer:  # pylint: disable=too-many-instance-attributes
+class OutputGroupBuffer:
     """In-memory rows accepted for one output-path group."""
 
     source_context: WorkerSourceContext

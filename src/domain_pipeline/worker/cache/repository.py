@@ -1,6 +1,4 @@
-"""Persistent cache storage for delegation, host DNS, and IP geo data."""
-
-# pylint: disable=too-many-instance-attributes
+"""Persistent cache storage for delegation, host resolution, and IP ip location data."""
 
 from __future__ import annotations
 
@@ -10,13 +8,13 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
 DELEGATION_TABLE = "delegation_history"
-DNS_TABLE = "dns_history"
-GEO_TABLE = "geo_history"
+HOST_RESOLUTION_TABLE = "host_resolution_history"
+IP_LOCATION_TABLE = "ip_location_history"
 DELEGATION_COLUMNS = (
     "domain",
     "resolver_key",
@@ -35,13 +33,6 @@ DELEGATION_COLUMNS = (
     "checked_at",
     "expires_at",
 )
-DELEGATION_SOA_COLUMN_DEFAULTS = {
-    "soa_exists": 0,
-    "soa_nodata": 0,
-    "soa_nxdomain": 0,
-    "soa_timeout": 0,
-    "soa_servfail": 0,
-}
 
 
 def utc_now() -> datetime:
@@ -155,7 +146,7 @@ class HostResolutionHistoryRecord:
 
 
 @dataclasses.dataclass(frozen=True)
-class GeoHistoryRecord:
+class IpLocationHistoryRecord:
     """A cached IP geolocation lookup record."""
 
     provider: str
@@ -167,8 +158,8 @@ class GeoHistoryRecord:
     expires_at: datetime
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "GeoHistoryRecord":
-        """Build a geo cache record from one SQLite row."""
+    def from_row(cls, row: sqlite3.Row) -> "IpLocationHistoryRecord":
+        """Build a ip location cache record from one SQLite row."""
         return cls(
             provider=str(row["provider"]),
             ip=str(row["ip"]),
@@ -185,7 +176,7 @@ class GeoHistoryRecord:
 
 
 class CacheRepository:
-    """Persistent SQLite-backed cache for DNS and geo results."""
+    """Persistent SQLite-backed cache for DNS and ip location results."""
 
     def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
         self.path = path
@@ -224,9 +215,8 @@ class CacheRepository:
                 PRIMARY KEY (domain, resolver_key)
             )
             """)
-        self._ensure_delegation_soa_columns()
         self._connection.execute(f"""
-            CREATE TABLE IF NOT EXISTS {DNS_TABLE} (
+            CREATE TABLE IF NOT EXISTS {HOST_RESOLUTION_TABLE} (
                 host TEXT NOT NULL,
                 resolver_key TEXT NOT NULL,
                 a_exists INTEGER NOT NULL,
@@ -243,7 +233,7 @@ class CacheRepository:
             )
             """)
         self._connection.execute(f"""
-            CREATE TABLE IF NOT EXISTS {GEO_TABLE} (
+            CREATE TABLE IF NOT EXISTS {IP_LOCATION_TABLE} (
                 provider TEXT NOT NULL,
                 ip TEXT NOT NULL,
                 country_code TEXT NOT NULL,
@@ -254,23 +244,48 @@ class CacheRepository:
                 PRIMARY KEY (provider, ip)
             )
             """)
+        self._validate_current_schema()
         self._connection.commit()
 
-    def _ensure_delegation_soa_columns(self) -> None:
-        """Add SOA fallback columns to restored delegation caches when missing."""
-        existing_columns = {
-            str(row["name"])
-            for row in self._connection.execute(
-                f"PRAGMA table_info({DELEGATION_TABLE})"
-            )
+    def _validate_current_schema(self) -> None:
+        """Reject restored cache databases that do not match the current schema."""
+        expected_columns = {
+            DELEGATION_TABLE: set(DELEGATION_COLUMNS),
+            HOST_RESOLUTION_TABLE: {
+                "host",
+                "resolver_key",
+                "a_exists",
+                "a_nodata",
+                "a_nxdomain",
+                "a_timeout",
+                "a_servfail",
+                "canonical_name",
+                "ipv4_addresses",
+                "ipv6_addresses",
+                "checked_at",
+                "expires_at",
+            },
+            IP_LOCATION_TABLE: {
+                "provider",
+                "ip",
+                "country_code",
+                "region_code",
+                "region_name",
+                "checked_at",
+                "expires_at",
+            },
         }
-        for column_name, default_value in DELEGATION_SOA_COLUMN_DEFAULTS.items():
-            if column_name in existing_columns:
-                continue
-            self._connection.execute(f"""
-                ALTER TABLE {DELEGATION_TABLE}
-                ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT {default_value}
-                """)
+        for table_name, required_columns in expected_columns.items():
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            missing_columns = sorted(required_columns - columns)
+            if missing_columns:
+                raise sqlite3.DatabaseError(
+                    f"cache table {table_name} is missing required columns: "
+                    + ", ".join(missing_columns)
+                )
 
     def get_delegation(
         self, domain: str, resolver_key: str, now: datetime
@@ -341,7 +356,7 @@ class CacheRepository:
     ) -> HostResolutionHistoryRecord | None:
         """Return a fresh host-resolution cache record when present."""
         row = self._connection.execute(
-            f"SELECT * FROM {DNS_TABLE} WHERE host = ? AND resolver_key = ?",
+            f"SELECT * FROM {HOST_RESOLUTION_TABLE} WHERE host = ? AND resolver_key = ?",
             (host, resolver_key),
         ).fetchone()
         if row is None:
@@ -369,7 +384,7 @@ class CacheRepository:
         expires_at = checked_at + timedelta(days=ttl_days)
         self._connection.execute(
             f"""
-            INSERT OR REPLACE INTO {DNS_TABLE} (
+            INSERT OR REPLACE INTO {HOST_RESOLUTION_TABLE} (
                 host, resolver_key, a_exists, a_nodata, a_nxdomain, a_timeout,
                 a_servfail, canonical_name, ipv4_addresses, ipv6_addresses,
                 checked_at, expires_at
@@ -392,18 +407,20 @@ class CacheRepository:
         )
         self._connection.commit()
 
-    def get_geo(self, provider: str, ip: str, now: datetime) -> GeoHistoryRecord | None:
-        """Return a fresh geo cache record when present."""
+    def get_ip_location(
+        self, provider: str, ip: str, now: datetime
+    ) -> IpLocationHistoryRecord | None:
+        """Return a fresh ip location cache record when present."""
         row = self._connection.execute(
-            f"SELECT * FROM {GEO_TABLE} WHERE provider = ? AND ip = ?",
+            f"SELECT * FROM {IP_LOCATION_TABLE} WHERE provider = ? AND ip = ?",
             (provider, ip),
         ).fetchone()
         if row is None:
             return None
-        record = GeoHistoryRecord.from_row(row)
+        record = IpLocationHistoryRecord.from_row(row)
         return None if record.is_expired(now) else record
 
-    def put_geo(
+    def put_ip_location(
         self,
         *,
         provider: str,
@@ -414,11 +431,11 @@ class CacheRepository:
         checked_at: datetime,
         ttl_days: int,
     ) -> None:
-        """Store one geo lookup result."""
+        """Store one ip location lookup result."""
         expires_at = checked_at + timedelta(days=ttl_days)
         self._connection.execute(
             f"""
-            INSERT OR REPLACE INTO {GEO_TABLE} (
+            INSERT OR REPLACE INTO {IP_LOCATION_TABLE} (
                 provider, ip, country_code, region_code, region_name, checked_at, expires_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -438,13 +455,13 @@ class CacheRepository:
         self,
         *,
         delegation_rows: Iterable[sqlite3.Row],
-        dns_rows: Iterable[sqlite3.Row],
-        geo_rows: Iterable[sqlite3.Row],
+        host_resolution_rows: Iterable[sqlite3.Row],
+        ip_location_rows: Iterable[sqlite3.Row],
     ) -> None:
         """Replace all physical cache tables with already-merged SQLite rows."""
         self._connection.execute(f"DELETE FROM {DELEGATION_TABLE}")
-        self._connection.execute(f"DELETE FROM {DNS_TABLE}")
-        self._connection.execute(f"DELETE FROM {GEO_TABLE}")
+        self._connection.execute(f"DELETE FROM {HOST_RESOLUTION_TABLE}")
+        self._connection.execute(f"DELETE FROM {IP_LOCATION_TABLE}")
         for row in delegation_rows:
             self._connection.execute(
                 f"""
@@ -454,12 +471,12 @@ class CacheRepository:
                     soa_servfail, no_nameservers, nameservers, checked_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                self._delegation_row_values(row),
+                tuple(row[column] for column in DELEGATION_COLUMNS),
             )
-        for row in dns_rows:
+        for row in host_resolution_rows:
             self._connection.execute(
                 f"""
-                INSERT OR REPLACE INTO {DNS_TABLE} (
+                INSERT OR REPLACE INTO {HOST_RESOLUTION_TABLE} (
                     host, resolver_key, a_exists, a_nodata, a_nxdomain, a_timeout,
                     a_servfail, canonical_name, ipv4_addresses, ipv6_addresses,
                     checked_at, expires_at
@@ -467,28 +484,16 @@ class CacheRepository:
                 """,
                 tuple(row[column] for column in row.keys()),
             )
-        for row in geo_rows:
+        for row in ip_location_rows:
             self._connection.execute(
                 f"""
-                INSERT OR REPLACE INTO {GEO_TABLE} (
+                INSERT OR REPLACE INTO {IP_LOCATION_TABLE} (
                     provider, ip, country_code, region_code, region_name, checked_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(row[column] for column in row.keys()),
             )
         self._connection.commit()
-
-    def _delegation_row_values(self, row: sqlite3.Row) -> tuple[Any, ...]:
-        """Return delegation row values normalized to the current cache schema."""
-        row_keys = set(row.keys())
-        return tuple(
-            (
-                DELEGATION_SOA_COLUMN_DEFAULTS[column]
-                if column in DELEGATION_SOA_COLUMN_DEFAULTS and column not in row_keys
-                else row[column]
-            )
-            for column in DELEGATION_COLUMNS
-        )
 
     def close(self) -> None:
         """Close the cache database."""

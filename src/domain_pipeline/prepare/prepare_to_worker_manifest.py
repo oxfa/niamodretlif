@@ -5,11 +5,15 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from domain_pipeline.paths import PathLayout
+from domain_pipeline.worker.ip_location.constants import (
+    IP_LOCATION_PROVIDER_GEOJS,
+    IP_LOCATION_PROVIDER_IPINFO_LITE,
+)
 
 
 class PrepareWorkerModel(BaseModel):
@@ -18,7 +22,7 @@ class PrepareWorkerModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class ConfigIdentity(PrepareWorkerModel):
+class PrepareWorkerConfigIdentity(PrepareWorkerModel):
     """Stable config identity captured during batch preparation."""
 
     config_name: str
@@ -119,13 +123,167 @@ class PreparedRuntimeMetadata(PrepareWorkerModel):
         return copy.deepcopy(self.model_dump())
 
 
+class WorkerRuntimeClassificationTTLSpec(PrepareWorkerModel):
+    """Delegation classification cache TTLs persisted in worker manifests."""
+
+    delegation_actionable: int = 7
+    delegation_unactionable: int = 1
+
+
+class WorkerRuntimeHostResolutionTTLSpec(PrepareWorkerModel):
+    """Host-resolution cache TTLs persisted in worker manifests."""
+
+    resolved: int | None = None
+    nodata: int = 1
+    nxdomain: int = 1
+    unknown: int = 0
+
+
+class WorkerRuntimeCacheSpec(PrepareWorkerModel):
+    """Canonical runtime cache settings persisted in one worker manifest."""
+
+    cache_file: str
+    baseline_cache_file: str = ""
+    classification_ttl_days: WorkerRuntimeClassificationTTLSpec = Field(
+        default_factory=WorkerRuntimeClassificationTTLSpec
+    )
+    host_resolution_ttl_days: WorkerRuntimeHostResolutionTTLSpec = Field(
+        default_factory=WorkerRuntimeHostResolutionTTLSpec
+    )
+
+    @model_validator(mode="after")
+    def _validate_cache_paths(self) -> "WorkerRuntimeCacheSpec":
+        if not self.cache_file.strip():
+            raise ValueError("runtime cache_file is required")
+        return self
+
+
+class WorkerRuntimeStageConcurrencyMinimumsSpec(PrepareWorkerModel):
+    """Worker-local async stage concurrency minimums in worker manifests."""
+
+    delegation: int
+    host_resolution: int
+    ip_location: int
+
+
+class WorkerRuntimeStageConcurrencyAdaptiveSpec(PrepareWorkerModel):
+    """Adaptive worker-local stage concurrency settings in worker manifests."""
+
+    enabled: bool = True
+    delegation_enabled: bool = True
+    host_resolution_enabled: bool = True
+    supervisor_interval_seconds: float = 1.0
+    busy_scale_up_after_seconds: float = 5.0
+    idle_scale_down_after_seconds: float = 5.0
+    pressure_window_seconds: float = 5.0
+    queue_pressure_ratio: float = 0.8
+    max_concurrency_multiplier: int = 4
+    scale_up_step: int = 1
+    scale_down_step: int = 1
+
+
+class WorkerRuntimeStageConcurrencySpec(PrepareWorkerModel):
+    """Worker-local stage concurrency settings in worker manifests."""
+
+    minimums: WorkerRuntimeStageConcurrencyMinimumsSpec
+    adaptive: WorkerRuntimeStageConcurrencyAdaptiveSpec = Field(
+        default_factory=WorkerRuntimeStageConcurrencyAdaptiveSpec
+    )
+
+
+class WorkerRuntimeSettingsSpec(PrepareWorkerModel):
+    """Canonical runtime settings persisted in worker manifests."""
+
+    stage_concurrency: WorkerRuntimeStageConcurrencySpec
+
+
+class WorkerRuntimeInputConfig(PrepareWorkerModel):
+    """Source input config persisted in worker manifests."""
+
+    type: Literal["file", "url"]
+    location: str
+    format: str = "auto"
+    label: str = ""
+
+
+class WorkerRuntimeFetchConfig(PrepareWorkerModel):
+    """Source fetch config persisted in worker manifests."""
+
+    request_timeout: float = 30.0
+
+
+class WorkerRuntimeIpLocationMatchList(PrepareWorkerModel):
+    """IpLocation include/exclude country and region values in worker manifests."""
+
+    countries: list[str] = Field(default_factory=list)
+    regions: list[str] = Field(default_factory=list)
+
+
+class WorkerRuntimeLocationPolicyConfig(PrepareWorkerModel):
+    """IpLocation policy config persisted in worker manifests."""
+
+    enabled: bool = False
+    match_scope: Literal["all_ips", "any_ip"] = "all_ips"
+    include: WorkerRuntimeIpLocationMatchList = Field(
+        default_factory=WorkerRuntimeIpLocationMatchList
+    )
+    exclude: WorkerRuntimeIpLocationMatchList = Field(
+        default_factory=WorkerRuntimeIpLocationMatchList
+    )
+
+
+class WorkerRuntimeIPLocationConfig(PrepareWorkerModel):
+    """Effective ip location settings persisted after config normalization."""
+
+    enabled: bool = False
+    timeout: float = 5.0
+    cache_ttl_days: int = 7
+    token: str = ""
+    policy: WorkerRuntimeLocationPolicyConfig = Field(
+        default_factory=WorkerRuntimeLocationPolicyConfig
+    )
+    requires_region_lookup: bool = False
+    effective_provider: str = IP_LOCATION_PROVIDER_IPINFO_LITE
+
+    @model_validator(mode="after")
+    def _validate_effective_provider(self) -> "WorkerRuntimeIPLocationConfig":
+        if self.effective_provider not in {
+            IP_LOCATION_PROVIDER_IPINFO_LITE,
+            IP_LOCATION_PROVIDER_GEOJS,
+        }:
+            raise ValueError("effective_provider must be ipinfo_lite or geojs")
+        return self
+
+
+class WorkerRuntimeOutputConfig(PrepareWorkerModel):
+    """Source output config persisted in worker manifests."""
+
+    directory: str = "output"
+
+
+class WorkerRuntimeSourceConfig(PrepareWorkerModel):
+    """Effective source settings persisted in one prepare-to-worker manifest."""
+
+    id: str
+    enabled: bool = True
+    input: WorkerRuntimeInputConfig
+    fetch: WorkerRuntimeFetchConfig = Field(default_factory=WorkerRuntimeFetchConfig)
+    dns_query: dict[str, Any] = Field(default_factory=dict)
+    delegation: dict[str, Any] = Field(default_factory=dict)
+    host_resolution: dict[str, Any] = Field(default_factory=dict)
+    ip_location: WorkerRuntimeIPLocationConfig = Field(
+        default_factory=WorkerRuntimeIPLocationConfig
+    )
+    output: WorkerRuntimeOutputConfig = Field(default_factory=WorkerRuntimeOutputConfig)
+
+
 class WorkerRuntimeSpec(PrepareWorkerModel):
     """Prepare-owned runtime config for one worker execution."""
 
-    config_identity: ConfigIdentity
-    cache: dict[str, Any]
-    runtime: dict[str, Any] = Field(default_factory=dict)
-    sources: list[dict[str, Any]]
+    config_identity: PrepareWorkerConfigIdentity
+    cache: WorkerRuntimeCacheSpec
+    runtime: WorkerRuntimeSettingsSpec
+    sources: list[WorkerRuntimeSourceConfig]
     output_spec: WorkerOutputSpec
     debug_log_path: str
 
@@ -141,9 +299,9 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
             "config_name": self.config_identity.config_name,
             "config_path": self.config_identity.config_path,
             "config_file_name": self.config_identity.config_file_name,
-            "cache": copy.deepcopy(self.cache),
-            "runtime": copy.deepcopy(self.runtime),
-            "sources": copy.deepcopy(self.sources),
+            "cache": self.cache.model_dump(mode="json"),
+            "runtime": self.runtime.model_dump(mode="json"),
+            "sources": [source.model_dump(mode="json") for source in self.sources],
         }
         cache_payload = payload["cache"]
         cache_file = str(cache_payload.get("cache_file", "")).strip()

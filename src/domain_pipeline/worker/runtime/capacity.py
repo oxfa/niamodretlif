@@ -5,12 +5,10 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from domain_pipeline.worker.dns.lookup import (
-    delegation_dns_profile,
-    dns_query_coordinator_config,
-    host_resolution_dns_profile,
-)
-from domain_pipeline.worker.dns.query_coordinator import (
+from domain_pipeline.worker.delegation import delegation_stage_dns_profile
+from domain_pipeline.worker.dns_query.lookup import dns_query_coordinator_config
+from domain_pipeline.worker.host_resolution import host_resolution_dns_profile
+from domain_pipeline.worker.dns_query.query_coordinator import (
     DNSProviderCapacitySnapshot,
     DNSProviderRateLimit,
     provider_for_nameserver,
@@ -76,11 +74,15 @@ def discover_dns_capacity_groups(
     delegation_groups: set[DNSStageCapacityGroup] = set()
     host_resolution_groups: set[DNSStageCapacityGroup] = set()
     for source_context in loader.source_contexts():
-        dns_config = source_context.config["dns"]
+        dns_config = {
+            **dict(source_context.config["dns_query"]),
+            "delegation": dict(source_context.config["delegation"]),
+            "host_resolution": dict(source_context.config["host_resolution"]),
+        }
         delegation_groups.update(
-            _stage_capacity_groups(delegation_dns_profile(dns_config))
+            _stage_capacity_groups(delegation_stage_dns_profile(dns_config))
         )
-        host_config = dict(dns_config.get("host_resolution") or {})
+        host_config = dict(source_context.config["host_resolution"])
         if not host_config.get("enabled", False):
             continue
         host_resolution_groups.update(

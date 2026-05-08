@@ -1,7 +1,5 @@
 """Layered GitHub Actions sqlite cache lifecycle diagnostics."""
 
-# pylint: disable=too-many-instance-attributes
-
 from __future__ import annotations
 
 import json

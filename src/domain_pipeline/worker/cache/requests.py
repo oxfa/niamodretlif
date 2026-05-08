@@ -1,7 +1,5 @@
 """Worker cache write request payloads."""
 
-# pylint: disable=too-many-instance-attributes
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,7 +30,7 @@ class DelegationCacheWriteRequest:
 
 @dataclass(frozen=True)
 class HostResolutionCacheWriteRequest:
-    """Write request for the physical dns_history host-resolution table."""
+    """Write request for the physical host-resolution cache table."""
 
     host: str
     resolver_key: str
@@ -49,8 +47,8 @@ class HostResolutionCacheWriteRequest:
 
 
 @dataclass(frozen=True)
-class GeoCacheWriteRequest:
-    """Write request for the geo cache table."""
+class IpLocationCacheWriteRequest:
+    """Write request for the ip location cache table."""
 
     provider: str
     ip: str

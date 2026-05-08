@@ -77,12 +77,8 @@ class PipelineConfigLoader:
         )
 
 
-def load_config(
-    path: Path, *, global_config_path: Path | None = None
-) -> dict[str, Any]:
+def load_config(path: Path) -> dict[str, Any]:
     """Load a runtime-ready version 2 YAML configuration file."""
-    if global_config_path is not None:
-        raise ValueError("global_config_path is unsupported after RDAP/WHOIS removal")
     return PipelineConfigLoader().load(path, validate_runtime_credentials=True)
 
 
