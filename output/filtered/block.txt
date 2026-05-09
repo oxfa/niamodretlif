@@ -7467,6 +7467,7 @@ ad.vryeye.com
 ad.walkgame.com
 ad.weibo.com
 ad.weixin.qq.com
+ad.where.com
 ad.winrar.com.cn
 ad.wretch.cc
 ad.wsod.com
@@ -8543,6 +8544,7 @@ ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.beop.io
 ads-tracking.collectiveaudience.co
+ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -11411,6 +11413,7 @@ analyzer.fc2.com
 analyzer2.fc2.com
 analyzeunsettled.com
 anamaembush.com
+anametrix.com
 anametrix.net
 anamuel-careslie.com
 anankesfigurer.com
@@ -23562,6 +23565,7 @@ cy2.vortex.data.microsoft.com.akadns.net
 cy98g9wuwn0n.angularjs.poc.glenigan.com
 cya2.net
 cyad.cc
+cyad1.cyworld.com
 cyad1.nate.com
 cyaijllypnzgl.online
 cyan92010.com
@@ -27417,6 +27421,7 @@ dj-updates.com
 dj1.baidu.com
 dj2550.com
 djbrsguqvbhmv.space
+djbwadintnmmu.com
 djbztw.marimekko.com
 djelabquercic.com
 djexvabvbybza.site
@@ -28362,6 +28367,7 @@ dripe.site
 drippingzone.com
 drive.carpoollogistics.com
 drive.seagate.com
+drive.waitrapp.com
 driven.actonservice.com
 drivendecree.com
 driver.dctaxi.com
@@ -44549,6 +44555,7 @@ ivx.lacompagnie.com
 ivxbrwcdafjzr.site
 ivxwdikrmtzfc.online
 ivy.pcauto.com.cn
+ivy.pcbaby.com.cn
 ivy.pclady.com.cn
 ivy.pconline.com.cn
 ivykiosk.com
@@ -65661,6 +65668,7 @@ previousplayground.com
 prewrapabulic.com
 prezna.com
 prf.vagnt.com
+prfct.co
 prfctmney.com
 prftrndivoqqt.online
 prfwhite.com
@@ -80778,6 +80786,7 @@ stat.cnmo.com
 stat.cqwb.com.cn
 stat.cuadernosdepedagogia.com
 stat.cutv.com
+stat.cyworld.com
 stat.dauc.cz
 stat.dbschenker.com
 stat.dedecms.com
@@ -81023,6 +81032,7 @@ staticfile.net
 staticfile.org
 staticgalaksion.com
 statichf.shihuocdn.cn
+staticiv.com
 statics.3987.com
 statics.9669.com
 statics.adanxing.com
@@ -83999,6 +84009,7 @@ tag.cribnotes.jp
 tag.digitaltarget.ru
 tag.digops.sincro.io
 tag.eisa.mercari.com
+tag.elevaate.io
 tag.flagship.io
 tag.gendiscover.com
 tag.getamigo.io
@@ -85219,6 +85230,7 @@ tfomxpkyvdzyi.space
 tfosrv.com
 tfoyfx.dukefotografia.com
 tfpeev.chanluu.com
+tfpizhejk.com
 tfrcgrhpp.com
 tfrkbyualptil.online
 tfrlwktyhhc.com
@@ -90706,6 +90718,7 @@ uczzd.com
 uczzd.net
 ud.galaxus.de
 udash.umengcloud.com
+udata.mixmarket.biz
 udbaa.com
 udblog.huya.com
 udc.yahoo.com
@@ -96840,6 +96853,7 @@ wpb.wgplayer.com
 wpbioervnvxdv.online
 wpbtyebtypph.com
 wpc.32df9.rhocdn.net
+wpcc.io
 wpcdn1.herokuapp.com
 wpcklpeseoivx.online
 wpcnzz.com
