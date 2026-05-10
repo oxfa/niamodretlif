@@ -107,16 +107,37 @@ def capacity_state_for_groups(
         if any(_snapshot_matches_capacity_group(snapshot, group) for group in groups)
     )
     if not matched_snapshots:
-        return AdaptiveDNSPressureState(summary="no_provider_snapshots")
+        return AdaptiveDNSPressureState(
+            stage_pressure=True,
+            capacity_available=False,
+            provider_count=len(groups),
+            constrained_provider_count=len(groups),
+            usable_parallelism=0,
+            summary=f"no_provider_snapshots provider_groups={len(groups)}",
+        )
+    usable_snapshots = tuple(
+        snapshot for snapshot in matched_snapshots if _snapshot_is_usable(snapshot)
+    )
+    provider_count = len(matched_snapshots)
+    usable_provider_count = len(usable_snapshots)
+    usable_parallelism = _usable_parallelism(usable_snapshots)
+    pressured_provider_count = sum(
+        1 for snapshot in matched_snapshots if snapshot.recent_pressure
+    )
+    constrained_provider_count = provider_count - usable_provider_count
     return AdaptiveDNSPressureState(
-        recent_pressure=any(snapshot.recent_pressure for snapshot in matched_snapshots),
-        capacity_available=all(
-            (snapshot.available_tokens is None or snapshot.available_tokens >= 1.0)
-            and (snapshot.pending_available is None or snapshot.pending_available > 0)
-            for snapshot in matched_snapshots
-        ),
-        summary=",".join(
-            _capacity_snapshot_summary(snapshot) for snapshot in matched_snapshots
+        any_provider_pressure=pressured_provider_count > 0,
+        stage_pressure=usable_provider_count == 0,
+        capacity_available=usable_provider_count > 0,
+        provider_count=provider_count,
+        usable_provider_count=usable_provider_count,
+        pressured_provider_count=pressured_provider_count,
+        constrained_provider_count=constrained_provider_count,
+        usable_parallelism=usable_parallelism,
+        summary=_capacity_state_summary(
+            snapshots=matched_snapshots,
+            usable_provider_count=usable_provider_count,
+            usable_parallelism=usable_parallelism,
         ),
     )
 
@@ -148,4 +169,53 @@ def _capacity_snapshot_summary(snapshot: DNSProviderCapacitySnapshot) -> str:
     return (
         f"{snapshot.provider}:tokens={tokens}:pending={pending}:"
         f"pressure={snapshot.recent_pressure}"
+    )
+
+
+def _snapshot_is_usable(snapshot: DNSProviderCapacitySnapshot) -> bool:
+    """Return whether one provider currently has usable query capacity."""
+    return _snapshot_has_query_capacity(snapshot) and not snapshot.recent_pressure
+
+
+def _snapshot_has_query_capacity(snapshot: DNSProviderCapacitySnapshot) -> bool:
+    """Return whether one provider has token and pending capacity available."""
+    token_available = (
+        snapshot.available_tokens is None or snapshot.available_tokens >= 1.0
+    )
+    pending_available = (
+        snapshot.pending_available is None or snapshot.pending_available > 0
+    )
+    return token_available and pending_available
+
+
+def _usable_parallelism(
+    usable_snapshots: tuple[DNSProviderCapacitySnapshot, ...],
+) -> int | None:
+    """Return current usable pending slots, or None when any provider is unlimited."""
+    if any(snapshot.pending_available is None for snapshot in usable_snapshots):
+        return None
+    return sum(int(snapshot.pending_available or 0) for snapshot in usable_snapshots)
+
+
+def _capacity_state_summary(
+    *,
+    snapshots: tuple[DNSProviderCapacitySnapshot, ...],
+    usable_provider_count: int,
+    usable_parallelism: int | None,
+) -> str:
+    """Return stable operator text for one stage capacity state."""
+    provider_count = len(snapshots)
+    pressured_provider_count = sum(
+        1 for snapshot in snapshots if snapshot.recent_pressure
+    )
+    constrained_provider_count = provider_count - usable_provider_count
+    parallelism = "unlimited" if usable_parallelism is None else str(usable_parallelism)
+    snapshots_summary = ",".join(
+        _capacity_snapshot_summary(snapshot) for snapshot in snapshots
+    )
+    return (
+        f"usable_providers={usable_provider_count}/{provider_count} "
+        f"pressured_providers={pressured_provider_count}/{provider_count} "
+        f"constrained_providers={constrained_provider_count}/{provider_count} "
+        f"usable_parallelism={parallelism} providers={snapshots_summary}"
     )

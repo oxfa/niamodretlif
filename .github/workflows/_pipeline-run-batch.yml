@@ -303,11 +303,11 @@ jobs:
         run: |
           set -eo pipefail
           # The prepare step emits root-atomic worker manifests. Matrix
-          # max-parallel controls GitHub worker count; runtime.stage_concurrency
-          # controls worker-local async concurrency. Delegation and
-          # host-resolution may adapt inside this worker while preserving
-          # root-level delegation fanout to host-level stages. Delegation runs
-          # an NS query plus SOA fallback for NS NODATA before host fanout.
+          # max-parallel controls GitHub worker count. Runtime
+          # stage_concurrency controls worker-local async consumers. Delegation
+          # and enabled host-resolution can adapt independently; disabled
+          # host-resolution starts no host-resolution consumers. Delegation
+          # runs an NS query plus SOA fallback for NS NODATA before host fanout.
           python -m domain_pipeline.pipeline_run worker \
             --source-root . \
             --state-root . \
