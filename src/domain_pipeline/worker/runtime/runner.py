@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import shutil
@@ -18,16 +19,41 @@ from domain_pipeline.worker.status.lifecycle import (
     STATUS_FAILURE,
     STATUS_SUCCESS,
     WorkerStatusLifecycle,
+    WorkerStatusFailureRequest,
+    WorkerStatusIdentity,
 )
 from domain_pipeline.worker.status.store import WorkerStatusStore
 
 log = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass(frozen=True)
+class WorkerRunRequest:
+    """Inputs needed to run one prepared worker manifest."""
+
+    batch_id: str
+    worker_id: str
+    source_root: Path
+    state_root: Path
+    max_runtime_seconds: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkerRunOutcome:
+    """Runtime conclusion fields for one worker execution."""
+
+    overall_conclusion: str
+    conclusion: str
+    error_reason: str | None
+
+
+class WorkerRuntimeExecutionError(RuntimeError):
+    """Raised for expected worker runtime execution failures."""
+
+
 def run_prepared_pipeline(
     runtime_config: dict[str, Any],
     *,
-    runtime_identity: dict[str, str],
     max_runtime_seconds: float | None = None,
     prepared_metadata: dict[str, Any] | None = None,
 ) -> int:
@@ -36,7 +62,6 @@ def run_prepared_pipeline(
         return asyncio.run(
             run_prepared_pipeline_async(
                 runtime_config,
-                runtime_identity=runtime_identity,
                 max_runtime_seconds=max_runtime_seconds,
                 prepared_metadata=prepared_metadata,
             )
@@ -60,35 +85,31 @@ class WorkerBatchRunner:
             store=self.status_store
         )
 
-    def run(
-        self,
-        *,
-        batch_id: str,
-        worker_id: str,
-        source_root: Path,
-        state_root: Path,
-        max_runtime_seconds: float | None = None,
-    ) -> dict[str, Any]:
+    def run(self, request: WorkerRunRequest) -> dict[str, Any]:
         """Process one worker from its prepare-owned runtime manifest."""
         try:
             prepare_manifest = load_prepare_worker_manifest_for_worker(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                state_root=state_root,
+                batch_id=request.batch_id,
+                worker_id=request.worker_id,
+                state_root=request.state_root,
             )
         except ValueError as exc:
             error_reason = str(exc)
             status_path = self.status_lifecycle.record_failure(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                state_root=state_root,
-                failure_reason=error_reason,
+                WorkerStatusFailureRequest(
+                    identity=WorkerStatusIdentity(
+                        request.batch_id,
+                        request.worker_id,
+                        request.state_root,
+                    ),
+                    failure_reason=error_reason,
+                )
             )
-            log.exception("Worker %s manifest validation failed", worker_id)
+            log.exception("Worker %s manifest validation failed", request.worker_id)
             return {
                 "automation_format_version": 2,
-                "batch_id": batch_id,
-                "worker_id": worker_id,
+                "batch_id": request.batch_id,
+                "worker_id": request.worker_id,
                 "participates": True,
                 "overall_conclusion": STATUS_FAILURE,
                 "conclusion": STATUS_FAILURE,
@@ -98,65 +119,111 @@ class WorkerBatchRunner:
         if prepare_manifest is None:
             return {
                 "automation_format_version": 2,
-                "batch_id": batch_id,
-                "worker_id": worker_id,
+                "batch_id": request.batch_id,
+                "worker_id": request.worker_id,
                 "participates": False,
                 "overall_conclusion": "skipped",
             }
+        return self.run_manifest(request, prepare_manifest)
 
+    def run_manifest(
+        self, request: WorkerRunRequest, prepare_manifest: Any
+    ) -> dict[str, Any]:
+        """Run one already-loaded worker manifest."""
         status_path = self.status_store.status_path(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            state_root=state_root,
+            batch_id=request.batch_id,
+            worker_id=request.worker_id,
+            state_root=request.state_root,
         )
         if not status_path.exists():
             self.status_lifecycle.initialize(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                state_root=state_root,
+                batch_id=request.batch_id,
+                worker_id=request.worker_id,
+                state_root=request.state_root,
             )
-        overall_conclusion = STATUS_SUCCESS
-        worker_paths = prepare_manifest.resolve_paths(state_root)
+        worker_paths = prepare_manifest.resolve_paths(request.state_root)
         result_root = worker_paths["result_root"]
-        log_path = prepare_manifest.resolve_log_path(state_root)
+        log_path = prepare_manifest.resolve_log_path(request.state_root)
         self._clear_worker_runtime_outputs(
             worker_paths=worker_paths,
         )
+        outcome = self._run_manifest_payload(
+            request=request,
+            prepare_manifest=prepare_manifest,
+            result_root=result_root,
+            log_path=log_path,
+        )
+        return {
+            "automation_format_version": 2,
+            "batch_id": request.batch_id,
+            "worker_id": request.worker_id,
+            "participates": True,
+            "overall_conclusion": outcome.overall_conclusion,
+            "conclusion": outcome.conclusion,
+            "error_reason": outcome.error_reason,
+            "status_path": self.status_store.status_relative_path(
+                batch_id=request.batch_id, worker_id=request.worker_id
+            ),
+        }
+
+    def _run_manifest_payload(
+        self,
+        *,
+        request: WorkerRunRequest,
+        prepare_manifest: Any,
+        result_root: Path,
+        log_path: Path,
+    ) -> WorkerRunOutcome:
+        overall_conclusion = STATUS_SUCCESS
         error_reason: str | None = None
         conclusion = STATUS_SUCCESS
         try:
             with self._capture_root_logs_to_file(log_path), self._pushd(result_root):
-                run_payload = prepare_manifest.runtime_spec.to_runtime_payload(
-                    source_root=source_root,
-                    state_root=state_root,
+                self._execute_manifest_runtime(
+                    request=request,
+                    prepare_manifest=prepare_manifest,
                 )
-                exit_code = run_prepared_pipeline(
-                    run_payload,
-                    runtime_identity=prepare_manifest.runtime_spec.config_identity.model_dump(
-                        mode="json"
-                    ),
-                    max_runtime_seconds=max_runtime_seconds,
-                    prepared_metadata=prepare_manifest.prepared_metadata.to_runtime_payload(),
-                )
-            if exit_code != 0:
-                raise RuntimeError(f"pipeline exited with status {exit_code}")
-        except Exception as exc:
+        except WorkerRuntimeExecutionError as exc:
             overall_conclusion = STATUS_FAILURE
             conclusion = STATUS_FAILURE
             error_reason = str(exc)
-            logging.getLogger(__name__).exception("Worker %s failed", worker_id)
-        return {
-            "automation_format_version": 2,
-            "batch_id": batch_id,
-            "worker_id": worker_id,
-            "participates": True,
-            "overall_conclusion": overall_conclusion,
-            "conclusion": conclusion,
-            "error_reason": error_reason,
-            "status_path": self.status_store.status_relative_path(
-                batch_id=batch_id, worker_id=worker_id
-            ),
-        }
+            logging.getLogger(__name__).exception("Worker %s failed", request.worker_id)
+        return WorkerRunOutcome(
+            overall_conclusion=overall_conclusion,
+            conclusion=conclusion,
+            error_reason=error_reason,
+        )
+
+    def _execute_manifest_runtime(
+        self,
+        *,
+        request: WorkerRunRequest,
+        prepare_manifest: Any,
+    ) -> None:
+        """Run one manifest payload and surface expected runtime failures."""
+        try:
+            run_payload = prepare_manifest.runtime_spec.to_runtime_payload(
+                source_root=request.source_root,
+                state_root=request.state_root,
+            )
+        except ValueError as exc:
+            raise WorkerRuntimeExecutionError(str(exc)) from exc
+        try:
+            exit_code = run_prepared_pipeline(
+                run_payload,
+                max_runtime_seconds=request.max_runtime_seconds,
+                prepared_metadata=prepare_manifest.prepared_metadata.to_runtime_payload(),
+            )
+        except asyncio.TimeoutError as exc:
+            max_runtime = request.max_runtime_seconds
+            reason = "pipeline exceeded max runtime seconds"
+            if max_runtime is not None:
+                reason = f"{reason}: {max_runtime}"
+            raise WorkerRuntimeExecutionError(reason) from exc
+        if exit_code != 0:
+            raise WorkerRuntimeExecutionError(
+                f"pipeline exited with status {exit_code}"
+            )
 
     @contextmanager
     def _pushd(self, path: Path) -> Iterator[None]:
@@ -221,9 +288,11 @@ def run_worker(
 ) -> dict[str, Any]:
     """Run one prepared worker from the workflow command layer."""
     return WorkerBatchRunner().run(
-        batch_id=batch_id,
-        worker_id=worker_id,
-        source_root=source_root,
-        state_root=state_root,
-        max_runtime_seconds=max_runtime_seconds,
+        WorkerRunRequest(
+            batch_id=batch_id,
+            worker_id=worker_id,
+            source_root=source_root,
+            state_root=state_root,
+            max_runtime_seconds=max_runtime_seconds,
+        )
     )

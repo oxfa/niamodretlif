@@ -14,6 +14,9 @@ from pydantic import (
     model_validator,
 )
 
+from domain_pipeline.prepare.stage_concurrency import (
+    RuntimeStageConcurrencyAdaptiveConfig,
+)
 from domain_pipeline.worker.dns_query.policy import DNSConfigPolicy
 from domain_pipeline.worker.runtime.constants import (
     DELEGATION_STAGE_CONCURRENCY,
@@ -21,14 +24,6 @@ from domain_pipeline.worker.runtime.constants import (
     IP_LOCATION_STAGE_CONCURRENCY,
 )
 
-LEGACY_TOP_LEVEL_KEYS = {"rdap", "rdap_global_policy", "whois_fallback"}
-LEGACY_CACHE_TTL_KEYS = {
-    "rdap_registrable_domain_unregistered",
-    "rdap_registrable_domain_registered",
-    "rdap_lookup_unavailable",
-    "dead",
-    "alive",
-}
 MAPPING_DEFAULT_FIELDS = {
     "fetch",
     "dns_query",
@@ -260,21 +255,6 @@ class DNSStageResolverConfig(StrictModel):
     timeout: float | None = None
     query_rate_limit: DNSQueryRateLimitConfig | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_removed_resolver_fields(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        if "nameservers" in value:
-            raise ValueError(
-                "dns stage nameservers is unsupported; use dns stage resolvers"
-            )
-        if "query_balancer" in value:
-            raise ValueError(
-                "dns stage query_balancer is unsupported; put weight on each resolver"
-            )
-        return value
-
     @field_validator("timeout", mode="after")
     @classmethod
     def _validate_timeout(cls, value: float | None) -> float | None:
@@ -342,40 +322,6 @@ class DNSQueryConfig(StrictModel):
         default_factory=DNSQueryRateLimitConfig
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_removed_nested_stage_fields(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        if "enabled" in value:
-            raise ValueError(
-                "dns_query.enabled is unsupported; delegation is mandatory"
-            )
-        if "delegation" in value:
-            raise ValueError("dns_query.delegation is unsupported; use delegation")
-        if "host_resolution" in value:
-            raise ValueError(
-                "dns_query.host_resolution is unsupported; use host_resolution"
-            )
-        if "default_nameservers" in value:
-            raise ValueError(
-                "dns_query.default_nameservers is unsupported; "
-                "use dns_query.default_resolvers"
-            )
-        if "nameservers" in value:
-            raise ValueError(
-                "dns_query.nameservers is unsupported; use dns_query.default_resolvers "
-                "or stage-specific delegation.resolvers / "
-                "host_resolution.resolvers"
-            )
-        if "ecs" in value:
-            raise ValueError("dns_query.ecs is unsupported; use host_resolution.ecs")
-        if "query_balancer" in value:
-            raise ValueError(
-                "dns_query.query_balancer is unsupported; put weight on each stage resolver"
-            )
-        return value
-
     @field_validator("default_resolvers", mode="after")
     @classmethod
     def _validate_default_resolver_weights(
@@ -441,18 +387,6 @@ class ClassificationTTLConfig(StrictModel):
     delegation_actionable: int = 7
     delegation_unactionable: int = 1
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_legacy_keys(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            legacy_keys = sorted(set(value) & LEGACY_CACHE_TTL_KEYS)
-            if legacy_keys:
-                raise ValueError(
-                    "RDAP/WHOIS cache TTL keys are unsupported: "
-                    + ", ".join(legacy_keys)
-                )
-        return value
-
 
 class HostResolutionTTLConfig(StrictModel):
     """Cache TTLs for stable exact-host resolution outcomes."""
@@ -460,9 +394,8 @@ class HostResolutionTTLConfig(StrictModel):
     resolved: int | None = None
     nodata: int = 1
     nxdomain: int = 1
-    unknown: int = 0
 
-    @field_validator("resolved", "nodata", "nxdomain", "unknown", mode="after")
+    @field_validator("resolved", "nodata", "nxdomain", mode="after")
     @classmethod
     def _validate_ttl_days(cls, value: int | None) -> int | None:
         if value is not None and value < 0:
@@ -488,74 +421,11 @@ class RuntimeStageConcurrencyMinimumsConfig(StrictModel):
     host_resolution: int = DNS_HOST_RESOLUTION_STAGE_CONCURRENCY
     ip_location: int = IP_LOCATION_STAGE_CONCURRENCY
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_removed_stage_names(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            if "geo" in value:
-                raise ValueError(
-                    "runtime.stage_concurrency.minimums.geo is unsupported; "
-                    "use ip_location"
-                )
-        return value
-
     @field_validator("delegation", "host_resolution", "ip_location", mode="after")
     @classmethod
     def _validate_stage_concurrency(cls, value: int) -> int:
         if value < 1:
             raise ValueError("runtime stage concurrency counts must be >= 1")
-        return value
-
-
-class RuntimeStageConcurrencyAdaptiveConfig(StrictModel):
-    """Adaptive worker-local stage concurrency settings."""
-
-    enabled: bool = True
-    delegation_enabled: bool = True
-    host_resolution_enabled: bool = True
-    supervisor_interval_seconds: float = 1.0
-    busy_scale_up_after_seconds: float = 5.0
-    idle_scale_down_after_seconds: float = 5.0
-    pressure_window_seconds: float = 5.0
-    queue_pressure_ratio: float = 0.8
-    max_concurrency_multiplier: int = 4
-    scale_up_step: int = 1
-    scale_down_step: int = 1
-
-    @field_validator(
-        "supervisor_interval_seconds",
-        "busy_scale_up_after_seconds",
-        "idle_scale_down_after_seconds",
-        "pressure_window_seconds",
-        mode="after",
-    )
-    @classmethod
-    def _validate_timing(cls, value: float) -> float:
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("runtime adaptive timing values must be > 0")
-        return float(value)
-
-    @field_validator("queue_pressure_ratio", mode="after")
-    @classmethod
-    def _validate_queue_pressure_ratio(cls, value: float) -> float:
-        if not math.isfinite(value) or value <= 0 or value > 1:
-            raise ValueError(
-                "runtime adaptive queue_pressure_ratio must be > 0 and <= 1"
-            )
-        return float(value)
-
-    @field_validator("max_concurrency_multiplier", mode="after")
-    @classmethod
-    def _validate_concurrency_multiplier(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("runtime adaptive max_concurrency_multiplier must be >= 1")
-        return value
-
-    @field_validator("scale_up_step", "scale_down_step", mode="after")
-    @classmethod
-    def _validate_scale_steps(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("runtime adaptive scale steps must be >= 1")
         return value
 
 
@@ -590,20 +460,11 @@ class DefaultsConfig(StrictModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_removed_defaults_names(cls, value: Any) -> Any:
+    def _normalize_null_defaults(cls, value: Any) -> Any:
         if isinstance(value, dict):
             for key in MAPPING_DEFAULT_FIELDS:
                 if value.get(key) is None:
                     value[key] = {}
-            if "dns" in value:
-                raise ValueError(
-                    "defaults.dns is unsupported; use defaults.dns_query, "
-                    "defaults.delegation, and defaults.host_resolution"
-                )
-            if "geo" in value:
-                raise ValueError(
-                    "defaults.geo is unsupported; use defaults.ip_location"
-                )
         return value
 
 
@@ -630,20 +491,11 @@ class SourceOverrideConfig(StrictModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_removed_source_names(cls, value: Any) -> Any:
+    def _normalize_null_source_overrides(cls, value: Any) -> Any:
         if isinstance(value, dict):
             for key in MAPPING_DEFAULT_FIELDS - {"input"}:
                 if value.get(key) is None:
                     value[key] = {}
-            if "dns" in value:
-                raise ValueError(
-                    "sources[].dns is unsupported; use sources[].dns_query, "
-                    "sources[].delegation, and sources[].host_resolution"
-                )
-            if "geo" in value:
-                raise ValueError(
-                    "sources[].geo is unsupported; use sources[].ip_location"
-                )
         return value
 
 
@@ -669,17 +521,6 @@ class RawPipelineConfig(StrictModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     sources: list[SourceOverrideConfig] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_legacy_top_level_keys(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            legacy_keys = sorted(set(value) & LEGACY_TOP_LEVEL_KEYS)
-            if legacy_keys:
-                raise ValueError(
-                    "RDAP/WHOIS config keys are unsupported: " + ", ".join(legacy_keys)
-                )
-        return value
 
     @model_validator(mode="after")
     def _validate_sources(self) -> "RawPipelineConfig":

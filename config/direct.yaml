@@ -27,10 +27,11 @@ defaults:
     # it determines registrable-domain actionability, not host A/AAAA
     # resolution. The delegation pool uses the platform resolver plus
     # Cloudflare Public DNS, Control D unfiltered, and DNS.SB.
-    # Resolver entries can omit
-    # weight for stage-local traffic preference, not rate control. Per-provider
-    # qps_per_worker values are worker-local project safety caps, not
-    # provider-published guarantees.
+    # Stage resolver entries can omit weight on every entry for equal
+    # first-attempt share, or set weight on every entry for explicit stage-local
+    # traffic preference. Weight is not rate control. Per-provider qps_per_worker
+    # values are worker-local project safety caps, not provider-published
+    # guarantees.
     default_resolvers: []
     timeout: 25.0
     # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
@@ -55,19 +56,11 @@ defaults:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
-        opendns_public_dns:
-          qps_per_worker: 12.0
-          burst: 2
-          max_pending: 8
         controld_unfiltered_public_dns:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
         dns_sb_public_dns:
-          qps_per_worker: 12.0
-          burst: 2
-          max_pending: 8
-        unrecognized_resolver:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
@@ -90,6 +83,9 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: true
+    # Host-resolution resolver entries accept the same all-or-none weight field
+    # as delegation. Omitted weights mean equal first-attempt share for this
+    # stage.
     resolvers:
       - resolver: 8.8.8.8
       # - resolver: 8.8.4.4
@@ -137,7 +133,6 @@ cache:
     resolved: 7
     nodata: 1
     nxdomain: 1
-    unknown: 0
 
 sources:
   - id: direct

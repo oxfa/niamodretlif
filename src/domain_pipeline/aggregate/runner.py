@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ from domain_pipeline.aggregate.cache_merge import AggregateCacheMerger
 from domain_pipeline.aggregate.log_merge import AggregateLogMerger
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
 from domain_pipeline.aggregate.readiness import AggregateReadinessChecker
-from domain_pipeline.paths import PathLayout, WorkflowPathLayout
+from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     PrepareAggregateManifest,
     load_prepare_aggregate_manifest_for_batch,
@@ -42,25 +43,53 @@ def _relative_workflow_paths() -> WorkflowPathLayout:
     return PathLayout(Path(".")).workflow
 
 
+@dataclasses.dataclass
+class AggregateRunnerServices:
+    """Collaborators used by aggregate batch execution."""
+
+    status_store: WorkerStatusStore = dataclasses.field(
+        default_factory=WorkerStatusStore
+    )
+    readiness_checker: AggregateReadinessChecker | None = None
+    output_merger: AggregateOutputMerger = dataclasses.field(
+        default_factory=AggregateOutputMerger
+    )
+    cache_merger: AggregateCacheMerger = dataclasses.field(
+        default_factory=AggregateCacheMerger
+    )
+    log_merger: AggregateLogMerger = dataclasses.field(
+        default_factory=AggregateLogMerger
+    )
+
+    def __post_init__(self) -> None:
+        if self.readiness_checker is None:
+            self.readiness_checker = AggregateReadinessChecker(
+                status_store=self.status_store
+            )
+
+    @property
+    def checker(self) -> AggregateReadinessChecker:
+        """Return the initialized aggregate readiness checker."""
+        if self.readiness_checker is None:
+            raise RuntimeError("aggregate readiness checker was not initialized")
+        return self.readiness_checker
+
+
+@dataclasses.dataclass(frozen=True)
+class AggregateFailureContext:
+    """Shared context for aggregate failure handling."""
+
+    batch_id: str
+    state_root: Path
+    final_output_paths: dict[str, Path]
+    worker_manifests: list[WorkerAggregateManifest]
+
+
 class AggregateBatchRunner:
     """Coordinate aggregate readiness, output merge, cache merge, logs, and markers."""
 
-    def __init__(
-        self,
-        *,
-        readiness_checker: AggregateReadinessChecker | None = None,
-        output_merger: AggregateOutputMerger | None = None,
-        cache_merger: AggregateCacheMerger | None = None,
-        log_merger: AggregateLogMerger | None = None,
-        status_store: WorkerStatusStore | None = None,
-    ) -> None:
-        self.status_store = status_store or WorkerStatusStore()
-        self.readiness_checker = readiness_checker or AggregateReadinessChecker(
-            status_store=self.status_store
-        )
-        self.output_merger = output_merger or AggregateOutputMerger()
-        self.cache_merger = cache_merger or AggregateCacheMerger()
-        self.log_merger = log_merger or AggregateLogMerger()
+    def __init__(self, services: AggregateRunnerServices | None = None) -> None:
+        self.services = services or AggregateRunnerServices()
 
     def run(
         self,
@@ -69,7 +98,7 @@ class AggregateBatchRunner:
         state_root: Path,
     ) -> dict[str, Any]:
         """Aggregate one fully completed batch from JSON handoff payloads."""
-        readiness = self.readiness_checker.validate(batch_id, state_root=state_root)
+        readiness = self.services.checker.validate(batch_id, state_root=state_root)
         prepare_manifest = load_prepare_aggregate_manifest_for_batch(
             batch_id=batch_id, state_root=state_root
         )
@@ -87,18 +116,20 @@ class AggregateBatchRunner:
             prepare_manifest=prepare_manifest,
         )
         if readiness["state"] == "ready_failed":
-            return self._handle_failed_ready_batch(
-                batch_id=batch_id,
-                state_root=state_root,
-                final_output_paths=final_output_paths,
-                worker_manifests=worker_manifests,
+            return self.handle_failed_ready_batch(
+                context=AggregateFailureContext(
+                    batch_id=batch_id,
+                    state_root=state_root,
+                    final_output_paths=final_output_paths,
+                    worker_manifests=worker_manifests,
+                ),
                 readiness=readiness,
             )
         if readiness["state"] != "ready_success":
             return readiness
         status_payloads = readiness["status_payloads"]
         try:
-            self.output_merger.merge_host_value_payloads(
+            self.services.output_merger.merge_host_value_payloads(
                 [
                     ("prepare", prepare_manifest.preparation_filtered_output_values),
                     *[
@@ -109,7 +140,7 @@ class AggregateBatchRunner:
                 ],
                 final_output_paths["filtered"],
             )
-            self.output_merger.merge_host_value_payloads(
+            self.services.output_merger.merge_host_value_payloads(
                 [
                     (manifest.worker_id, manifest.unactionable_output_values)
                     for manifest in worker_manifests
@@ -117,7 +148,7 @@ class AggregateBatchRunner:
                 ],
                 final_output_paths["unactionable"],
             )
-            self.output_merger.merge_audit_payloads(
+            self.services.output_merger.merge_audit_payloads(
                 [
                     *[
                         (manifest.worker_id, manifest.terminal_rows)
@@ -128,7 +159,7 @@ class AggregateBatchRunner:
                 ],
                 final_output_paths["audit"],
             )
-            self.output_merger.merge_review_payloads(
+            self.services.output_merger.merge_review_payloads(
                 [
                     *[
                         (manifest.worker_id, manifest.review_output_rows)
@@ -140,14 +171,16 @@ class AggregateBatchRunner:
                 final_output_paths["review"],
             )
         except DuplicateOutputInvariantError as exc:
-            return self._handle_duplicate_output(
+            return self.handle_duplicate_output(
                 exc=exc,
-                batch_id=batch_id,
-                state_root=state_root,
-                final_output_paths=final_output_paths,
-                worker_manifests=worker_manifests,
+                context=AggregateFailureContext(
+                    batch_id=batch_id,
+                    state_root=state_root,
+                    final_output_paths=final_output_paths,
+                    worker_manifests=worker_manifests,
+                ),
             )
-        cache_merge_summary = self._merge_cache(
+        cache_merge_summary = self.merge_cache(
             batch_id=batch_id,
             source_paths=self._materialize_worker_cache_payloads(
                 batch_id=batch_id,
@@ -189,28 +222,26 @@ class AggregateBatchRunner:
             },
         }
 
-    def _handle_failed_ready_batch(
+    def handle_failed_ready_batch(
         self,
         *,
-        batch_id: str,
-        state_root: Path,
-        final_output_paths: dict[str, Path],
-        worker_manifests: list[WorkerAggregateManifest],
+        context: AggregateFailureContext,
         readiness: dict[str, Any],
     ) -> dict[str, Any]:
+        """Materialize aggregate failure state for completed failed workers."""
         logger.debug(
             "Aggregate failed batch %s status payloads=%s",
-            batch_id,
+            context.batch_id,
             json.dumps(readiness["status_payloads"], sort_keys=True),
         )
-        cache_merge_summary = self._merge_cache(
-            batch_id=batch_id,
+        cache_merge_summary = self.merge_cache(
+            batch_id=context.batch_id,
             source_paths=self._materialize_worker_cache_payloads(
-                batch_id=batch_id,
-                state_root=state_root,
-                worker_manifests=worker_manifests,
+                batch_id=context.batch_id,
+                state_root=context.state_root,
+                worker_manifests=context.worker_manifests,
             ),
-            target_path=final_output_paths["cache"],
+            target_path=context.final_output_paths["cache"],
         )
         failed_statuses = [
             payload
@@ -219,14 +250,14 @@ class AggregateBatchRunner:
         ]
         failure_payload = {
             "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
-            "batch_id": batch_id,
+            "batch_id": context.batch_id,
             "failed_status_count": len(failed_statuses),
             "written_at": utc_now(),
         }
         self._write_json(
-            state_root
+            context.state_root
             / _relative_workflow_paths()
-            .aggregate_failed_marker_path(batch_id=batch_id)
+            .aggregate_failed_marker_path(batch_id=context.batch_id)
             .relative_to(Path(".")),
             failure_payload,
         )
@@ -236,27 +267,25 @@ class AggregateBatchRunner:
             "cache_merge_summary": cache_merge_summary,
         }
 
-    def _handle_duplicate_output(
+    def handle_duplicate_output(
         self,
         *,
         exc: DuplicateOutputInvariantError,
-        batch_id: str,
-        state_root: Path,
-        final_output_paths: dict[str, Path],
-        worker_manifests: list[WorkerAggregateManifest],
+        context: AggregateFailureContext,
     ) -> dict[str, Any]:
-        cache_merge_summary = self._merge_cache(
-            batch_id=batch_id,
+        """Materialize aggregate failure state for duplicate output conflicts."""
+        cache_merge_summary = self.merge_cache(
+            batch_id=context.batch_id,
             source_paths=self._materialize_worker_cache_payloads(
-                batch_id=batch_id,
-                state_root=state_root,
-                worker_manifests=worker_manifests,
+                batch_id=context.batch_id,
+                state_root=context.state_root,
+                worker_manifests=context.worker_manifests,
             ),
-            target_path=final_output_paths["cache"],
+            target_path=context.final_output_paths["cache"],
         )
         failure_payload = {
             "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
-            "batch_id": batch_id,
+            "batch_id": context.batch_id,
             "failed_status_count": 0,
             "written_at": utc_now(),
             "failure_reason": str(exc),
@@ -267,13 +296,15 @@ class AggregateBatchRunner:
             },
         }
         self._write_json(
-            state_root
+            context.state_root
             / _relative_workflow_paths()
-            .aggregate_failed_marker_path(batch_id=batch_id)
+            .aggregate_failed_marker_path(batch_id=context.batch_id)
             .relative_to(Path(".")),
             failure_payload,
         )
-        logger.error("Aggregate duplicate invariant for batch %s: %s", batch_id, exc)
+        logger.error(
+            "Aggregate duplicate invariant for batch %s: %s", context.batch_id, exc
+        )
         return {
             "state": "failed",
             "failed_statuses": [],
@@ -286,14 +317,15 @@ class AggregateBatchRunner:
             },
         }
 
-    def _merge_cache(
+    def merge_cache(
         self,
         *,
         batch_id: str,
         source_paths: list[Path],
         target_path: Path,
     ) -> dict[str, Any]:
-        cache_merge_summary = self.cache_merger.merge(
+        """Merge worker cache payloads and log the aggregate summary."""
+        cache_merge_summary = self.services.cache_merger.merge(
             source_paths=source_paths,
             target_path=target_path,
         )
@@ -322,7 +354,7 @@ class AggregateBatchRunner:
             len(worker_manifests),
             relative_path(target_path),
         )
-        self.log_merger.merge_texts(
+        self.services.log_merger.merge_texts(
             log_texts=[
                 manifest.log_text
                 for manifest in worker_manifests

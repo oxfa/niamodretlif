@@ -62,17 +62,56 @@ class DNSPendingQuerySnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
+class DNSProviderTokenCapacity:
+    """Provider token bucket capacity snapshot."""
+
+    qps_per_worker: float | None
+    burst: int | None
+    available_tokens: float | None
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSProviderPendingCapacity:
+    """Provider pending-query capacity snapshot."""
+
+    max_pending: int | None
+    in_use: int
+    available: int | None
+
+
+@dataclasses.dataclass(frozen=True)
 class DNSProviderCapacitySnapshot:
     """Process-local DNS provider capacity and recent pressure."""
 
     provider: str
-    qps_per_worker: float | None
-    burst: int | None
-    max_pending: int | None
-    available_tokens: float | None
-    pending_in_use: int
-    pending_available: int | None
+    token: DNSProviderTokenCapacity
+    pending: DNSProviderPendingCapacity
     recent_pressure: bool
+
+    @property
+    def qps_per_worker(self) -> float | None:
+        """Return configured per-worker provider QPS."""
+        return self.token.qps_per_worker
+
+    @property
+    def burst(self) -> int | None:
+        """Return configured provider burst size."""
+        return self.token.burst
+
+    @property
+    def max_pending(self) -> int | None:
+        """Return configured pending-query limit."""
+        return self.pending.max_pending
+
+    @property
+    def available_tokens(self) -> float | None:
+        """Return currently available provider tokens."""
+        return self.token.available_tokens
+
+    @property
+    def pending_available(self) -> int | None:
+        """Return currently available pending slots."""
+        return self.pending.available
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,24 +142,101 @@ class DNSQueryAttemptFailure:
     error_type: str
 
 
+@dataclasses.dataclass(frozen=True)
+class DNSQueryLogContext:
+    """Stable DNS query log identity."""
+
+    endpoint: DNSEndpoint
+    name: str
+    record_type: str
+    stage: str
+    attempt_index: int
+    query_id: str
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSQueryLogEvent:
+    """Structured DNS query telemetry shared by success and retry logging."""
+
+    context: DNSQueryLogContext
+    answer: Any | None = None
+    error: Exception | None = None
+
+    @property
+    def endpoint(self) -> DNSEndpoint:
+        """Return the selected DNS endpoint."""
+        return self.context.endpoint
+
+    @property
+    def name(self) -> str:
+        """Return the DNS owner name."""
+        return self.context.name
+
+    @property
+    def record_type(self) -> str:
+        """Return the DNS record type."""
+        return self.context.record_type
+
+    @property
+    def stage(self) -> str:
+        """Return the worker DNS stage."""
+        return self.context.stage
+
+    @property
+    def attempt_index(self) -> int:
+        """Return the zero-based attempt index."""
+        return self.context.attempt_index
+
+    @property
+    def query_id(self) -> str:
+        """Return the stable query id."""
+        return self.context.query_id
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSQueryExhaustedRequest:
+    """Request payload for one exhausted DNS query error."""
+
+    name: str
+    record_type: str
+    attempts: int
+    last_error: Exception
+    failures: list[DNSQueryAttemptFailure]
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSCoordinatorRegistryRequest:
+    """Request payload for DNS query coordinator registry lookup."""
+
+    coordinator_cls: type["DNSQueryCoordinatorBase"]
+    registry_key: str
+    endpoints: list[DNSEndpoint]
+    resolver_key: str
+    config: DNSQueryCoordinatorConfig
+    retry_backoff_base_seconds: float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSEndpointSelectionRequest:
+    """Inputs for selecting an endpoint for one DNS query attempt."""
+
+    attempt_index: int
+    previous_index: int
+    failed_providers: set[str]
+    record_type: str
+    name: str
+
+
 class DNSQueryExhaustedError(Exception):
     """Raised after one DNS query exhausts its retry budget."""
 
-    def __init__(
-        self,
-        *,
-        name: str,
-        record_type: str,
-        attempts: int,
-        last_error: Exception,
-        failures: list[DNSQueryAttemptFailure],
-    ) -> None:
-        super().__init__(str(last_error))
-        self.name = name
-        self.record_type = record_type
-        self.attempts = attempts
-        self.last_error = last_error
-        self.failures = list(failures)
+    def __init__(self, request: DNSQueryExhaustedRequest) -> None:
+        super().__init__(str(request.last_error))
+        self.name = request.name
+        self.record_type = request.record_type
+        self.attempts = request.attempts
+        self.last_error = request.last_error
+        self.failures = list(request.failures)
 
 
 @dataclasses.dataclass
@@ -352,19 +468,6 @@ class DNSQueryCoordinatorBase:
         )
 
     @classmethod
-    def clear_shared_limiters(cls) -> None:
-        """Clear worker-local static limiter state for tests."""
-        with cls._limiter_lock:
-            cls._token_limiters.clear()
-            cls._pending_limiters.clear()
-
-    @classmethod
-    def shared_limiter_counts(cls) -> tuple[int, int]:
-        """Return static limiter counts for deterministic tests."""
-        with cls._limiter_lock:
-            return len(cls._token_limiters), len(cls._pending_limiters)
-
-    @classmethod
     def provider_capacity_snapshot(
         cls, *, rate_limit_enabled: bool, pressure_window_seconds: float
     ) -> tuple[DNSProviderCapacitySnapshot, ...]:
@@ -373,12 +476,16 @@ class DNSQueryCoordinatorBase:
             return (
                 DNSProviderCapacitySnapshot(
                     provider="unlimited",
-                    qps_per_worker=None,
-                    burst=None,
-                    max_pending=None,
-                    available_tokens=None,
-                    pending_in_use=0,
-                    pending_available=None,
+                    token=DNSProviderTokenCapacity(
+                        qps_per_worker=None,
+                        burst=None,
+                        available_tokens=None,
+                    ),
+                    pending=DNSProviderPendingCapacity(
+                        max_pending=None,
+                        in_use=0,
+                        available=None,
+                    ),
                     recent_pressure=False,
                 ),
             )
@@ -402,12 +509,16 @@ class DNSQueryCoordinatorBase:
                 snapshots.append(
                     DNSProviderCapacitySnapshot(
                         provider=provider,
-                        qps_per_worker=qps_per_worker,
-                        burst=burst,
-                        max_pending=max_pending,
-                        available_tokens=token_snapshot.available_tokens,
-                        pending_in_use=pending_snapshot.in_use,
-                        pending_available=pending_snapshot.available,
+                        token=DNSProviderTokenCapacity(
+                            qps_per_worker=qps_per_worker,
+                            burst=burst,
+                            available_tokens=token_snapshot.available_tokens,
+                        ),
+                        pending=DNSProviderPendingCapacity(
+                            max_pending=max_pending,
+                            in_use=pending_snapshot.in_use,
+                            available=pending_snapshot.available,
+                        ),
                         recent_pressure=recent_pressure,
                     )
                 )
@@ -550,20 +661,17 @@ class DNSQueryCoordinatorBase:
         last_error: Exception | None = None
         failures: list[DNSQueryAttemptFailure] = []
         failed_providers: set[str] = set()
-        preferred_index = self._select_first_endpoint_index()
-        endpoint_index = preferred_index
+        endpoint_index = self._select_first_endpoint_index()
         for attempt_index in range(attempt_budget):
             self._sleep_before_retry(attempt_index)
-            if attempt_index > 0:
-                preferred_index = self._select_retry_preferred_index(
+            endpoint_index = self._endpoint_index_for_attempt(
+                DNSEndpointSelectionRequest(
+                    attempt_index=attempt_index,
                     previous_index=endpoint_index,
                     failed_providers=failed_providers,
+                    record_type=record_type,
+                    name=name,
                 )
-            endpoint_index = self._select_rate_available_endpoint_index(
-                preferred_index=preferred_index,
-                failed_providers=failed_providers,
-                record_type=record_type,
-                name=name,
             )
             endpoint = self.endpoints[endpoint_index]
             logger.debug(
@@ -580,58 +688,34 @@ class DNSQueryCoordinatorBase:
                 endpoint.address or SYSTEM_NAMESERVER,
                 self._resolver_key,
             )
+            log_context = DNSQueryLogContext(
+                endpoint=endpoint,
+                name=name,
+                record_type=record_type,
+                stage=self.stage,
+                attempt_index=attempt_index,
+                query_id=query_id,
+            )
             try:
                 answer = self._resolve_once(endpoint, name, record_type)
                 self._log_success(
-                    endpoint,
-                    name,
-                    record_type,
-                    self.stage,
-                    attempt_index,
-                    query_id,
-                    answer,
+                    DNSQueryLogEvent(
+                        context=log_context,
+                        answer=answer,
+                    )
                 )
                 return answer
-            except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers) as exc:
+            except (
+                dns.resolver.LifetimeTimeout,
+                dns.resolver.NoNameservers,
+                dns.exception.Timeout,
+            ) as exc:
                 last_error = exc
-                failed_providers.add(endpoint.provider)
-                self._log_retryable_failure(
-                    endpoint,
-                    name,
-                    record_type,
-                    self.stage,
-                    attempt_index,
-                    query_id,
-                    exc,
-                )
-                failures.append(
-                    DNSQueryAttemptFailure(
-                        attempt=attempt_index + 1,
-                        provider=endpoint.provider,
-                        nameserver=endpoint.address or SYSTEM_NAMESERVER,
-                        error_type=type(exc).__name__,
-                    )
-                )
-                continue
-            except dns.exception.Timeout as exc:
-                last_error = exc
-                failed_providers.add(endpoint.provider)
-                self._log_retryable_failure(
-                    endpoint,
-                    name,
-                    record_type,
-                    self.stage,
-                    attempt_index,
-                    query_id,
-                    exc,
-                )
-                failures.append(
-                    DNSQueryAttemptFailure(
-                        attempt=attempt_index + 1,
-                        provider=endpoint.provider,
-                        nameserver=endpoint.address or SYSTEM_NAMESERVER,
-                        error_type=type(exc).__name__,
-                    )
+                self._record_retry_failure(
+                    log_context=log_context,
+                    error=exc,
+                    failed_providers=failed_providers,
+                    failures=failures,
                 )
                 continue
         if last_error is not None:
@@ -647,65 +731,89 @@ class DNSQueryCoordinatorBase:
                 type(last_error).__name__,
             )
             raise DNSQueryExhaustedError(
-                name=name,
-                record_type=record_type,
-                attempts=attempt_budget,
-                last_error=last_error,
-                failures=failures,
+                DNSQueryExhaustedRequest(
+                    name=name,
+                    record_type=record_type,
+                    attempts=attempt_budget,
+                    last_error=last_error,
+                    failures=failures,
+                )
             ) from last_error
         raise dns.exception.Timeout(f"{record_type} lookup for {name} failed")
 
-    def _log_success(
+    def _endpoint_index_for_attempt(self, request: DNSEndpointSelectionRequest) -> int:
+        """Return the selected endpoint index for one DNS query attempt."""
+        preferred_index = request.previous_index
+        if request.attempt_index > 0:
+            preferred_index = self._select_retry_preferred_index(
+                previous_index=request.previous_index,
+                failed_providers=request.failed_providers,
+            )
+        return self._select_rate_available_endpoint_index(
+            preferred_index=preferred_index,
+            failed_providers=request.failed_providers,
+            record_type=request.record_type,
+            name=request.name,
+        )
+
+    def _record_retry_failure(
         self,
-        endpoint: DNSEndpoint,
-        name: str,
-        record_type: str,
-        stage: str,
-        attempt_index: int,
-        query_id: str,
-        answer: Any,
+        *,
+        log_context: DNSQueryLogContext,
+        error: Exception,
+        failed_providers: set[str],
+        failures: list[DNSQueryAttemptFailure],
     ) -> None:
+        """Record telemetry for one retryable DNS query failure."""
+        failed_providers.add(log_context.endpoint.provider)
+        self._log_retryable_failure(
+            DNSQueryLogEvent(
+                context=log_context,
+                error=error,
+            )
+        )
+        failures.append(
+            DNSQueryAttemptFailure(
+                attempt=log_context.attempt_index + 1,
+                provider=log_context.endpoint.provider,
+                nameserver=log_context.endpoint.address or SYSTEM_NAMESERVER,
+                error_type=type(error).__name__,
+            )
+        )
+
+    def _log_success(self, event: DNSQueryLogEvent) -> None:
         """Log one successful DNS query answer."""
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        answer_values = _answer_values(answer)
+        answer_values = _answer_values(event.answer)
         logger.debug(
             "DNS query success query_id=%s stage=%s record_type=%s name=%s "
             "attempt=%d provider=%s nameserver=%s answer_count=%d "
             "answer_values=%s",
-            query_id,
-            stage,
-            record_type,
-            name,
-            attempt_index + 1,
-            endpoint.provider,
-            endpoint.address or SYSTEM_NAMESERVER,
+            event.query_id,
+            event.stage,
+            event.record_type,
+            event.name,
+            event.attempt_index + 1,
+            event.endpoint.provider,
+            event.endpoint.address or SYSTEM_NAMESERVER,
             len(answer_values),
             json.dumps(answer_values, ensure_ascii=True, separators=(",", ":")),
         )
 
-    def _log_retryable_failure(
-        self,
-        endpoint: DNSEndpoint,
-        name: str,
-        record_type: str,
-        stage: str,
-        attempt_index: int,
-        query_id: str,
-        exc: Exception,
-    ) -> None:
+    def _log_retryable_failure(self, event: DNSQueryLogEvent) -> None:
         """Log one retryable DNS query failure."""
         logger.debug(
             "DNS query retryable failure query_id=%s stage=%s record_type=%s name=%s "
             "attempt=%d provider=%s nameserver=%s error_type=%s",
-            query_id,
-            stage,
-            record_type,
-            name,
-            attempt_index + 1,
-            endpoint.provider,
-            endpoint.address or SYSTEM_NAMESERVER,
-            type(exc).__name__,
+            event.query_id,
+            event.stage,
+            event.record_type,
+            event.name,
+            event.attempt_index + 1,
+            event.endpoint.provider,
+            event.endpoint.address or SYSTEM_NAMESERVER,
+            type(event.error).__name__ if event.error is not None else "",
         )
 
     def _resolve_once(self, endpoint: DNSEndpoint, name: str, record_type: str) -> Any:
@@ -747,35 +855,21 @@ class DNSQueryCoordinatorRegistry:
 
     @classmethod
     def get_or_create(
-        cls,
-        *,
-        coordinator_cls: type[DNSQueryCoordinatorBase],
-        registry_key: str,
-        endpoints: list[DNSEndpoint],
-        resolver_key: str,
-        config: DNSQueryCoordinatorConfig,
-        retry_backoff_base_seconds: float = 1.0,
+        cls, request: DNSCoordinatorRegistryRequest
     ) -> DNSQueryCoordinatorBase:
         """Return a shared coordinator for one normalized stage resolver profile."""
-        stage_key = f"{coordinator_cls.stage}|{registry_key}"
+        stage_key = f"{request.coordinator_cls.stage}|{request.registry_key}"
         with cls._lock:
             coordinator = cls._coordinators.get(stage_key)
             if coordinator is None:
-                coordinator = coordinator_cls(
-                    endpoints=endpoints,
-                    resolver_key=resolver_key,
-                    config=config,
-                    retry_backoff_base_seconds=retry_backoff_base_seconds,
+                coordinator = request.coordinator_cls(
+                    endpoints=request.endpoints,
+                    resolver_key=request.resolver_key,
+                    config=request.config,
+                    retry_backoff_base_seconds=request.retry_backoff_base_seconds,
                 )
                 cls._coordinators[stage_key] = coordinator
             return coordinator
-
-    @classmethod
-    def clear(cls) -> None:
-        """Clear registry state for tests."""
-        with cls._lock:
-            cls._coordinators.clear()
-        DNSQueryCoordinatorBase.clear_shared_limiters()
 
     @classmethod
     def provider_capacity_snapshot(
@@ -792,19 +886,23 @@ def provider_for_nameserver(nameserver: str | None) -> str:
     """Return the normalized provider id for one resolver address."""
     if nameserver is None or nameserver == SYSTEM_NAMESERVER:
         return PROVIDER_SYSTEM_RESOLVER
-    if nameserver in GOOGLE_PUBLIC_DNS_NAMESERVERS:
-        return PROVIDER_GOOGLE_PUBLIC_DNS
-    if nameserver in QUAD9_ECS_PUBLIC_DNS_NAMESERVERS:
-        return PROVIDER_QUAD9_ECS_PUBLIC_DNS
-    if nameserver in CLOUDFLARE_PUBLIC_DNS_NAMESERVERS:
-        return PROVIDER_CLOUDFLARE_PUBLIC_DNS
-    if nameserver in OPENDNS_NAMESERVERS:
-        return PROVIDER_OPENDNS_PUBLIC_DNS
-    if nameserver in CONTROLD_UNFILTERED_PUBLIC_DNS_NAMESERVERS:
-        return PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS
-    if nameserver in DNS_SB_PUBLIC_NAMESERVERS:
-        return PROVIDER_DNS_SB_PUBLIC_DNS
+    for provider, provider_nameservers in _PUBLIC_DNS_PROVIDER_NAMESERVERS:
+        if nameserver in provider_nameservers:
+            return provider
     return PROVIDER_UNRECOGNIZED_RESOLVER
+
+
+_PUBLIC_DNS_PROVIDER_NAMESERVERS = (
+    (PROVIDER_GOOGLE_PUBLIC_DNS, GOOGLE_PUBLIC_DNS_NAMESERVERS),
+    (PROVIDER_QUAD9_ECS_PUBLIC_DNS, QUAD9_ECS_PUBLIC_DNS_NAMESERVERS),
+    (PROVIDER_CLOUDFLARE_PUBLIC_DNS, CLOUDFLARE_PUBLIC_DNS_NAMESERVERS),
+    (PROVIDER_OPENDNS_PUBLIC_DNS, OPENDNS_NAMESERVERS),
+    (
+        PROVIDER_CONTROLD_UNFILTERED_PUBLIC_DNS,
+        CONTROLD_UNFILTERED_PUBLIC_DNS_NAMESERVERS,
+    ),
+    (PROVIDER_DNS_SB_PUBLIC_DNS, DNS_SB_PUBLIC_NAMESERVERS),
+)
 
 
 def build_dns_resolver(

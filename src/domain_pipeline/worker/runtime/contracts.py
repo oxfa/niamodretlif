@@ -5,11 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from domain_pipeline.routing import ResultRoute
+from domain_pipeline.routing.types import ResultRoute
+from domain_pipeline.prepare.models import PreparedProvenance
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.worker.delegation import DelegationResult
-from domain_pipeline.worker.host_resolution import HostResolutionResult
-from domain_pipeline.worker.ip_location import LocationPolicyDecision, IPLocationResult
+from domain_pipeline.worker.delegation.lookup import DelegationResult
+from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
+from domain_pipeline.worker.ip_location.providers import (
+    LocationPolicyDecision,
+    IPLocationResult,
+)
+
+
+@dataclass(frozen=True)
+class RuntimeProvenance:
+    """Runtime ordering and source-field overrides for one parsed host item."""
+
+    sequence: int
+    total: int
+    source: PreparedProvenance = field(default_factory=PreparedProvenance)
 
 
 @dataclass(frozen=True)
@@ -28,14 +41,18 @@ class ParsedHostItem:
 
     source_context: WorkerSourceContext
     entry: ParsedDomainEntry
-    sequence: int
-    total: int
-    manual_filter_pass: bool = False
-    manual_add: bool = False
-    source_id_override: str | None = None
-    source_input_label_override: str | None = None
-    source_ids: tuple[str, ...] = ()
-    source_input_labels: tuple[str, ...] = ()
+    provenance: RuntimeProvenance
+
+
+@dataclass(frozen=True)
+class CompletedResultEvidence:
+    """Stage evidence attached to one terminal host result."""
+
+    delegation_result: DelegationResult | None = None
+    host_resolution_result: HostResolutionResult | None = None
+    ip_location_results: list[IPLocationResult] = field(default_factory=list)
+    ip_location_policy: LocationPolicyDecision | None = None
+    ip_location_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -75,8 +92,4 @@ class CompletedHostResult:
     pipeline_result_code: str
     route: ResultRoute
     row: dict[str, Any]
-    delegation_result: DelegationResult | None = None
-    host_resolution_result: HostResolutionResult | None = None
-    ip_location_results: list[IPLocationResult] = field(default_factory=list)
-    ip_location_policy: LocationPolicyDecision | None = None
-    ip_location_attempts: list[dict[str, Any]] = field(default_factory=list)
+    evidence: CompletedResultEvidence = field(default_factory=CompletedResultEvidence)

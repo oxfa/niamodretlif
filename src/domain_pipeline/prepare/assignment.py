@@ -11,10 +11,8 @@ from typing import Any
 
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     AggregateOutputSpec,
-    PrepareAggregateConfigIdentity,
 )
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
-    PrepareWorkerConfigIdentity,
     PrepareWorkerManifest,
     PreparedDelegationRootMetadata,
     PreparedHostEntryMetadata,
@@ -22,7 +20,7 @@ from domain_pipeline.prepare.prepare_to_worker_manifest import (
     WorkerOutputSpec,
     WorkerRuntimeSpec,
 )
-from domain_pipeline.paths import PathLayout, WorkflowPathLayout
+from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
 from domain_pipeline.prepare.models import (
     PreparedHostEntry,
     PreparedInputSet,
@@ -61,6 +59,17 @@ class PreparedBatchPlanningInputs:
     root_plans: dict[str, PreparedRootPlan]
 
 
+@dataclass(frozen=True)
+class WorkerManifestBuildRequest:
+    """Inputs needed to build prepare-to-worker manifests for one batch."""
+
+    config: dict[str, Any]
+    batch_id: str
+    worker_ids: list[str]
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]]
+    worker_root_plans: dict[str, dict[str, PreparedRootPlan]]
+
+
 def relative_path(path: Path) -> str:
     """Return the repo-relative path representation stored in manifests."""
     return path.as_posix()
@@ -77,30 +86,6 @@ def prepare_worker_manifest_relative_path(*, batch_id: str, worker_id: str) -> P
         _path_layout()
         .batch_paths(batch_id=batch_id)
         .prepare_worker_manifest(worker_id=worker_id)
-    )
-
-
-def worker_config_identity_from_config(
-    config: dict[str, Any],
-) -> PrepareWorkerConfigIdentity:
-    """Return the worker-manifest config identity captured during preparation."""
-    config_path = Path(str(config["config_path"]))
-    return PrepareWorkerConfigIdentity(
-        config_name=str(config["config_name"]),
-        config_path=str(config_path),
-        config_file_name=config_path.name,
-    )
-
-
-def aggregate_config_identity_from_config(
-    config: dict[str, Any],
-) -> PrepareAggregateConfigIdentity:
-    """Return the aggregate-manifest config identity captured during preparation."""
-    config_path = Path(str(config["config_path"]))
-    return PrepareAggregateConfigIdentity(
-        config_name=str(config["config_name"]),
-        config_path=str(config_path),
-        config_file_name=config_path.name,
     )
 
 
@@ -126,17 +111,17 @@ def prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
     """Serialize one root-owned prepared host entry for worker runtime."""
     return {
         "host": entry.entry.host,
-        "input_name": entry.entry.input_name,
-        "source_id": entry.source_id,
-        "input_kind": entry.entry.input_kind,
-        "apex_scope": entry.entry.apex_scope,
-        "source_format": entry.entry.source_format,
-        "manual_filter_pass": entry.manual_filter_pass,
-        "manual_add": entry.manual_add,
-        "source_id_override": entry.source_id_override,
-        "source_input_label_override": entry.source_input_label_override,
-        "source_ids": list(entry.source_ids),
-        "source_input_labels": list(entry.source_input_labels),
+        "input_name": entry.entry.semantics.input_name,
+        "source_id": entry.position.source_id,
+        "input_kind": entry.entry.semantics.input_kind,
+        "apex_scope": entry.entry.semantics.apex_scope,
+        "source_format": entry.entry.semantics.source_format,
+        "manual_filter_pass": entry.provenance.manual_filter_pass,
+        "manual_add": entry.provenance.manual_add,
+        "source_id_override": entry.provenance.source_id_override,
+        "source_input_label_override": entry.provenance.source_input_label_override,
+        "source_ids": list(entry.provenance.source_ids),
+        "source_input_labels": list(entry.provenance.source_input_labels),
     }
 
 
@@ -185,9 +170,9 @@ class WorkerAssignmentPlanner:
             for prepared_entry in self._ordered_entries_for_root(
                 planning_inputs, registrable_domain
             ):
-                worker_source_entries[worker_id][prepared_entry.source_id].append(
-                    prepared_entry
-                )
+                worker_source_entries[worker_id][
+                    prepared_entry.position.source_id
+                ].append(prepared_entry)
             worker_root_plans[worker_id][registrable_domain] = (
                 planning_inputs.root_plans[registrable_domain]
             )
@@ -224,40 +209,34 @@ class WorkerAssignmentPlanner:
         return worker_source_entries, worker_root_plans, worker_entry_counts
 
     def build_worker_manifests(
-        self,
-        *,
-        config: dict[str, Any],
-        batch_id: str,
-        worker_ids: list[str],
-        worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]],
-        worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
+        self, request: WorkerManifestBuildRequest
     ) -> list[PreparedWorkerManifest]:
         """Return the committed prepare-to-worker manifests for participating workers."""
         manifests: list[PreparedWorkerManifest] = []
-        for worker_id in worker_ids:
-            if not worker_source_entries[worker_id]:
+        for worker_id in request.worker_ids:
+            if not request.worker_source_entries[worker_id]:
                 continue
-            selected_source_ids = set(worker_source_entries[worker_id])
+            selected_source_ids = set(request.worker_source_entries[worker_id])
             selected_source_ids.update(
                 plan.delegation_config_source_id
-                for plan in worker_root_plans[worker_id].values()
+                for plan in request.worker_root_plans[worker_id].values()
             )
             manifests.append(
                 PreparedWorkerManifest(
                     worker_id=worker_id,
-                    manifest=PrepareWorkerManifest.from_assignment(
+                    manifest=PrepareWorkerManifest(
                         automation_format_version=PIPELINE_RUN_FORMAT_VERSION,
                         worker_id=worker_id,
-                        batch_id=batch_id,
+                        batch_id=request.batch_id,
                         runtime_spec=self._build_worker_runtime_spec(
-                            config=config,
-                            batch_id=batch_id,
+                            config=request.config,
+                            batch_id=request.batch_id,
                             worker_id=worker_id,
                             selected_source_ids=selected_source_ids,
                         ),
                         prepared_metadata=self._prepared_runtime_metadata_from_assignment(
-                            source_entries=worker_source_entries[worker_id],
-                            root_plans=worker_root_plans[worker_id],
+                            source_entries=request.worker_source_entries[worker_id],
+                            root_plans=request.worker_root_plans[worker_id],
                         ),
                     ),
                 )
@@ -272,8 +251,7 @@ class WorkerAssignmentPlanner:
         worker_id: str,
         selected_source_ids: set[str],
     ) -> WorkerRuntimeSpec:
-        config_identity = worker_config_identity_from_config(config)
-        config_name = config_identity.config_name
+        config_name = str(config["config_name"])
         worker_paths = _path_layout().worker_paths(
             batch_id=batch_id,
             worker_id=worker_id,
@@ -300,7 +278,7 @@ class WorkerAssignmentPlanner:
             )
         return WorkerRuntimeSpec.model_validate(
             {
-                "config_identity": config_identity.model_dump(mode="json"),
+                "config_name": config_name,
                 "cache": {
                     "cache_file": relative_path(worker_paths.cache),
                     "baseline_cache_file": relative_path(
@@ -363,7 +341,7 @@ class WorkerAssignmentPlanner:
                     "delegation root "
                     f"{registrable_domain} is missing delegation config source"
                 )
-            public_suffixes = {entry.entry.public_suffix for entry in entries}
+            public_suffixes = {entry.entry.semantics.public_suffix for entry in entries}
             if len(public_suffixes) != 1:
                 raise ValueError(
                     "delegation root "
@@ -372,7 +350,7 @@ class WorkerAssignmentPlanner:
         return PreparedRuntimeMetadata(
             delegation_roots={
                 registrable_domain: PreparedDelegationRootMetadata(
-                    public_suffix=entries[0].entry.public_suffix,
+                    public_suffix=entries[0].entry.semantics.public_suffix,
                     delegation_config_source_id=(
                         root_plans[registrable_domain].delegation_config_source_id
                     ),
@@ -384,8 +362,8 @@ class WorkerAssignmentPlanner:
                         for entry in sorted(
                             entries,
                             key=lambda current: (
-                                current.source_index,
-                                current.line_index,
+                                current.position.source_index,
+                                current.position.line_index,
                                 current.entry.host,
                             ),
                         )
@@ -402,7 +380,11 @@ class WorkerAssignmentPlanner:
     ) -> list[PreparedHostEntry]:
         return sorted(
             planning_inputs.eligible_root_entries[registrable_domain],
-            key=lambda entry: (entry.source_index, entry.line_index, entry.entry.host),
+            key=lambda entry: (
+                entry.position.source_index,
+                entry.position.line_index,
+                entry.entry.host,
+            ),
         )
 
     def _log_summary(

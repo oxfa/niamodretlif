@@ -77,16 +77,13 @@ class ConfigNormalizer:
         message = str(error.get("msg", "invalid configuration"))
         return f"{location}: {message}" if location else message
 
-    def normalize(
+    def normalize_sources(
         self,
-        raw_config: models.RawPipelineConfig,
         *,
-        config_namespace: str,
-        config_path: Path,
-        validate_runtime_credentials: bool,
-    ) -> dict[str, Any]:
-        """Return the runtime-ready normalized config payload."""
-        defaults_payload = raw_config.defaults.model_dump()
+        raw_config: models.RawPipelineConfig,
+        defaults_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Return source configs after applying defaults and derived DNS settings."""
         normalized_sources: list[dict[str, Any]] = []
         seen_source_ids: set[str] = set()
         for source in raw_config.sources:
@@ -106,7 +103,22 @@ class ConfigNormalizer:
             source_dict = normalized_source.model_dump()
             self.finalize_dns_stage_defaults(source_dict)
             normalized_sources.append(source_dict)
+        return normalized_sources
 
+    def normalize(
+        self,
+        raw_config: models.RawPipelineConfig,
+        *,
+        config_namespace: str,
+        config_path: Path,
+        validate_runtime_credentials: bool,
+    ) -> dict[str, Any]:
+        """Return the runtime-ready normalized config payload."""
+        defaults_payload = raw_config.defaults.model_dump()
+        normalized_sources = self.normalize_sources(
+            raw_config=raw_config,
+            defaults_payload=defaults_payload,
+        )
         cache_payload = raw_config.cache.model_dump()
         self.finalize_cache_defaults(cache_payload)
         try:
@@ -149,8 +161,3 @@ class ConfigNormalizer:
                     source["ip_location"], source_label=f"sources[{source['id']!r}]"
                 )
         return normalized_payload
-
-
-def merge_nested(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Merge nested config mappings through the config normalizer."""
-    return ConfigNormalizer().merge_nested(base, override)

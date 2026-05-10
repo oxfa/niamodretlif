@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Any, Iterable, cast
 
-from domain_pipeline.worker.output.manager import csv_row_signature
+from domain_pipeline.worker.output.manager import (
+    csv_row_signature,
+    write_projected_review_rows,
+)
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS, ReviewOutputRow
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
 
@@ -124,19 +126,4 @@ class AggregateOutputMerger:
     def _write_projected_review_rows(
         self, review_path: Path, review_rows: list[ReviewOutputRow]
     ) -> None:
-        review_path.parent.mkdir(parents=True, exist_ok=True)
-        with review_path.open("w", encoding="utf-8", newline="") as review_handle:
-            writer = csv.DictWriter(
-                review_handle,
-                fieldnames=REVIEW_OUTPUT_COLUMNS,
-                extrasaction="ignore",
-            )
-            writer.writeheader()
-            for row in sorted(
-                review_rows,
-                key=lambda current: (
-                    current.get("input_name") or current.get("host", ""),
-                    current.get("host", ""),
-                ),
-            ):
-                writer.writerow(cast(Any, row))
+        write_projected_review_rows(review_path, review_rows)

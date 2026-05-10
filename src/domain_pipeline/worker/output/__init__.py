@@ -3,8 +3,8 @@
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
 from domain_pipeline.worker.output.manager import (
     audit_output_path_for_source,
-    filtered_output_path_for_source,
     csv_row_signature,
+    filtered_output_path_for_source,
     output_paths_for_source,
     review_basename_for_source,
     review_output_path_for_source,
@@ -38,9 +38,9 @@ __all__ = [
     "csv_row_signature",
     "filtered_output_path_for_source",
     "output_paths_for_source",
+    "public_review_label",
     "review_basename_for_source",
     "review_output_path_for_source",
-    "public_review_label",
     "review_reason_for_row",
     "unactionable_output_path_for_source",
     "write_review_rows",

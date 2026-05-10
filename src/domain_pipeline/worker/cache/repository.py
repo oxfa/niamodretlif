@@ -6,9 +6,31 @@ import dataclasses
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+
+from domain_pipeline.worker.cache.requests import (
+    CacheIdentity,
+    CacheTimestamps,
+    DelegationCacheWriteRequest,
+    HostResolutionCacheWriteRequest,
+    IpLocationCacheEvidence,
+    IpLocationCacheIdentity,
+    IpLocationCacheWriteRequest,
+    cache_identity_from_mapping,
+    delegation_dns_evidence_from_mapping,
+    delegation_soa_evidence_from_mapping,
+    host_resolution_dns_evidence_from_mapping,
+)
+from domain_pipeline.worker.delegation.lookup import (
+    DelegationDnsEvidence,
+    DelegationSoaEvidence,
+)
+from domain_pipeline.worker.host_resolution.lookup import (
+    HostResolutionAddressEvidence,
+    HostResolutionDnsEvidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,118 +83,121 @@ def _parse_string_list(raw_value: str) -> list[str]:
 class DelegationHistoryRecord:
     """A cached delegation lookup keyed by domain and resolver settings."""
 
-    domain: str
-    resolver_key: str
-    ns_exists: bool
-    ns_nodata: bool
-    ns_nxdomain: bool
-    ns_timeout: bool
-    ns_servfail: bool
-    soa_exists: bool
-    soa_nodata: bool
-    soa_nxdomain: bool
-    soa_timeout: bool
-    soa_servfail: bool
-    no_nameservers: bool
-    nameservers: list[str]
-    checked_at: datetime
-    expires_at: datetime
+    payload: DelegationCacheWriteRequest
+
+    @property
+    def identity(self) -> CacheIdentity:
+        """Return the cache row identity."""
+        return self.payload.identity
+
+    @property
+    def dns(self) -> DelegationDnsEvidence:
+        """Return cached NS evidence."""
+        return self.payload.dns
+
+    @property
+    def soa(self) -> DelegationSoaEvidence:
+        """Return cached SOA fallback evidence."""
+        return self.payload.soa
+
+    @property
+    def no_nameservers(self) -> bool:
+        """Return whether cached NS response had no nameserver values."""
+        return self.payload.no_nameservers
+
+    @property
+    def nameservers(self) -> list[str]:
+        """Return cached nameserver values."""
+        return self.payload.nameservers
+
+    @property
+    def timestamps(self) -> CacheTimestamps:
+        """Return cache row timestamps."""
+        return self.payload.timestamps
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "DelegationHistoryRecord":
         """Build a delegation cache record from one SQLite row."""
         return cls(
-            domain=str(row["domain"]),
-            resolver_key=str(row["resolver_key"]),
-            ns_exists=bool(row["ns_exists"]),
-            ns_nodata=bool(row["ns_nodata"]),
-            ns_nxdomain=bool(row["ns_nxdomain"]),
-            ns_timeout=bool(row["ns_timeout"]),
-            ns_servfail=bool(row["ns_servfail"]),
-            soa_exists=bool(row["soa_exists"]),
-            soa_nodata=bool(row["soa_nodata"]),
-            soa_nxdomain=bool(row["soa_nxdomain"]),
-            soa_timeout=bool(row["soa_timeout"]),
-            soa_servfail=bool(row["soa_servfail"]),
-            no_nameservers=bool(row["no_nameservers"]),
-            nameservers=_parse_string_list(str(row["nameservers"])),
-            checked_at=_parse_datetime(str(row["checked_at"])),
-            expires_at=_parse_datetime(str(row["expires_at"])),
+            payload=DelegationCacheWriteRequest(
+                identity=cache_identity_from_mapping(row, name_field="domain"),
+                dns=delegation_dns_evidence_from_mapping(row),
+                soa=delegation_soa_evidence_from_mapping(row),
+                no_nameservers=bool(row["no_nameservers"]),
+                nameservers=_parse_string_list(str(row["nameservers"])),
+                timestamps=CacheTimestamps(
+                    checked_at=_parse_datetime(str(row["checked_at"])),
+                    expires_at=_parse_datetime(str(row["expires_at"])),
+                ),
+            ),
         )
 
     def is_expired(self, now: datetime) -> bool:
         """Return whether this cache row has expired."""
-        return self.expires_at <= now
+        return self.timestamps.effective_expires_at() <= now
 
 
 @dataclasses.dataclass(frozen=True)
 class HostResolutionHistoryRecord:
     """A cached host-resolution lookup keyed by host and resolver settings."""
 
-    host: str
-    resolver_key: str
-    a_exists: bool
-    a_nodata: bool
-    a_nxdomain: bool
-    a_timeout: bool
-    a_servfail: bool
-    canonical_name: str
-    ipv4_addresses: list[str]
-    ipv6_addresses: list[str]
-    checked_at: datetime
-    expires_at: datetime
+    identity: CacheIdentity
+    dns: HostResolutionDnsEvidence
+    addresses: HostResolutionAddressEvidence
+    timestamps: CacheTimestamps
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "HostResolutionHistoryRecord":
         """Build a host-resolution cache record from one SQLite row."""
         return cls(
-            host=str(row["host"]),
-            resolver_key=str(row["resolver_key"]),
-            a_exists=bool(row["a_exists"]),
-            a_nodata=bool(row["a_nodata"]),
-            a_nxdomain=bool(row["a_nxdomain"]),
-            a_timeout=bool(row["a_timeout"]),
-            a_servfail=bool(row["a_servfail"]),
-            canonical_name=str(row["canonical_name"]),
-            ipv4_addresses=_parse_string_list(str(row["ipv4_addresses"])),
-            ipv6_addresses=_parse_string_list(str(row["ipv6_addresses"])),
-            checked_at=_parse_datetime(str(row["checked_at"])),
-            expires_at=_parse_datetime(str(row["expires_at"])),
+            identity=cache_identity_from_mapping(row, name_field="host"),
+            dns=host_resolution_dns_evidence_from_mapping(row),
+            addresses=HostResolutionAddressEvidence(
+                canonical_name=str(row["canonical_name"]),
+                ipv4_addresses=_parse_string_list(str(row["ipv4_addresses"])),
+                ipv6_addresses=_parse_string_list(str(row["ipv6_addresses"])),
+            ),
+            timestamps=CacheTimestamps(
+                checked_at=_parse_datetime(str(row["checked_at"])),
+                expires_at=_parse_datetime(str(row["expires_at"])),
+            ),
         )
 
     def is_expired(self, now: datetime) -> bool:
         """Return whether this cache row has expired."""
-        return self.expires_at <= now
+        return self.timestamps.effective_expires_at() <= now
 
 
 @dataclasses.dataclass(frozen=True)
 class IpLocationHistoryRecord:
     """A cached IP geolocation lookup record."""
 
-    provider: str
-    ip: str
-    country_code: str
-    region_code: str
-    region_name: str
-    checked_at: datetime
-    expires_at: datetime
+    identity: IpLocationCacheIdentity
+    evidence: IpLocationCacheEvidence
+    timestamps: CacheTimestamps
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "IpLocationHistoryRecord":
         """Build a ip location cache record from one SQLite row."""
         return cls(
-            provider=str(row["provider"]),
-            ip=str(row["ip"]),
-            country_code=str(row["country_code"]),
-            region_code=str(row["region_code"]),
-            region_name=str(row["region_name"]),
-            checked_at=_parse_datetime(str(row["checked_at"])),
-            expires_at=_parse_datetime(str(row["expires_at"])),
+            identity=IpLocationCacheIdentity(
+                provider=str(row["provider"]),
+                ip=str(row["ip"]),
+            ),
+            evidence=IpLocationCacheEvidence(
+                country_code=str(row["country_code"]),
+                region_code=str(row["region_code"]),
+                region_name=str(row["region_name"]),
+            ),
+            timestamps=CacheTimestamps(
+                checked_at=_parse_datetime(str(row["checked_at"])),
+                expires_at=_parse_datetime(str(row["expires_at"])),
+            ),
         )
 
     def is_expired(self, now: datetime) -> bool:
         """Return whether this cache row has expired."""
-        return self.expires_at <= now
+        return self.timestamps.effective_expires_at() <= now
 
 
 class CacheRepository:
@@ -287,41 +312,9 @@ class CacheRepository:
                     + ", ".join(missing_columns)
                 )
 
-    def get_delegation(
-        self, domain: str, resolver_key: str, now: datetime
-    ) -> DelegationHistoryRecord | None:
-        """Return a fresh delegation cache record when present."""
-        row = self._connection.execute(
-            f"SELECT * FROM {DELEGATION_TABLE} WHERE domain = ? AND resolver_key = ?",
-            (domain, resolver_key),
-        ).fetchone()
-        if row is None:
-            return None
-        record = DelegationHistoryRecord.from_row(row)
-        return None if record.is_expired(now) else record
-
-    def put_delegation(
-        self,
-        *,
-        domain: str,
-        resolver_key: str,
-        ns_exists: bool,
-        ns_nodata: bool,
-        ns_nxdomain: bool,
-        ns_timeout: bool,
-        ns_servfail: bool,
-        no_nameservers: bool,
-        nameservers: list[str],
-        checked_at: datetime,
-        ttl_days: int,
-        soa_exists: bool = False,
-        soa_nodata: bool = False,
-        soa_nxdomain: bool = False,
-        soa_timeout: bool = False,
-        soa_servfail: bool = False,
-    ) -> None:
+    def put_delegation(self, request: DelegationCacheWriteRequest) -> None:
         """Store one delegation lookup result."""
-        expires_at = checked_at + timedelta(days=ttl_days)
+        expires_at = request.timestamps.effective_expires_at()
         self._connection.execute(
             f"""
             INSERT OR REPLACE INTO {DELEGATION_TABLE} (
@@ -331,57 +324,29 @@ class CacheRepository:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                domain,
-                resolver_key,
-                int(ns_exists),
-                int(ns_nodata),
-                int(ns_nxdomain),
-                int(ns_timeout),
-                int(ns_servfail),
-                int(soa_exists),
-                int(soa_nodata),
-                int(soa_nxdomain),
-                int(soa_timeout),
-                int(soa_servfail),
-                int(no_nameservers),
-                json.dumps(nameservers, sort_keys=True),
-                checked_at.isoformat(),
+                request.identity.name,
+                request.identity.resolver_key,
+                int(request.dns.ns_exists),
+                int(request.dns.ns_nodata),
+                int(request.dns.ns_nxdomain),
+                int(request.dns.ns_timeout),
+                int(request.dns.ns_servfail),
+                int(request.soa.soa_exists),
+                int(request.soa.soa_nodata),
+                int(request.soa.soa_nxdomain),
+                int(request.soa.soa_timeout),
+                int(request.soa.soa_servfail),
+                int(request.no_nameservers),
+                json.dumps(request.nameservers, sort_keys=True),
+                request.timestamps.checked_at.isoformat(),
                 expires_at.isoformat(),
             ),
         )
         self._connection.commit()
 
-    def get_host_resolution(
-        self, host: str, resolver_key: str, now: datetime
-    ) -> HostResolutionHistoryRecord | None:
-        """Return a fresh host-resolution cache record when present."""
-        row = self._connection.execute(
-            f"SELECT * FROM {HOST_RESOLUTION_TABLE} WHERE host = ? AND resolver_key = ?",
-            (host, resolver_key),
-        ).fetchone()
-        if row is None:
-            return None
-        record = HostResolutionHistoryRecord.from_row(row)
-        return None if record.is_expired(now) else record
-
-    def put_host_resolution(
-        self,
-        *,
-        host: str,
-        resolver_key: str,
-        a_exists: bool,
-        a_nodata: bool,
-        a_nxdomain: bool,
-        a_timeout: bool,
-        a_servfail: bool,
-        canonical_name: str,
-        ipv4_addresses: list[str],
-        ipv6_addresses: list[str],
-        checked_at: datetime,
-        ttl_days: int,
-    ) -> None:
+    def put_host_resolution(self, request: HostResolutionCacheWriteRequest) -> None:
         """Store one host-resolution lookup result."""
-        expires_at = checked_at + timedelta(days=ttl_days)
+        expires_at = request.timestamps.effective_expires_at()
         self._connection.execute(
             f"""
             INSERT OR REPLACE INTO {HOST_RESOLUTION_TABLE} (
@@ -391,48 +356,25 @@ class CacheRepository:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                host,
-                resolver_key,
-                int(a_exists),
-                int(a_nodata),
-                int(a_nxdomain),
-                int(a_timeout),
-                int(a_servfail),
-                canonical_name,
-                json.dumps(ipv4_addresses, sort_keys=True),
-                json.dumps(ipv6_addresses, sort_keys=True),
-                checked_at.isoformat(),
+                request.identity.name,
+                request.identity.resolver_key,
+                int(request.dns.a_exists),
+                int(request.dns.a_nodata),
+                int(request.dns.a_nxdomain),
+                int(request.dns.a_timeout),
+                int(request.dns.a_servfail),
+                request.addresses.canonical_name or "",
+                json.dumps(request.addresses.ipv4_addresses, sort_keys=True),
+                json.dumps(request.addresses.ipv6_addresses, sort_keys=True),
+                request.timestamps.checked_at.isoformat(),
                 expires_at.isoformat(),
             ),
         )
         self._connection.commit()
 
-    def get_ip_location(
-        self, provider: str, ip: str, now: datetime
-    ) -> IpLocationHistoryRecord | None:
-        """Return a fresh ip location cache record when present."""
-        row = self._connection.execute(
-            f"SELECT * FROM {IP_LOCATION_TABLE} WHERE provider = ? AND ip = ?",
-            (provider, ip),
-        ).fetchone()
-        if row is None:
-            return None
-        record = IpLocationHistoryRecord.from_row(row)
-        return None if record.is_expired(now) else record
-
-    def put_ip_location(
-        self,
-        *,
-        provider: str,
-        ip: str,
-        country_code: str,
-        region_code: str,
-        region_name: str,
-        checked_at: datetime,
-        ttl_days: int,
-    ) -> None:
+    def put_ip_location(self, request: IpLocationCacheWriteRequest) -> None:
         """Store one ip location lookup result."""
-        expires_at = checked_at + timedelta(days=ttl_days)
+        expires_at = request.timestamps.effective_expires_at()
         self._connection.execute(
             f"""
             INSERT OR REPLACE INTO {IP_LOCATION_TABLE} (
@@ -440,12 +382,12 @@ class CacheRepository:
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                provider,
-                ip,
-                country_code,
-                region_code,
-                region_name,
-                checked_at.isoformat(),
+                request.identity.provider,
+                request.identity.ip,
+                request.evidence.country_code,
+                request.evidence.region_code,
+                request.evidence.region_name,
+                request.timestamps.checked_at.isoformat(),
                 expires_at.isoformat(),
             ),
         )
@@ -498,6 +440,3 @@ class CacheRepository:
     def close(self) -> None:
         """Close the cache database."""
         self._connection.close()
-
-
-PipelineCache = CacheRepository

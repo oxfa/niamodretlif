@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from domain_pipeline.worker.delegation import delegation_stage_dns_profile
+from domain_pipeline.worker.delegation.lookup import delegation_stage_dns_profile
 
 
 def delegation_dns_config(source_config: dict[str, Any]) -> dict[str, Any]:

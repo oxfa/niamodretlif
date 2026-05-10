@@ -73,6 +73,33 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
     if not review_rows:
         return
 
+    projected_rows: list[ReviewOutputRow] = []
+    for row in review_rows:
+        review_row = build_review_output_row(row)
+        input_review_label = str(row.get("classification", ""))
+        input_reason = str(row.get("classification_reason", ""))
+        if (
+            input_review_label in PUBLIC_REVIEW_LABELS
+            and input_reason
+            and input_reason != review_row["classification_reason"]
+        ):
+            log.debug(
+                "Review row rewrite changed existing reason for host=%s path=%s "
+                "classification=%s input_reason=%s output_reason=%s",
+                str(row.get("host", "")),
+                review_path,
+                input_review_label,
+                input_reason,
+                review_row["classification_reason"],
+            )
+        projected_rows.append(review_row)
+    write_projected_review_rows(review_path, projected_rows)
+
+
+def write_projected_review_rows(
+    review_path: Path, review_rows: list[ReviewOutputRow]
+) -> None:
+    """Replace the CSV review output with already-projected review rows."""
     review_path.parent.mkdir(parents=True, exist_ok=True)
     with review_path.open("w", encoding="utf-8", newline="") as review_handle:
         writer = csv.DictWriter(
@@ -84,28 +111,19 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
         for row in sorted(
             review_rows,
             key=lambda current: (
-                str(current.get("input_name") or current["host"]),
-                str(current["host"]),
+                str(current.get("input_name") or current.get("host", "")),
+                str(current.get("host", "")),
             ),
         ):
-            review_row: ReviewOutputRow = build_review_output_row(row)
-            input_review_label = str(row.get("classification", ""))
-            input_reason = str(row.get("classification_reason", ""))
-            if (
-                input_review_label in PUBLIC_REVIEW_LABELS
-                and input_reason
-                and input_reason != review_row["classification_reason"]
-            ):
-                log.debug(
-                    "Review row rewrite changed existing reason for host=%s path=%s "
-                    "classification=%s input_reason=%s output_reason=%s",
-                    str(row.get("host", "")),
-                    review_path,
-                    input_review_label,
-                    input_reason,
-                    review_row["classification_reason"],
-                )
-            writer.writerow(cast(Any, review_row))
+            writer.writerow(cast(Any, row))
+
+
+def txt_output_value(row: dict[str, Any]) -> str:
+    """Return the public TXT value for one output row."""
+    input_name = str(row.get("input_name", "")).strip()
+    if input_name:
+        return input_name
+    return str(row["host"])
 
 
 def output_paths_for_source(source_context: WorkerSourceContext) -> dict[str, Path]:

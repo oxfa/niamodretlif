@@ -19,19 +19,28 @@ from domain_pipeline.prepare.config.loader import (
     load_config_without_runtime_credentials,
 )
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
+from domain_pipeline.prepare.delegation_conflicts import (
+    conflicting_delegation_behavior_message,
+)
 from domain_pipeline.prepare.manual_inputs import ManualInputLoader, ManualInputSet
 from domain_pipeline.prepare.merger import PreparedEntryMerger
 from domain_pipeline.prepare.models import (
     MANUAL_ADD_SOURCE_ID,
     PreparedHostEntry,
     PreparedInputSet,
+    PreparedProvenance,
     PreparedRootPlan,
+    PreparedSourcePosition,
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
 from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
-from domain_pipeline.routing import route_for_pipeline_result_code
-from domain_pipeline.worker.host_resolution import host_resolution_dns_profile
-from domain_pipeline.worker.output.rows import build_base_row
+from domain_pipeline.routing.policy import route_for_pipeline_result_code
+from domain_pipeline.worker.host_resolution.lookup import host_resolution_dns_profile
+from domain_pipeline.worker.output.rows import (
+    BaseRowRequest,
+    BaseRowSourceRequest,
+    build_base_row,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,6 +49,72 @@ class _PreparedSourceContext:
     input_label: str
     output_stem: str
     config: dict[str, Any]
+
+
+@dataclasses.dataclass
+class PreparationCollections:
+    """Mutable collections built while preparing one config."""
+
+    entries_by_host: dict[str, PreparedHostEntry] = dataclasses.field(
+        default_factory=dict
+    )
+    manual_out_by_host: dict[str, PreparedHostEntry] = dataclasses.field(
+        default_factory=dict
+    )
+    review_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    terminal_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    matched_hosts: set[str] = dataclasses.field(default_factory=set)
+
+
+@dataclasses.dataclass
+class PreparationState:
+    """State passed between prepare planning stages."""
+
+    config: dict[str, Any]
+    jobs: list[SourceJob]
+    source_jobs_by_id: dict[str, SourceJob]
+    manual_inputs: ManualInputSet
+    parser: DomainListParser
+    collections: PreparationCollections = dataclasses.field(
+        default_factory=PreparationCollections
+    )
+
+    @property
+    def primary_job(self) -> SourceJob:
+        """Return the first enabled source job used for unmatched manual rows."""
+        return self.jobs[0]
+
+
+@dataclasses.dataclass(frozen=True)
+class ManualRowRequest:
+    """Inputs needed to project one prepare-owned manual review row."""
+
+    job: SourceJob
+    entry: ParsedDomainEntry
+    pipeline_result_code: str
+    input_label: str
+    source_ids: tuple[str, ...] | None = None
+    source_input_labels: tuple[str, ...] | None = None
+
+
+@dataclasses.dataclass
+class ManualRoutingState:
+    """Manual-routing validation state shared while source rows are collected."""
+
+    manual_inputs: ManualInputSet
+    host_fingerprints: dict[str, str] = dataclasses.field(default_factory=dict)
+    manual_add_fingerprints_by_host: dict[str, str] = dataclasses.field(
+        default_factory=dict
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class HostBehaviorRequest:
+    """Inputs needed to validate one prepared host behavior fingerprint."""
+
+    host: str
+    job: SourceJob
+    routing: ManualRoutingState
 
 
 def _resolve_from_root(source_root: Path, path: Path) -> Path:
@@ -55,23 +130,22 @@ def _source_context_from_job(job: SourceJob) -> _PreparedSourceContext:
     )
 
 
-def _manual_review_row(
-    *,
-    job: SourceJob,
-    entry: ParsedDomainEntry,
-    pipeline_result_code: str,
-    input_label: str,
-    source_ids: tuple[str, ...] | None = None,
-    source_input_labels: tuple[str, ...] | None = None,
-) -> dict[str, Any]:
+def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
     return build_base_row(
-        source_context=_source_context_from_job(job),
-        entry=entry,
-        pipeline_result_code=pipeline_result_code,
-        source_id_override=pipeline_result_code,
-        source_input_label_override=input_label,
-        source_ids=source_ids or (pipeline_result_code,),
-        source_input_labels=source_input_labels or (input_label,),
+        BaseRowRequest(
+            source=BaseRowSourceRequest(
+                source_context=_source_context_from_job(request.job),
+                provenance=PreparedProvenance(
+                    source_id_override=request.pipeline_result_code,
+                    source_input_label_override=request.input_label,
+                    source_ids=request.source_ids or (request.pipeline_result_code,),
+                    source_input_labels=request.source_input_labels
+                    or (request.input_label,),
+                ),
+            ),
+            entry=request.entry,
+            pipeline_result_code=request.pipeline_result_code,
+        )
     )
 
 
@@ -81,13 +155,21 @@ def _public_suffix_review_row(
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
     return build_base_row(
-        source_context=_source_context_from_job(job),
-        entry=prepared_entry.entry,
-        pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
-        source_id_override=prepared_entry.source_id_override,
-        source_input_label_override=prepared_entry.source_input_label_override,
-        source_ids=prepared_entry.source_ids,
-        source_input_labels=prepared_entry.source_input_labels,
+        BaseRowRequest(
+            source=BaseRowSourceRequest(
+                source_context=_source_context_from_job(job),
+                provenance=PreparedProvenance(
+                    source_id_override=prepared_entry.provenance.source_id_override,
+                    source_input_label_override=(
+                        prepared_entry.provenance.source_input_label_override
+                    ),
+                    source_ids=prepared_entry.provenance.source_ids,
+                    source_input_labels=prepared_entry.provenance.source_input_labels,
+                ),
+            ),
+            entry=prepared_entry.entry,
+            pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+        )
     )
 
 
@@ -97,13 +179,21 @@ def _manual_filter_pass_public_suffix_row(
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
     return build_base_row(
-        source_context=_source_context_from_job(job),
-        entry=prepared_entry.entry,
-        pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
-        source_id_override=prepared_entry.source_id_override,
-        source_input_label_override=prepared_entry.source_input_label_override,
-        source_ids=prepared_entry.source_ids,
-        source_input_labels=prepared_entry.source_input_labels,
+        BaseRowRequest(
+            source=BaseRowSourceRequest(
+                source_context=_source_context_from_job(job),
+                provenance=PreparedProvenance(
+                    source_id_override=prepared_entry.provenance.source_id_override,
+                    source_input_label_override=(
+                        prepared_entry.provenance.source_input_label_override
+                    ),
+                    source_ids=prepared_entry.provenance.source_ids,
+                    source_input_labels=prepared_entry.provenance.source_input_labels,
+                ),
+            ),
+            entry=prepared_entry.entry,
+            pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
+        )
     )
 
 
@@ -137,335 +227,266 @@ class PreparationPlanner:
         """Load config and prepare worker entries plus terminal rows."""
         resolved_config_path = _resolve_from_root(self.source_root, config_path)
         config = load_config_without_runtime_credentials(resolved_config_path)
-        config_name = str(config["config_name"])
+        return self.prepare_config(config)
+
+    def prepare_config(self, config: dict[str, Any]) -> PreparedInputSet:
+        """Prepare worker entries plus terminal rows from an already-loaded config."""
         jobs = SourceJobFactory().build_jobs(config, source_root=self.source_root)
-        source_jobs_by_id = {job.source_id: job for job in jobs}
         if not jobs:
             raise ValueError("config produced no enabled source jobs")
 
-        manual_inputs = self.manual_loader.load(config_name)
-
-        parser = DomainListParser()
-        entries_by_host: dict[str, PreparedHostEntry] = {}
-        manual_out_by_host: dict[str, PreparedHostEntry] = {}
-        preparation_review_rows: list[dict[str, Any]] = []
-        preparation_terminal_rows: list[dict[str, Any]] = []
-        matched_hosts: set[str] = set()
-
-        self._collect_configured_source_entries(
+        state = PreparationState(
+            config=config,
             jobs=jobs,
-            manual_inputs=manual_inputs,
-            parser=parser,
-            entries_by_host=entries_by_host,
-            manual_out_by_host=manual_out_by_host,
-            matched_hosts=matched_hosts,
+            source_jobs_by_id={job.source_id: job for job in jobs},
+            manual_inputs=self.manual_loader.load(str(config["config_name"])),
+            parser=DomainListParser(),
         )
 
-        self._append_manual_out_rows(
-            manual_out_by_host=manual_out_by_host,
-            manual_inputs=manual_inputs,
-            source_jobs_by_id=source_jobs_by_id,
-            preparation_review_rows=preparation_review_rows,
-            preparation_terminal_rows=preparation_terminal_rows,
-        )
+        self._collect_configured_source_entries(state)
+        self._append_manual_out_rows(state)
+        self._merge_manual_add_entries(state)
 
-        primary_job = jobs[0]
-        self._merge_manual_add_entries(
-            jobs=jobs,
-            manual_inputs=manual_inputs,
-            primary_job=primary_job,
-            entries_by_host=entries_by_host,
-            matched_hosts=matched_hosts,
-        )
+        entries_by_source = self._partition_worker_entries(state)
 
-        entries_by_source = self._partition_worker_entries(
-            entries_by_host=entries_by_host,
-            source_jobs_by_id=source_jobs_by_id,
-            preparation_review_rows=preparation_review_rows,
-            preparation_terminal_rows=preparation_terminal_rows,
-        )
-
-        self._append_missing_manual_pass_rows(
-            manual_inputs=manual_inputs,
-            matched_hosts=matched_hosts,
-            primary_job=primary_job,
-            preparation_review_rows=preparation_review_rows,
-            preparation_terminal_rows=preparation_terminal_rows,
-        )
-
-        self._append_missing_manual_out_rows(
-            manual_inputs=manual_inputs,
-            manual_out_by_host=manual_out_by_host,
-            primary_job=primary_job,
-            preparation_review_rows=preparation_review_rows,
-            preparation_terminal_rows=preparation_terminal_rows,
-        )
+        self._append_missing_manual_pass_rows(state)
+        self._append_missing_manual_out_rows(state)
 
         root_plans = self._root_plans(
             entries_by_source=entries_by_source,
-            source_jobs_by_id=source_jobs_by_id,
+            source_jobs_by_id=state.source_jobs_by_id,
         )
         return PreparedInputSet(
             config=config,
-            source_jobs_by_id=source_jobs_by_id,
+            source_jobs_by_id=state.source_jobs_by_id,
             entries_by_source=dict(entries_by_source),
             root_plans=root_plans,
-            preparation_review_rows=preparation_review_rows,
-            preparation_terminal_rows=preparation_terminal_rows,
+            preparation_review_rows=state.collections.review_rows,
+            preparation_terminal_rows=state.collections.terminal_rows,
         )
 
-    def _collect_configured_source_entries(
-        self,
-        *,
-        jobs: list[SourceJob],
-        manual_inputs: ManualInputSet,
-        parser: DomainListParser,
-        entries_by_host: dict[str, PreparedHostEntry],
-        manual_out_by_host: dict[str, PreparedHostEntry],
-        matched_hosts: set[str],
-    ) -> None:
-        host_fingerprints: dict[str, str] = {}
-        manual_add_fingerprints_by_host: dict[str, str] = {}
-        for source_index, job in enumerate(jobs):
+    def _collect_configured_source_entries(self, state: PreparationState) -> None:
+        routing = ManualRoutingState(manual_inputs=state.manual_inputs)
+        for source_index, job in enumerate(state.jobs):
             source_format = job.config.get("input", {}).get("format", "auto")
             forced_format = None if source_format == "auto" else source_format
-            for record in parser.process_entry_records(
+            for record in state.parser.process_entry_records(
                 job.lines,
                 source_name=job.input_label,
                 forced_format=forced_format,
             ):
                 host = record.entry.host
-                matched_hosts.add(host)
+                state.collections.matched_hosts.add(host)
                 self._validate_host_behavior_fingerprint(
-                    host=host,
-                    job=job,
-                    manual_inputs=manual_inputs,
-                    host_fingerprints=host_fingerprints,
-                    manual_add_fingerprints_by_host=manual_add_fingerprints_by_host,
+                    HostBehaviorRequest(host=host, job=job, routing=routing)
                 )
                 prepared_entry = PreparedHostEntry(
-                    source_id=job.source_id,
-                    source_index=source_index,
-                    line_index=record.line_index,
-                    raw_line=record.raw_line,
                     entry=record.entry,
-                    manual_filter_pass=(
-                        host in manual_inputs.manual_filter_pass_entries
+                    position=PreparedSourcePosition(
+                        source_id=job.source_id,
+                        source_index=source_index,
+                        line_index=record.line_index,
+                        raw_line=record.raw_line,
                     ),
-                    source_ids=(job.source_id,),
-                    source_input_labels=(job.input_label,),
+                    provenance=PreparedProvenance(
+                        manual_filter_pass=(
+                            host in state.manual_inputs.manual_filter_pass_entries
+                        ),
+                        source_ids=(job.source_id,),
+                        source_input_labels=(job.input_label,),
+                    ),
                 )
-                if host in manual_inputs.manual_filter_out_entries:
+                if host in state.manual_inputs.manual_filter_out_entries:
                     self.entry_merger.merge_entry_by_host(
-                        manual_out_by_host, prepared_entry
+                        state.collections.manual_out_by_host, prepared_entry
                     )
                     continue
-                self.entry_merger.merge_entry_by_host(entries_by_host, prepared_entry)
+                self.entry_merger.merge_entry_by_host(
+                    state.collections.entries_by_host, prepared_entry
+                )
 
-    def _validate_host_behavior_fingerprint(
-        self,
-        *,
-        host: str,
-        job: SourceJob,
-        manual_inputs: ManualInputSet,
-        host_fingerprints: dict[str, str],
-        manual_add_fingerprints_by_host: dict[str, str],
-    ) -> None:
-        if host in manual_inputs.manual_add_entries:
-            fingerprint = self._manual_add_behavior_fingerprint(job.config)
-            previous = manual_add_fingerprints_by_host.get(host)
+    def _validate_host_behavior_fingerprint(self, request: HostBehaviorRequest) -> None:
+        if request.host in request.routing.manual_inputs.manual_add_entries:
+            fingerprint = self._manual_add_behavior_fingerprint(request.job.config)
+            previous = request.routing.manual_add_fingerprints_by_host.get(request.host)
             if previous is not None and previous != fingerprint:
                 raise ValueError(
-                    f"manual-add host {host!r} appears in multiple enabled "
+                    f"manual-add host {request.host!r} appears in multiple enabled "
                     "sources with different delegation/output behavior"
                 )
-            manual_add_fingerprints_by_host[host] = fingerprint
+            request.routing.manual_add_fingerprints_by_host[request.host] = fingerprint
             return
 
-        fingerprint = self._source_behavior_fingerprint(job.config)
-        previous = host_fingerprints.get(host)
+        fingerprint = self._source_behavior_fingerprint(request.job.config)
+        previous = request.routing.host_fingerprints.get(request.host)
         if previous is not None and previous != fingerprint:
             raise ValueError(
-                f"duplicate host {host!r} has conflicting stage/output behavior"
+                f"duplicate host {request.host!r} has conflicting stage/output behavior"
             )
-        host_fingerprints[host] = fingerprint
+        request.routing.host_fingerprints[request.host] = fingerprint
 
-    def _append_manual_out_rows(
-        self,
-        *,
-        manual_out_by_host: dict[str, PreparedHostEntry],
-        manual_inputs: ManualInputSet,
-        source_jobs_by_id: dict[str, SourceJob],
-        preparation_review_rows: list[dict[str, Any]],
-        preparation_terminal_rows: list[dict[str, Any]],
-    ) -> None:
-        for host in sorted(manual_out_by_host):
-            prepared_entry = manual_out_by_host[host]
+    def _append_manual_out_rows(self, state: PreparationState) -> None:
+        for host in sorted(state.collections.manual_out_by_host):
+            prepared_entry = state.collections.manual_out_by_host[host]
             source_ids = self.entry_merger.stable_unique_merge(
-                (PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,), prepared_entry.source_ids
+                (PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,),
+                prepared_entry.provenance.source_ids,
             )
             source_input_labels = self.entry_merger.stable_unique_merge(
-                (str(manual_inputs.manual_filter_out_path),),
-                prepared_entry.source_input_labels,
+                (str(state.manual_inputs.manual_filter_out_path),),
+                prepared_entry.provenance.source_input_labels,
             )
             row = _manual_review_row(
-                job=source_jobs_by_id[prepared_entry.source_id],
-                entry=prepared_entry.entry,
-                pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
-                input_label=str(manual_inputs.manual_filter_out_path),
-                source_ids=source_ids,
-                source_input_labels=source_input_labels,
+                ManualRowRequest(
+                    job=state.source_jobs_by_id[prepared_entry.position.source_id],
+                    entry=prepared_entry.entry,
+                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
+                    input_label=str(state.manual_inputs.manual_filter_out_path),
+                    source_ids=source_ids,
+                    source_input_labels=source_input_labels,
+                )
             )
-            preparation_review_rows.append(row)
-            preparation_terminal_rows.append(
+            state.collections.review_rows.append(row)
+            state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
                     pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
                 )
             )
 
-    def _merge_manual_add_entries(
-        self,
-        *,
-        jobs: list[SourceJob],
-        manual_inputs: ManualInputSet,
-        primary_job: SourceJob,
-        entries_by_host: dict[str, PreparedHostEntry],
-        matched_hosts: set[str],
-    ) -> None:
+    def _merge_manual_add_entries(self, state: PreparationState) -> None:
         manual_add_config_fingerprints = {
-            self._manual_add_behavior_fingerprint(job.config) for job in jobs
+            self._manual_add_behavior_fingerprint(job.config) for job in state.jobs
         }
-        for host, entry in sorted(manual_inputs.manual_add_entries.items()):
+        for host, entry in sorted(state.manual_inputs.manual_add_entries.items()):
             incoming = PreparedHostEntry(
-                source_id=primary_job.source_id,
-                source_index=0,
-                line_index=10_000_000,
-                raw_line=host,
                 entry=entry,
-                manual_add=True,
-                source_id_override=MANUAL_ADD_SOURCE_ID,
-                source_input_label_override=str(manual_inputs.manual_add_path),
-                source_ids=(MANUAL_ADD_SOURCE_ID,),
-                source_input_labels=(str(manual_inputs.manual_add_path),),
+                position=PreparedSourcePosition(
+                    source_id=state.primary_job.source_id,
+                    source_index=0,
+                    line_index=10_000_000,
+                    raw_line=host,
+                ),
+                provenance=PreparedProvenance(
+                    manual_add=True,
+                    source_id_override=MANUAL_ADD_SOURCE_ID,
+                    source_input_label_override=str(
+                        state.manual_inputs.manual_add_path
+                    ),
+                    source_ids=(MANUAL_ADD_SOURCE_ID,),
+                    source_input_labels=(str(state.manual_inputs.manual_add_path),),
+                ),
             )
-            current = entries_by_host.get(host)
+            current = state.collections.entries_by_host.get(host)
             if current is None:
                 if len(manual_add_config_fingerprints) > 1:
                     raise ValueError(
-                        f"manual-add file {manual_inputs.manual_add_path} contains "
+                        f"manual-add file {state.manual_inputs.manual_add_path} contains "
                         f"unmatched host {host!r}; unmatched manual_add requires "
                         "all enabled sources to share delegation/output behavior"
                     )
-                entries_by_host[host] = incoming
+                state.collections.entries_by_host[host] = incoming
             else:
-                entries_by_host[host] = dataclasses.replace(
-                    current,
+                provenance = dataclasses.replace(
+                    current.provenance,
                     manual_add=True,
                     source_id_override=MANUAL_ADD_SOURCE_ID,
-                    source_input_label_override=str(manual_inputs.manual_add_path),
+                    source_input_label_override=str(
+                        state.manual_inputs.manual_add_path
+                    ),
                     source_ids=self.entry_merger.stable_unique_merge(
-                        current.source_ids, (MANUAL_ADD_SOURCE_ID,)
+                        current.provenance.source_ids, (MANUAL_ADD_SOURCE_ID,)
                     ),
                     source_input_labels=self.entry_merger.stable_unique_merge(
-                        current.source_input_labels,
-                        (str(manual_inputs.manual_add_path),),
+                        current.provenance.source_input_labels,
+                        (str(state.manual_inputs.manual_add_path),),
                     ),
                 )
-            matched_hosts.add(host)
+                state.collections.entries_by_host[host] = dataclasses.replace(
+                    current,
+                    provenance=provenance,
+                )
+            state.collections.matched_hosts.add(host)
 
     def _partition_worker_entries(
-        self,
-        *,
-        entries_by_host: dict[str, PreparedHostEntry],
-        source_jobs_by_id: dict[str, SourceJob],
-        preparation_review_rows: list[dict[str, Any]],
-        preparation_terminal_rows: list[dict[str, Any]],
+        self, state: PreparationState
     ) -> dict[str, list[PreparedHostEntry]]:
         entries_by_source: dict[str, list[PreparedHostEntry]] = defaultdict(list)
         for prepared_entry in sorted(
-            entries_by_host.values(),
+            state.collections.entries_by_host.values(),
             key=lambda current: (
-                current.source_index,
-                current.line_index,
+                current.position.source_index,
+                current.position.line_index,
                 current.entry.host,
             ),
         ):
             if (
-                prepared_entry.entry.is_public_suffix_input
+                prepared_entry.entry.semantics.is_public_suffix_input
                 or not prepared_entry.entry.registrable_domain
             ):
-                if prepared_entry.manual_filter_pass:
+                if prepared_entry.provenance.manual_filter_pass:
                     pipeline_result_code = (
                         PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
                     )
                     row = _manual_filter_pass_public_suffix_row(
-                        job=source_jobs_by_id[prepared_entry.source_id],
+                        job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
                     )
                 else:
                     pipeline_result_code = PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX
                     row = _public_suffix_review_row(
-                        job=source_jobs_by_id[prepared_entry.source_id],
+                        job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
                     )
-                    preparation_review_rows.append(row)
-                preparation_terminal_rows.append(
+                    state.collections.review_rows.append(row)
+                state.collections.terminal_rows.append(
                     _preparation_terminal_row(
                         row=row,
                         pipeline_result_code=pipeline_result_code,
                     )
                 )
                 continue
-            entries_by_source[prepared_entry.source_id].append(prepared_entry)
+            entries_by_source[prepared_entry.position.source_id].append(prepared_entry)
         return entries_by_source
 
-    def _append_missing_manual_pass_rows(
-        self,
-        *,
-        manual_inputs: ManualInputSet,
-        matched_hosts: set[str],
-        primary_job: SourceJob,
-        preparation_review_rows: list[dict[str, Any]],
-        preparation_terminal_rows: list[dict[str, Any]],
-    ) -> None:
-        for host, entry in sorted(manual_inputs.manual_filter_pass_entries.items()):
-            if host in matched_hosts:
+    def _append_missing_manual_pass_rows(self, state: PreparationState) -> None:
+        for host, entry in sorted(
+            state.manual_inputs.manual_filter_pass_entries.items()
+        ):
+            if host in state.collections.matched_hosts:
                 continue
             row = _manual_review_row(
-                job=primary_job,
-                entry=entry,
-                pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
-                input_label=str(manual_inputs.manual_filter_pass_path),
+                ManualRowRequest(
+                    job=state.primary_job,
+                    entry=entry,
+                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+                    input_label=str(state.manual_inputs.manual_filter_pass_path),
+                )
             )
-            preparation_review_rows.append(row)
-            preparation_terminal_rows.append(
+            state.collections.review_rows.append(row)
+            state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
                     pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
                 )
             )
 
-    def _append_missing_manual_out_rows(
-        self,
-        *,
-        manual_inputs: ManualInputSet,
-        manual_out_by_host: dict[str, PreparedHostEntry],
-        primary_job: SourceJob,
-        preparation_review_rows: list[dict[str, Any]],
-        preparation_terminal_rows: list[dict[str, Any]],
-    ) -> None:
-        for host, entry in sorted(manual_inputs.manual_filter_out_entries.items()):
-            if host in manual_out_by_host:
+    def _append_missing_manual_out_rows(self, state: PreparationState) -> None:
+        for host, entry in sorted(
+            state.manual_inputs.manual_filter_out_entries.items()
+        ):
+            if host in state.collections.manual_out_by_host:
                 continue
             row = _manual_review_row(
-                job=primary_job,
-                entry=entry,
-                pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-                input_label=str(manual_inputs.manual_filter_out_path),
+                ManualRowRequest(
+                    job=state.primary_job,
+                    entry=entry,
+                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+                    input_label=str(state.manual_inputs.manual_filter_out_path),
+                )
             )
-            preparation_review_rows.append(row)
-            preparation_terminal_rows.append(
+            state.collections.review_rows.append(row)
+            state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
                     pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
@@ -489,26 +510,25 @@ class PreparationPlanner:
             ordered_entries = sorted(
                 entries,
                 key=lambda entry: (
-                    entry.source_index,
-                    entry.line_index,
+                    entry.position.source_index,
+                    entry.position.line_index,
                     entry.entry.host,
                 ),
             )
             fingerprints_by_source = {
-                entry.source_id: delegation_behavior_fingerprint(
-                    source_jobs_by_id[entry.source_id].config
+                entry.position.source_id: delegation_behavior_fingerprint(
+                    source_jobs_by_id[entry.position.source_id].config
                 )
                 for entry in ordered_entries
             }
             fingerprints = set(fingerprints_by_source.values())
             if len(fingerprints) > 1:
-                conflicting_sources = ", ".join(sorted(fingerprints_by_source))
                 raise ValueError(
-                    "registrable domain "
-                    f"{registrable_domain!r} appears in sources with different "
-                    f"delegation DNS behavior: {conflicting_sources}"
+                    conflicting_delegation_behavior_message(
+                        registrable_domain, fingerprints_by_source
+                    )
                 )
-            delegation_config_source_id = ordered_entries[0].source_id
+            delegation_config_source_id = ordered_entries[0].position.source_id
             root_plans[registrable_domain] = PreparedRootPlan(
                 registrable_domain=registrable_domain,
                 entry_count=len(ordered_entries),

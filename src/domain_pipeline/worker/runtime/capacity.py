@@ -5,9 +5,9 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from domain_pipeline.worker.delegation import delegation_stage_dns_profile
+from domain_pipeline.worker.delegation.lookup import delegation_stage_dns_profile
 from domain_pipeline.worker.dns_query.lookup import dns_query_coordinator_config
-from domain_pipeline.worker.host_resolution import host_resolution_dns_profile
+from domain_pipeline.worker.host_resolution.lookup import host_resolution_dns_profile
 from domain_pipeline.worker.dns_query.query_coordinator import (
     DNSProviderCapacitySnapshot,
     DNSProviderRateLimit,

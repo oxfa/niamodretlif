@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import dataclasses
 from typing import Any, Protocol, TypedDict
 
 from domain_pipeline.prepare.classifications import (
@@ -45,9 +46,13 @@ from domain_pipeline.worker.output.review_labels import (
     REVIEW_LABEL_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.worker.delegation import DelegationResult
-from domain_pipeline.worker.host_resolution import HostResolutionResult
-from domain_pipeline.worker.ip_location import LocationPolicyDecision, IPLocationResult
+from domain_pipeline.prepare.models import PreparedProvenance
+from domain_pipeline.worker.delegation.lookup import DelegationResult
+from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
+from domain_pipeline.worker.ip_location.providers import (
+    LocationPolicyDecision,
+    IPLocationResult,
+)
 
 REVIEW_OUTPUT_COLUMNS = (
     "input_name",
@@ -69,6 +74,25 @@ REVIEW_OUTPUT_COLUMNS = (
     "source_ids",
     "source_input_labels",
 )
+
+_PUBLIC_REVIEW_LABEL_BY_RESULT_CODE = {
+    PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX: REVIEW_LABEL_INPUT_PUBLIC_SUFFIX,
+    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
+        REVIEW_LABEL_MANUAL_FILTER_PASS_NOT_IN_SOURCES
+    ),
+    PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT: REVIEW_LABEL_MANUAL_FILTERED_OUT,
+    PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
+        REVIEW_LABEL_MANUAL_FILTERED_OUT
+    ),
+    PIPELINE_RESULT_CODE_DELEGATION_TIMEOUT: REVIEW_LABEL_DELEGATION_TIMEOUT,
+    PIPELINE_RESULT_CODE_DELEGATION_SERVFAIL: REVIEW_LABEL_DELEGATION_SERVFAIL,
+    PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_TIMEOUT: (
+        REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_TIMEOUT
+    ),
+    PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL: (
+        REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_SERVFAIL
+    ),
+}
 
 
 class SourceContextLike(Protocol):
@@ -108,26 +132,70 @@ class ReviewOutputRow(TypedDict):
     source_input_labels: str
 
 
+@dataclasses.dataclass(frozen=True)
+class BaseRowSourceRequest:
+    """Source identity fields for raw terminal-row projection."""
+
+    source_context: SourceContextLike
+    provenance: PreparedProvenance = dataclasses.field(
+        default_factory=PreparedProvenance
+    )
+
+    @property
+    def source_id_override(self) -> str | None:
+        """Return an optional source-id override for projected output rows."""
+        return self.provenance.source_id_override
+
+    @property
+    def source_input_label_override(self) -> str | None:
+        """Return an optional source-label override for projected output rows."""
+        return self.provenance.source_input_label_override
+
+    @property
+    def source_ids(self) -> tuple[str, ...]:
+        """Return all contributing source ids for projected output rows."""
+        return self.provenance.source_ids
+
+    @property
+    def source_input_labels(self) -> tuple[str, ...]:
+        """Return all contributing source labels for projected output rows."""
+        return self.provenance.source_input_labels
+
+
+@dataclasses.dataclass(frozen=True)
+class BaseRowDNSRequest:
+    """DNS-stage evidence for raw terminal-row projection."""
+
+    delegation_result: DelegationResult | None = None
+    host_resolution_result: HostResolutionResult | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class BaseRowIpLocationRequest:
+    """IP-location evidence for raw terminal-row projection."""
+
+    results: list[IPLocationResult] | None = None
+    policy: LocationPolicyDecision | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class BaseRowRequest:
+    """Complete raw terminal-row projection request."""
+
+    source: BaseRowSourceRequest
+    entry: ParsedDomainEntry
+    pipeline_result_code: str
+    dns: BaseRowDNSRequest = dataclasses.field(default_factory=BaseRowDNSRequest)
+    ip_location: BaseRowIpLocationRequest = dataclasses.field(
+        default_factory=BaseRowIpLocationRequest
+    )
+
+
 def public_review_label(row: dict[str, Any]) -> str:
     """Return the public review label for one terminal row."""
     pipeline_result_code = str(row.get("classification", ""))
-    if pipeline_result_code == PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX:
-        return REVIEW_LABEL_INPUT_PUBLIC_SUFFIX
-    if pipeline_result_code == PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES:
-        return REVIEW_LABEL_MANUAL_FILTER_PASS_NOT_IN_SOURCES
-    if pipeline_result_code in {
-        PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
-        PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-    }:
-        return REVIEW_LABEL_MANUAL_FILTERED_OUT
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_TIMEOUT:
-        return REVIEW_LABEL_DELEGATION_TIMEOUT
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_SERVFAIL:
-        return REVIEW_LABEL_DELEGATION_SERVFAIL
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_TIMEOUT:
-        return REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_TIMEOUT
-    if pipeline_result_code == PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL:
-        return REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_SERVFAIL
+    if pipeline_result_code in _PUBLIC_REVIEW_LABEL_BY_RESULT_CODE:
+        return _PUBLIC_REVIEW_LABEL_BY_RESULT_CODE[pipeline_result_code]
     if pipeline_result_code in HOST_RESOLUTION_REVIEW_PIPELINE_RESULT_CODES:
         return REVIEW_LABEL_HOST_RESOLUTION_FILTERED_OUT
     if pipeline_result_code in IP_LOCATION_REVIEW_PIPELINE_RESULT_CODES:
@@ -211,21 +279,15 @@ def _json_list(values: list[str] | tuple[str, ...]) -> str:
     return json.dumps(list(values), ensure_ascii=True, sort_keys=True)
 
 
-def build_base_row(
-    *,
-    source_context: SourceContextLike,
-    entry: ParsedDomainEntry,
-    pipeline_result_code: str,
-    delegation_result: DelegationResult | None = None,
-    host_resolution_result: HostResolutionResult | None = None,
-    ip_location_results: list[IPLocationResult] | None = None,
-    ip_location_policy: LocationPolicyDecision | None = None,
-    source_id_override: str | None = None,
-    source_input_label_override: str | None = None,
-    source_ids: tuple[str, ...] = (),
-    source_input_labels: tuple[str, ...] = (),
-) -> dict[str, Any]:
+def build_base_row(request: BaseRowRequest) -> dict[str, Any]:
     """Build the raw/terminal row shared by runtime and preparation."""
+    source_context = request.source.source_context
+    entry = request.entry
+    pipeline_result_code = request.pipeline_result_code
+    delegation_result = request.dns.delegation_result
+    host_resolution_result = request.dns.host_resolution_result
+    ip_location_results = request.ip_location.results
+    ip_location_policy = request.ip_location.policy
     resolved_ips = (
         host_resolution_result.resolved_ips
         if host_resolution_result is not None
@@ -235,14 +297,14 @@ def build_base_row(
         result for result in ip_location_results or [] if result.usable
     ]
     row: dict[str, Any] = {
-        "input_name": entry.input_name or entry.host,
+        "input_name": entry.semantics.input_name or entry.host,
         "host": entry.host,
         "registrable_domain": entry.registrable_domain,
-        "public_suffix": entry.public_suffix,
-        "is_public_suffix_input": entry.is_public_suffix_input,
-        "input_kind": entry.input_kind,
-        "apex_scope": entry.apex_scope,
-        "source_format": entry.source_format,
+        "public_suffix": entry.semantics.public_suffix,
+        "is_public_suffix_input": entry.semantics.is_public_suffix_input,
+        "input_kind": entry.semantics.input_kind,
+        "apex_scope": entry.semantics.apex_scope,
+        "source_format": entry.semantics.source_format,
         "classification": pipeline_result_code,
         "classification_reason": review_reason_for_row(
             {"classification": pipeline_result_code}
@@ -308,11 +370,13 @@ def build_base_row(
                 if result.region_name
             }
         ),
-        "source_id": source_id_override or source_context.source_id,
-        "source_input_label": source_input_label_override or source_context.input_label,
-        "source_ids": list(source_ids or (source_context.source_id,)),
+        "source_id": request.source.source_id_override or source_context.source_id,
+        "source_input_label": (
+            request.source.source_input_label_override or source_context.input_label
+        ),
+        "source_ids": list(request.source.source_ids or (source_context.source_id,)),
         "source_input_labels": list(
-            source_input_labels or (source_context.input_label,)
+            request.source.source_input_labels or (source_context.input_label,)
         ),
     }
     row["classification_reason"] = review_reason_for_row(row)

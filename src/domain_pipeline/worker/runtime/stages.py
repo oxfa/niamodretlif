@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 from typing import Any
+import dataclasses
 
 from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_MANUAL_ADD_ACTIONABLE,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASSED,
 )
-from domain_pipeline.worker.delegation import (
-    DelegationResult,
-    classify_delegation,
-)
-from domain_pipeline.worker.host_resolution import (
+from domain_pipeline.worker.delegation.lookup import DelegationResult
+from domain_pipeline.worker.delegation.result_policy import classify_delegation
+from domain_pipeline.worker.host_resolution.lookup import (
     HostResolutionResult,
+)
+from domain_pipeline.worker.host_resolution.result_policy import (
     classify_host_resolution,
     host_resolution_skipped_result_code,
 )
-from domain_pipeline.routing import route_for_pipeline_result_code
+from domain_pipeline.routing.policy import route_for_pipeline_result_code
 from domain_pipeline.worker.runtime.contracts import (
+    CompletedResultEvidence,
     DelegationRootWorkItem,
     IpLocationWorkItem,
     HostResolutionWorkItem,
@@ -26,6 +28,29 @@ from domain_pipeline.worker.runtime.contracts import (
 )
 from domain_pipeline.worker.runtime.busy_state import BusyReason
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
+from domain_pipeline.worker.runtime.results import CompletedResultRequest
+
+
+def _completed_request(
+    parsed: ParsedHostItem,
+    pipeline_result_code: str,
+    evidence: CompletedResultEvidence | None = None,
+) -> CompletedResultRequest:
+    """Return a completed-result request preserving parsed source provenance."""
+    return CompletedResultRequest(
+        source_context=parsed.source_context,
+        entry=parsed.entry,
+        pipeline_result_code=pipeline_result_code,
+        evidence=evidence or CompletedResultEvidence(),
+        provenance={
+            "source_id_override": parsed.provenance.source.source_id_override,
+            "source_input_label_override": (
+                parsed.provenance.source.source_input_label_override
+            ),
+            "source_ids": parsed.provenance.source.source_ids,
+            "source_input_labels": parsed.provenance.source.source_input_labels,
+        },
+    )
 
 
 class DelegationStage:
@@ -75,34 +100,42 @@ class DelegationStage:
         if not delegation_result.actionable:
             await self.runtime.put_completed(
                 queue_bundle,
-                parsed,
-                pipeline_result_code=delegation_result_code,
-                delegation_result=delegation_result,
+                _completed_request(
+                    parsed,
+                    delegation_result_code,
+                    CompletedResultEvidence(delegation_result=delegation_result),
+                ),
             )
             return
-        if parsed.manual_filter_pass:
+        if parsed.provenance.source.manual_filter_pass:
             await self.runtime.put_completed(
                 queue_bundle,
-                parsed,
-                pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASSED,
-                delegation_result=delegation_result,
+                _completed_request(
+                    parsed,
+                    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASSED,
+                    CompletedResultEvidence(delegation_result=delegation_result),
+                ),
             )
             return
-        if parsed.manual_add:
+        if parsed.provenance.source.manual_add:
             await self.runtime.put_completed(
                 queue_bundle,
-                parsed,
-                pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_ADD_ACTIONABLE,
-                delegation_result=delegation_result,
+                _completed_request(
+                    parsed,
+                    PIPELINE_RESULT_CODE_MANUAL_ADD_ACTIONABLE,
+                    CompletedResultEvidence(delegation_result=delegation_result),
+                ),
             )
             return
         host_resolution_config = parsed.source_context.config["host_resolution"]
         if not bool(host_resolution_config.get("enabled", False)):
             await self.runtime.put_completed(
                 queue_bundle,
-                parsed,
-                pipeline_result_code=host_resolution_skipped_result_code(),
-                delegation_result=delegation_result,
+                _completed_request(
+                    parsed,
+                    host_resolution_skipped_result_code(),
+                    CompletedResultEvidence(delegation_result=delegation_result),
+                ),
             )
             return
         async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
@@ -146,10 +179,14 @@ class HostResolutionStage:
         if route_for_pipeline_result_code(host_result_code) == "review":
             await self.runtime.put_completed(
                 queue_bundle,
-                work_item.parsed,
-                pipeline_result_code=host_result_code,
-                delegation_result=work_item.delegation_result,
-                host_resolution_result=host_resolution_result,
+                _completed_request(
+                    work_item.parsed,
+                    host_result_code,
+                    CompletedResultEvidence(
+                        delegation_result=work_item.delegation_result,
+                        host_resolution_result=host_resolution_result,
+                    ),
+                ),
             )
             return
         if not bool(
@@ -157,10 +194,14 @@ class HostResolutionStage:
         ):
             await self.runtime.put_completed(
                 queue_bundle,
-                work_item.parsed,
-                pipeline_result_code=host_result_code,
-                delegation_result=work_item.delegation_result,
-                host_resolution_result=host_resolution_result,
+                _completed_request(
+                    work_item.parsed,
+                    host_result_code,
+                    CompletedResultEvidence(
+                        delegation_result=work_item.delegation_result,
+                        host_resolution_result=host_resolution_result,
+                    ),
+                ),
             )
             return
         async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
@@ -195,17 +236,49 @@ class IpLocationStage:
                             work_item.host_resolution_result,
                         )
                     )
-                    await self.runtime.put_completed(
+                    await self.route(
                         queue_bundle,
-                        work_item.parsed,
-                        pipeline_result_code=ip_location_result_code,
-                        delegation_result=work_item.delegation_result,
-                        host_resolution_result=work_item.host_resolution_result,
-                        ip_location_results=ip_location_results,
-                        ip_location_policy=ip_location_policy,
+                        IpLocationRouteResult(
+                            work_item=work_item,
+                            pipeline_result_code=ip_location_result_code,
+                            ip_location_results=ip_location_results,
+                            ip_location_policy=ip_location_policy,
+                        ),
                     )
             finally:
                 queue_bundle.host_resolution_to_ip_location.task_done()
+
+    async def route(
+        self,
+        queue_bundle: RuntimeQueueSet,
+        route_result: "IpLocationRouteResult",
+    ) -> None:
+        """Emit one terminal IP-location policy result."""
+        await self.runtime.put_completed(
+            queue_bundle,
+            _completed_request(
+                route_result.work_item.parsed,
+                route_result.pipeline_result_code,
+                CompletedResultEvidence(
+                    delegation_result=route_result.work_item.delegation_result,
+                    host_resolution_result=(
+                        route_result.work_item.host_resolution_result
+                    ),
+                    ip_location_results=route_result.ip_location_results,
+                    ip_location_policy=route_result.ip_location_policy,
+                ),
+            ),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class IpLocationRouteResult:
+    """IP-location route outcome consumed by the terminal emitter."""
+
+    work_item: IpLocationWorkItem
+    pipeline_result_code: str
+    ip_location_results: list[Any]
+    ip_location_policy: Any | None
 
 
 __all__ = ["DelegationStage", "IpLocationStage", "HostResolutionStage"]

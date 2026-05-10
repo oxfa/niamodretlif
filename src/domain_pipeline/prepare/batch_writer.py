@@ -5,32 +5,26 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     PrepareAggregateManifest,
 )
 from domain_pipeline.prepare.assignment import (
     PIPELINE_RUN_FORMAT_VERSION,
+    PreparedBatchPlanningInputs,
     PreparedWorkerManifest,
     WorkerAssignmentPlanner,
-    aggregate_config_identity_from_config,
+    WorkerManifestBuildRequest,
     aggregate_output_spec_from_config,
     prepare_aggregate_manifest_relative_path,
     prepare_worker_manifest_relative_path,
     relative_path,
 )
-from domain_pipeline.prepare.models import PreparedInputSet
+from domain_pipeline.prepare.models import PreparedHostEntry, PreparedInputSet
 from domain_pipeline.prepare.planner import PreparationPlanner
+from domain_pipeline.worker.output.manager import txt_output_value
 from domain_pipeline.worker.output.rows import build_review_output_row
-
-
-def _txt_output_value(row: dict[str, Any]) -> str:
-    """Return the public TXT value for one prepare-owned filtered row."""
-    input_name = str(row.get("input_name", "")).strip()
-    if input_name:
-        return input_name
-    return str(row["host"])
 
 
 @dataclass
@@ -44,6 +38,12 @@ class PreparedBatch:
     preparation_filtered_output_values: list[str]
     preparation_review_rows: list[dict[str, Any]]
     preparation_terminal_rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _WorkerAssignmentArtifacts:
+    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]]
+    worker_manifests: list[PreparedWorkerManifest]
 
 
 class PreparedBatchWriter:
@@ -89,37 +89,19 @@ class PreparedBatchWriter:
         planning_inputs = self.assignment_planner.planning_inputs_from_prepared(
             prepared_inputs
         )
-        total_work_units = len(planning_inputs.root_plans)
-        if total_work_units < 1 and not prepared_inputs.preparation_terminal_rows:
-            raise ValueError("config produced no input lines to process")
-        participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
-        if total_work_units > 0 and not participating_worker_ids:
-            raise ValueError("at least one worker_id is required to prepare a batch")
-
-        if participating_worker_ids:
-            worker_source_entries, worker_root_plans, _worker_entry_counts = (
-                self.assignment_planner.assign(
-                    planning_inputs=planning_inputs,
-                    worker_ids=participating_worker_ids,
-                )
-            )
-            worker_manifests = self.assignment_planner.build_worker_manifests(
-                config=prepared_inputs.config,
-                batch_id=batch_id,
-                worker_ids=participating_worker_ids,
-                worker_source_entries=worker_source_entries,
-                worker_root_plans=worker_root_plans,
-            )
-        else:
-            worker_source_entries = {}
-            worker_manifests = []
+        assignment_artifacts = self._build_worker_assignment_artifacts(
+            planning_inputs=planning_inputs,
+            prepared_inputs=prepared_inputs,
+            worker_ids=worker_ids,
+            batch_id=batch_id,
+        )
 
         matched_manual_hosts = {
             entry.entry.host
-            for source_entries in worker_source_entries.values()
+            for source_entries in assignment_artifacts.worker_source_entries.values()
             for entries in source_entries.values()
             for entry in entries
-            if entry.manual_filter_pass
+            if entry.provenance.manual_filter_pass
         }
         preparation_review_rows = [
             row
@@ -132,34 +114,74 @@ class PreparedBatchWriter:
             if row["host"] not in matched_manual_hosts
         ]
         preparation_filtered_output_values = sorted(
-            _txt_output_value(row)
+            txt_output_value(row)
             for row in preparation_terminal_rows
             if row.get("route") == "filtered"
         )
         return PreparedBatch(
             batch_id=batch_id,
             config_name=config_name,
-            prepare_aggregate_manifest=PrepareAggregateManifest.from_prepared_batch(
+            prepare_aggregate_manifest=PrepareAggregateManifest(
                 automation_format_version=PIPELINE_RUN_FORMAT_VERSION,
                 batch_id=batch_id,
-                config_identity=aggregate_config_identity_from_config(
-                    prepared_inputs.config
-                ),
                 aggregate_output_spec=aggregate_output_spec_from_config(
                     prepared_inputs.config
                 ),
-                worker_ids=[manifest.worker_id for manifest in worker_manifests],
+                worker_ids=[
+                    manifest.worker_id
+                    for manifest in assignment_artifacts.worker_manifests
+                ],
                 preparation_filtered_output_values=preparation_filtered_output_values,
                 preparation_review_output_rows=[
-                    dict(build_review_output_row(row))
+                    cast(dict[str, str], dict(build_review_output_row(row)))
                     for row in preparation_review_rows
                 ],
-                preparation_terminal_rows=preparation_terminal_rows,
+                preparation_terminal_rows=[
+                    dict(row) for row in preparation_terminal_rows
+                ],
             ),
-            worker_manifests=worker_manifests,
+            worker_manifests=assignment_artifacts.worker_manifests,
             preparation_filtered_output_values=preparation_filtered_output_values,
             preparation_review_rows=preparation_review_rows,
             preparation_terminal_rows=preparation_terminal_rows,
+        )
+
+    def _build_worker_assignment_artifacts(
+        self,
+        *,
+        planning_inputs: PreparedBatchPlanningInputs,
+        prepared_inputs: PreparedInputSet,
+        worker_ids: list[str],
+        batch_id: str,
+    ) -> _WorkerAssignmentArtifacts:
+        total_work_units = len(planning_inputs.root_plans)
+        if total_work_units < 1 and not prepared_inputs.preparation_terminal_rows:
+            raise ValueError("config produced no input lines to process")
+        participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
+        if total_work_units > 0 and not participating_worker_ids:
+            raise ValueError("at least one worker_id is required to prepare a batch")
+        if not participating_worker_ids:
+            return _WorkerAssignmentArtifacts(
+                worker_source_entries={},
+                worker_manifests=[],
+            )
+        worker_source_entries, worker_root_plans, _worker_entry_counts = (
+            self.assignment_planner.assign(
+                planning_inputs=planning_inputs,
+                worker_ids=participating_worker_ids,
+            )
+        )
+        return _WorkerAssignmentArtifacts(
+            worker_source_entries=worker_source_entries,
+            worker_manifests=self.assignment_planner.build_worker_manifests(
+                WorkerManifestBuildRequest(
+                    config=prepared_inputs.config,
+                    batch_id=batch_id,
+                    worker_ids=participating_worker_ids,
+                    worker_source_entries=worker_source_entries,
+                    worker_root_plans=worker_root_plans,
+                )
+            ),
         )
 
     def write(self, prepared: PreparedBatch, *, state_root: Path) -> list[str]:

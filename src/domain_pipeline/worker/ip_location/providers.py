@@ -14,8 +14,13 @@ from domain_pipeline.worker.ip_location.constants import (
     IP_LOCATION_PROVIDER_IPINFO_LITE as PROVIDER_IPINFO_LITE,
 )
 from domain_pipeline.worker.ip_location.http_requestor import (
+    HTTPRequestErrorFactories,
     HTTPRequester,
+    HTTPRequesterConfig,
+    HTTPRetryBackoff,
+    HTTPRetryHooks,
     HTTPRetryPolicy,
+    HTTPRetryStatusPolicy,
 )
 from domain_pipeline.worker.ip_location.policy import is_iso_subdivision_code
 
@@ -141,19 +146,27 @@ class RequestsIPLocationProvider:
         self.session: Any = session or requests.Session()
         self._requestor = HTTPRequester(
             session=self.session,
-            timeout=self.timeout,
-            retry_policy=HTTPRetryPolicy(
-                max_attempts=self.MAX_RETRY_ATTEMPTS,
-                retryable_status_codes=frozenset({429, 500, 502, 503, 504}),
-                retry_after_status_codes=frozenset({429}),
-                backoff_multiplier=0.1,
-                backoff_min=0.1,
-                backoff_max=1.0,
+            config=HTTPRequesterConfig(
+                timeout=self.timeout,
+                retry_policy=HTTPRetryPolicy(
+                    max_attempts=self.MAX_RETRY_ATTEMPTS,
+                    status=HTTPRetryStatusPolicy(
+                        retryable_status_codes=frozenset({429, 500, 502, 503, 504}),
+                        retry_after_status_codes=frozenset({429}),
+                    ),
+                    backoff=HTTPRetryBackoff(
+                        backoff_multiplier=0.1,
+                        backoff_min=0.1,
+                        backoff_max=1.0,
+                    ),
+                ),
+                retryable_exceptions=(RetryableIPLocationLookupError,),
             ),
-            retryable_exceptions=(RetryableIPLocationLookupError,),
-            transport_error_factory=self._build_retryable_ip_location_transport_error,
-            status_error_factory=self._build_retryable_ip_location_status_error,
-            sleep=self._sleep_for_retry,
+            error_factories=HTTPRequestErrorFactories(
+                transport=self._build_retryable_ip_location_transport_error,
+                status=self._build_retryable_ip_location_status_error,
+            ),
+            retry_hooks=HTTPRetryHooks(sleep=self._sleep_for_retry),
         )
 
     @staticmethod
@@ -512,6 +525,71 @@ def _ip_location_result_is_usable(result: IPLocationResult) -> bool:
     return result.usable
 
 
+@dataclasses.dataclass(frozen=True)
+class IPLocationPolicyCriteria:
+    """Normalized include/exclude criteria for one ip-location policy."""
+
+    match_scope: str
+    include_countries: set[str]
+    include_region_codes: set[str]
+    include_region_names: set[str]
+    exclude_countries: set[str]
+    exclude_region_codes: set[str]
+    exclude_region_names: set[str]
+
+    @property
+    def has_include_rules(self) -> bool:
+        """Return whether the policy has any positive match criteria."""
+        return bool(
+            self.include_countries
+            or self.include_region_codes
+            or self.include_region_names
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class IPLocationPolicyMatchState:
+    """Matched and rejected IPs after evaluating policy criteria."""
+
+    matched_ips: list[str]
+    rejected_ips: list[str]
+
+
+def _ip_location_policy_criteria(policy: dict[str, Any]) -> IPLocationPolicyCriteria:
+    """Return normalized include/exclude criteria for one policy payload."""
+    include = normalize_ip_location_lists(policy["include"])
+    exclude = normalize_ip_location_lists(policy["exclude"])
+    return IPLocationPolicyCriteria(
+        match_scope=str(policy["match_scope"]),
+        include_countries=set(include["countries"]),
+        include_region_codes=set(include["region_codes"]),
+        include_region_names=set(include["region_names"]),
+        exclude_countries=set(exclude["countries"]),
+        exclude_region_codes=set(exclude["region_codes"]),
+        exclude_region_names=set(exclude["region_names"]),
+    )
+
+
+def _log_ip_location_policy_evaluation(
+    criteria: IPLocationPolicyCriteria,
+    result_count: int,
+) -> None:
+    """Log the normalized criteria used for one policy evaluation."""
+    logger.debug(
+        "IpLocation policy evaluation: match_scope=%s results=%d include_countries=%s "
+        "include_region_codes=%s include_region_names=%s exclude_countries=%s "
+        "exclude_region_codes=%s exclude_region_names=%s",
+        criteria.match_scope,
+        result_count,
+        sorted(criteria.include_countries) or "(none)",
+        sorted(criteria.include_region_codes) or "(none)",
+        sorted(criteria.include_region_names) or "(none)",
+        sorted(criteria.exclude_countries) or "(none)",
+        sorted(criteria.exclude_region_codes) or "(none)",
+        sorted(criteria.exclude_region_names) or "(none)",
+    )
+
+
 def _ip_location_decision(
     status: str,
     reason: str,
@@ -544,38 +622,22 @@ def evaluate_ip_location_policy(
     policy: dict[str, Any],
 ) -> LocationPolicyDecision:
     """Evaluate a source-local policy after the selected provider yields usable ip location data."""
-    match_scope = str(policy["match_scope"])
-    include = normalize_ip_location_lists(policy["include"])
-    exclude = normalize_ip_location_lists(policy["exclude"])
-    include_countries = set(include["countries"])
-    include_region_codes = set(include["region_codes"])
-    include_region_names = set(include["region_names"])
-    exclude_countries = set(exclude["countries"])
-    exclude_region_codes = set(exclude["region_codes"])
-    exclude_region_names = set(exclude["region_names"])
-    has_include_rules = bool(
-        include_countries or include_region_codes or include_region_names
-    )
-
-    logger.debug(
-        "IpLocation policy evaluation: match_scope=%s results=%d include_countries=%s "
-        "include_region_codes=%s include_region_names=%s exclude_countries=%s "
-        "exclude_region_codes=%s exclude_region_names=%s",
-        match_scope,
-        len(ip_location_results),
-        sorted(include_countries) or "(none)",
-        sorted(include_region_codes) or "(none)",
-        sorted(include_region_names) or "(none)",
-        sorted(exclude_countries) or "(none)",
-        sorted(exclude_region_codes) or "(none)",
-        sorted(exclude_region_names) or "(none)",
-    )
-
+    criteria = _ip_location_policy_criteria(policy)
+    _log_ip_location_policy_evaluation(criteria, len(ip_location_results))
     if not ip_location_results:
         raise ValueError(
             "evaluate_ip_location_policy requires at least one ip location result"
         )
+    comparable_results = _comparable_ip_location_results(ip_location_results, criteria)
+    match_state = _ip_location_policy_match_state(comparable_results, criteria)
+    return _ip_location_policy_decision_from_matches(criteria, match_state)
 
+
+def _comparable_ip_location_results(
+    ip_location_results: list[IPLocationResult],
+    criteria: IPLocationPolicyCriteria,
+) -> list[IPLocationResult]:
+    """Return usable results that can participate in policy matching."""
     comparable_results = [
         result
         for result in ip_location_results
@@ -585,61 +647,89 @@ def evaluate_ip_location_policy(
         raise ValueError(
             "evaluate_ip_location_policy requires at least one usable ip location result"
         )
-    if match_scope == "all_ips" and len(comparable_results) != len(ip_location_results):
+    if criteria.match_scope == "all_ips" and len(comparable_results) != len(
+        ip_location_results
+    ):
         raise ValueError(
             "all_ips ip location policy requires usable ip location results for every resolved IP"
         )
+    return comparable_results
 
+
+def _ip_location_policy_match_state(
+    comparable_results: list[IPLocationResult],
+    criteria: IPLocationPolicyCriteria,
+) -> IPLocationPolicyMatchState:
+    """Return matched and rejected IPs for one normalized policy."""
     matched_ips: list[str] = []
     rejected_ips: list[str] = []
     for result in comparable_results:
-        in_include = _ip_location_value_matches(
-            result,
-            include_countries,
-            include_region_codes,
-            include_region_names,
-        )
-        in_exclude = _ip_location_value_matches(
-            result,
-            exclude_countries,
-            exclude_region_codes,
-            exclude_region_names,
-        )
-        include_accepted = True if not has_include_rules else in_include
-        accepted = include_accepted and not in_exclude
-
-        logger.debug(
-            "IpLocation policy check: ip=%s provider=%s country=%s region_code=%s "
-            "region_name=%s include=%s exclude=%s accepted=%s",
-            result.ip,
-            result.provider,
-            result.country_code or "(none)",
-            result.region_code or "(none)",
-            result.region_name or "(none)",
-            include_accepted,
-            in_exclude,
-            accepted,
-        )
+        accepted = _ip_location_result_accepted(result, criteria)
         if accepted:
             matched_ips.append(result.ip)
         else:
             rejected_ips.append(result.ip)
+    return IPLocationPolicyMatchState(matched_ips, rejected_ips)
 
-    if match_scope == "all_ips":
-        if rejected_ips:
+
+def _ip_location_result_accepted(
+    result: IPLocationResult,
+    criteria: IPLocationPolicyCriteria,
+) -> bool:
+    """Return whether one IP-location result satisfies include/exclude criteria."""
+    in_include = _ip_location_value_matches(
+        result,
+        criteria.include_countries,
+        criteria.include_region_codes,
+        criteria.include_region_names,
+    )
+    in_exclude = _ip_location_value_matches(
+        result,
+        criteria.exclude_countries,
+        criteria.exclude_region_codes,
+        criteria.exclude_region_names,
+    )
+    include_accepted = True if not criteria.has_include_rules else in_include
+    accepted = include_accepted and not in_exclude
+    logger.debug(
+        "IpLocation policy check: ip=%s provider=%s country=%s region_code=%s "
+        "region_name=%s include=%s exclude=%s accepted=%s",
+        result.ip,
+        result.provider,
+        result.country_code or "(none)",
+        result.region_code or "(none)",
+        result.region_name or "(none)",
+        include_accepted,
+        in_exclude,
+        accepted,
+    )
+    return accepted
+
+
+def _ip_location_policy_decision_from_matches(
+    criteria: IPLocationPolicyCriteria,
+    match_state: IPLocationPolicyMatchState,
+) -> LocationPolicyDecision:
+    """Return the final policy decision from matched/rejected IP state."""
+    if criteria.match_scope == "all_ips":
+        if match_state.rejected_ips:
             return _ip_location_decision(
                 "rejected",
                 "one_or_more_ips_rejected",
-                matched_ips,
-                rejected_ips,
+                match_state.matched_ips,
+                match_state.rejected_ips,
             )
-        return _ip_location_decision("accepted", "all_ips_matched", matched_ips, [])
+        return _ip_location_decision(
+            "accepted", "all_ips_matched", match_state.matched_ips, []
+        )
 
-    if matched_ips:
+    if match_state.matched_ips:
         return _ip_location_decision(
             "accepted",
             "at_least_one_ip_matched",
-            matched_ips,
-            rejected_ips,
+            match_state.matched_ips,
+            match_state.rejected_ips,
         )
-    return _ip_location_decision("rejected", "no_ips_matched", [], rejected_ips)
+    return _ip_location_decision(
+        "rejected", "no_ips_matched", [], match_state.rejected_ips
+    )

@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from domain_pipeline.paths import PathLayout
+from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     PrepareWorkerManifest,
     load_prepare_worker_manifest_for_worker,
@@ -257,20 +257,19 @@ def finalize_worker_aggregate_handoff(
     state_root: Path,
 ) -> dict[str, Any]:
     """Finalize one worker-to-aggregate handoff from worker-local sidecars."""
-    try:
-        prepare_manifest = load_prepare_worker_manifest_for_worker(
-            batch_id=batch_id,
-            worker_id=worker_id,
-            state_root=state_root,
-        )
-    except ValueError as exc:
+    prepare_manifest, failure_reason = load_prepare_worker_manifest_or_error(
+        batch_id=batch_id,
+        worker_id=worker_id,
+        state_root=state_root,
+    )
+    if failure_reason:
         return {
             "automation_format_version": 2,
             "batch_id": batch_id,
             "worker_id": worker_id,
             "participates": True,
             "handoff_finalized": False,
-            "error_reason": str(exc),
+            "error_reason": failure_reason,
         }
     if prepare_manifest is None:
         return {
@@ -294,3 +293,23 @@ def finalize_worker_aggregate_handoff(
         "cache_snapshot_mode": manifest.cache_snapshot_mode,
         "cache_size_bytes": manifest.cache_size_bytes,
     }
+
+
+def load_prepare_worker_manifest_or_error(
+    *,
+    batch_id: str,
+    worker_id: str,
+    state_root: Path,
+) -> tuple[PrepareWorkerManifest | None, str]:
+    """Load one prepare-worker manifest, returning validation failures as text."""
+    try:
+        return (
+            load_prepare_worker_manifest_for_worker(
+                batch_id=batch_id,
+                worker_id=worker_id,
+                state_root=state_root,
+            ),
+            "",
+        )
+    except ValueError as exc:
+        return None, str(exc)

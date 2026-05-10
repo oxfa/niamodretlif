@@ -1,4 +1,4 @@
-"""Worker runtime item loading from prepared metadata or source config."""
+"""Worker runtime item loading from prepared metadata."""
 
 from __future__ import annotations
 
@@ -6,11 +6,15 @@ from collections import defaultdict
 from typing import Any
 
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
-from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
-from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
+from domain_pipeline.prepare.models import PreparedProvenance
+from domain_pipeline.prepare.sources.parser import (
+    ParsedDomainEntry,
+    ParsedInputSemantics,
+)
 from domain_pipeline.worker.runtime.contracts import (
     DelegationRootWorkItem,
     ParsedHostItem,
+    RuntimeProvenance,
     WorkerSourceContext,
 )
 
@@ -24,12 +28,14 @@ def _entry_from_payload(
     return ParsedDomainEntry(
         host=str(payload["host"]),
         registrable_domain=registrable_domain,
-        input_name=str(payload.get("input_name", payload["host"])),
-        public_suffix=public_suffix,
-        is_public_suffix_input=False,
-        input_kind=str(payload.get("input_kind", "exact_host")),
-        apex_scope=str(payload.get("apex_scope", "exact_only")),
-        source_format=str(payload.get("source_format", "plain")),
+        semantics=ParsedInputSemantics(
+            input_name=str(payload["input_name"]),
+            public_suffix=public_suffix,
+            is_public_suffix_input=False,
+            input_kind=str(payload["input_kind"]),
+            apex_scope=str(payload["apex_scope"]),
+            source_format=str(payload["source_format"]),
+        ),
     )
 
 
@@ -46,15 +52,6 @@ def _source_context_from_config(
     )
 
 
-def _source_context_from_job(job: SourceJob) -> WorkerSourceContext:
-    return WorkerSourceContext(
-        source_id=job.source_id,
-        input_label=job.input_label,
-        output_stem=job.output_stem,
-        config=job.config,
-    )
-
-
 class RuntimeItemLoader:
     """Build worker-local host items and root-level delegation work."""
 
@@ -67,9 +64,11 @@ class RuntimeItemLoader:
         self.config = config
         self.prepared_metadata = prepared_metadata
 
-    def _prepared_mode(self) -> bool:
-        """Return whether this loader is consuming a prepared worker payload."""
-        return self.prepared_metadata is not None
+    def _prepared_payload(self) -> dict[str, Any]:
+        """Return the required prepared worker metadata payload."""
+        if self.prepared_metadata is None:
+            raise ValueError("prepared metadata is required for worker runtime")
+        return self.prepared_metadata
 
     def source_contexts(self) -> list[WorkerSourceContext]:
         """Return worker-local source contexts for prepared workflow mode."""
@@ -83,9 +82,7 @@ class RuntimeItemLoader:
 
     def _prepared_roots(self) -> dict[str, Any]:
         """Return root-owned prepared metadata for worker runtime mode."""
-        if self.prepared_metadata is None:
-            return {}
-        roots = self.prepared_metadata.get("delegation_roots")
+        roots = self._prepared_payload().get("delegation_roots")
         if not isinstance(roots, dict) or not roots:
             raise ValueError("prepared metadata delegation_roots must not be empty")
         return roots
@@ -107,7 +104,7 @@ class RuntimeItemLoader:
                     "prepared metadata delegation root "
                     f"{registrable_domain!r} must be an object"
                 )
-            public_suffix = str(root_payload.get("public_suffix", ""))
+            public_suffix = str(root_payload["public_suffix"])
             entries = root_payload.get("host_entries")
             if not isinstance(entries, list) or not entries:
                 raise ValueError(
@@ -120,7 +117,7 @@ class RuntimeItemLoader:
                         "prepared metadata delegation root "
                         f"{registrable_domain!r} host entry must be an object"
                     )
-                source_id = str(item.get("source_id", ""))
+                source_id = str(item["source_id"])
                 source_context = source_contexts.get(source_id)
                 if source_context is None:
                     raise ValueError(
@@ -138,37 +135,26 @@ class RuntimeItemLoader:
 
     def runtime_items(self) -> list[ParsedHostItem]:
         """Build worker-local items that seed the delegation input queue."""
-        parser = DomainListParser()
-        item_payloads: list[
-            tuple[WorkerSourceContext, ParsedDomainEntry, dict[str, Any]]
-        ] = []
-        if self._prepared_mode():
-            item_payloads = self._prepared_item_payloads()
-        else:
-            for job in SourceJobFactory().build_jobs(self.config):
-                source_context = _source_context_from_job(job)
-                forced_format = job.config.get("input", {}).get("format", "auto")
-                for entry in parser.process_entries(
-                    job.lines,
-                    source_name=job.input_label,
-                    forced_format=None if forced_format == "auto" else forced_format,
-                ):
-                    item_payloads.append((source_context, entry, {}))
+        item_payloads = self._prepared_item_payloads()
         total = len(item_payloads)
         return [
             ParsedHostItem(
                 source_context=source_context,
                 entry=entry,
-                sequence=index,
-                total=total,
-                manual_filter_pass=bool(provenance.get("manual_filter_pass", False)),
-                manual_add=bool(provenance.get("manual_add", False)),
-                source_id_override=provenance.get("source_id_override"),
-                source_input_label_override=provenance.get(
-                    "source_input_label_override"
+                provenance=RuntimeProvenance(
+                    sequence=index,
+                    total=total,
+                    source=PreparedProvenance(
+                        manual_filter_pass=bool(provenance["manual_filter_pass"]),
+                        manual_add=bool(provenance["manual_add"]),
+                        source_id_override=provenance["source_id_override"],
+                        source_input_label_override=provenance[
+                            "source_input_label_override"
+                        ],
+                        source_ids=tuple(provenance["source_ids"]),
+                        source_input_labels=tuple(provenance["source_input_labels"]),
+                    ),
                 ),
-                source_ids=tuple(provenance.get("source_ids", ())),
-                source_input_labels=tuple(provenance.get("source_input_labels", ())),
             )
             for index, (source_context, entry, provenance) in enumerate(item_payloads)
         ]
@@ -185,46 +171,28 @@ class RuntimeItemLoader:
         items_by_root: dict[str, list[ParsedHostItem]] = defaultdict(list)
         terminal_items: list[ParsedHostItem] = []
         for item in items:
-            if item.entry.is_public_suffix_input or not item.entry.registrable_domain:
+            if (
+                item.entry.semantics.is_public_suffix_input
+                or not item.entry.registrable_domain
+            ):
                 terminal_items.append(item)
                 continue
             items_by_root[item.entry.registrable_domain].append(item)
 
-        root_metadata = self._prepared_roots() if self._prepared_mode() else {}
+        root_metadata = self._prepared_roots()
         work_items: list[DelegationRootWorkItem] = []
         for registrable_domain, root_items in sorted(
             items_by_root.items(),
-            key=lambda current: (current[1][0].sequence, current[0]),
+            key=lambda current: (current[1][0].provenance.sequence, current[0]),
         ):
-            ordered_items = tuple(sorted(root_items, key=lambda item: item.sequence))
-            if self._prepared_mode():
-                metadata = root_metadata.get(registrable_domain)
-                if not isinstance(metadata, dict):
-                    raise ValueError(
-                        "prepared metadata missing delegation root "
-                        f"{registrable_domain!r}"
-                    )
-                delegation_config_source_id = str(
-                    metadata.get("delegation_config_source_id", "")
-                )
-                fingerprint = str(metadata.get("delegation_behavior_fingerprint", ""))
-            else:
-                fingerprints_by_source = {
-                    item.source_context.source_id: delegation_behavior_fingerprint(
-                        item.source_context.config
-                    )
-                    for item in ordered_items
-                }
-                if len(set(fingerprints_by_source.values())) > 1:
-                    conflicting_sources = ", ".join(sorted(fingerprints_by_source))
-                    raise ValueError(
-                        "registrable domain "
-                        f"{registrable_domain!r} appears in sources with different "
-                        f"delegation DNS behavior: {conflicting_sources}"
-                    )
-                first_item = ordered_items[0]
-                delegation_config_source_id = first_item.source_context.source_id
-                fingerprint = fingerprints_by_source[delegation_config_source_id]
+            ordered_items = tuple(
+                sorted(root_items, key=lambda item: item.provenance.sequence)
+            )
+            delegation_config_source_id, fingerprint = self._delegation_root_metadata(
+                registrable_domain=registrable_domain,
+                ordered_items=ordered_items,
+                root_metadata=root_metadata,
+            )
             delegation_source_context = source_contexts.get(delegation_config_source_id)
             if delegation_source_context is None:
                 raise ValueError(
@@ -250,3 +218,22 @@ class RuntimeItemLoader:
                 )
             )
         return work_items, terminal_items
+
+    def _delegation_root_metadata(
+        self,
+        *,
+        registrable_domain: str,
+        ordered_items: tuple[ParsedHostItem, ...],
+        root_metadata: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Return selected source id and behavior fingerprint for one root."""
+        _ = ordered_items
+        metadata = root_metadata.get(registrable_domain)
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                "prepared metadata missing delegation root " f"{registrable_domain!r}"
+            )
+        return (
+            str(metadata["delegation_config_source_id"]),
+            str(metadata["delegation_behavior_fingerprint"]),
+        )

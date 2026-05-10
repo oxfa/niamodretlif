@@ -27,17 +27,71 @@ class BatchPathSpec:
 
 
 @dataclass(frozen=True)
-class WorkerPathSpec:
-    """Repo path locations used during one worker execution."""
+class WorkerOutputPaths:
+    """Publish-snapshot output paths for one worker execution."""
 
-    result_root: Path
     output_directory: Path
     filtered: Path
     unactionable: Path
     review: Path
+
+
+@dataclass(frozen=True)
+class WorkerStatePaths:
+    """Workflow-state and debug paths for one worker execution."""
+
+    result_root: Path
     terminal_rows: Path
     cache: Path
     debug_log: Path
+
+
+@dataclass(frozen=True)
+class WorkerPathSpec:
+    """Repo path locations used during one worker execution."""
+
+    state: WorkerStatePaths
+    output: WorkerOutputPaths
+
+    @property
+    def result_root(self) -> Path:
+        """Return the worker workflow-state root."""
+        return self.state.result_root
+
+    @property
+    def output_directory(self) -> Path:
+        """Return the worker publish-snapshot output directory."""
+        return self.output.output_directory
+
+    @property
+    def filtered(self) -> Path:
+        """Return the worker filtered-output path."""
+        return self.output.filtered
+
+    @property
+    def unactionable(self) -> Path:
+        """Return the worker unactionable-output path."""
+        return self.output.unactionable
+
+    @property
+    def review(self) -> Path:
+        """Return the worker review-output path."""
+        return self.output.review
+
+    @property
+    def terminal_rows(self) -> Path:
+        """Return the worker terminal-row JSONL path."""
+        return self.state.terminal_rows
+
+    @property
+    def cache(self) -> Path:
+        """Return the worker overlay cache path."""
+        return self.state.cache
+
+    @property
+    def debug_log(self) -> Path:
+        """Return the worker debug log path."""
+        return self.state.debug_log
 
 
 @dataclass(frozen=True)
@@ -73,15 +127,6 @@ class OutputPathLayout:
     def runtime_log_path(self, *, config_name: str) -> Path:
         """Return the merged runtime log path for one config."""
         return self.debug_artifacts_root() / "runtime" / "logs" / f"{config_name}.log"
-
-    def aggregate_log_path(self, *, config_name: str) -> Path:
-        """Return the aggregate-job log path for one config."""
-        return (
-            self.debug_artifacts_root()
-            / "runtime"
-            / "logs"
-            / f"{config_name}--aggregate.log"
-        )
 
     def worker_log_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the worker debug log path."""
@@ -265,41 +310,45 @@ class PathLayout:
     ) -> WorkerPathSpec:
         """Return persisted worker path values for one worker."""
         return WorkerPathSpec(
-            result_root=self.workflow.worker_state_root(
-                batch_id=batch_id,
-                worker_id=worker_id,
+            state=WorkerStatePaths(
+                result_root=self.workflow.worker_state_root(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                ),
+                terminal_rows=self.workflow.worker_terminal_rows_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                ),
+                cache=self.workflow.worker_cache_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                ),
+                debug_log=self.output.worker_log_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                ),
             ),
-            output_directory=self.workflow.worker_publish_output_root(
-                batch_id=batch_id,
-                worker_id=worker_id,
-            ),
-            filtered=self.workflow.worker_filtered_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                config_name=config_name,
-            ),
-            unactionable=self.workflow.worker_unactionable_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                config_name=config_name,
-            ),
-            review=self.workflow.worker_review_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                config_name=config_name,
-            ),
-            terminal_rows=self.workflow.worker_terminal_rows_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                config_name=config_name,
-            ),
-            cache=self.workflow.worker_cache_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
-            ),
-            debug_log=self.output.worker_log_path(
-                batch_id=batch_id,
-                worker_id=worker_id,
+            output=WorkerOutputPaths(
+                output_directory=self.workflow.worker_publish_output_root(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                ),
+                filtered=self.workflow.worker_filtered_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                ),
+                unactionable=self.workflow.worker_unactionable_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                ),
+                review=self.workflow.worker_review_path(
+                    batch_id=batch_id,
+                    worker_id=worker_id,
+                    config_name=config_name,
+                ),
             ),
         )
 

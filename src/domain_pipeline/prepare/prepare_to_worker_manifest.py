@@ -9,7 +9,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from domain_pipeline.paths import PathLayout
+from domain_pipeline.paths.layout import PathLayout
+from domain_pipeline.prepare.stage_concurrency import (
+    RuntimeStageConcurrencyAdaptiveConfig,
+)
 from domain_pipeline.worker.ip_location.constants import (
     IP_LOCATION_PROVIDER_GEOJS,
     IP_LOCATION_PROVIDER_IPINFO_LITE,
@@ -20,14 +23,6 @@ class PrepareWorkerModel(BaseModel):
     """Base prepare-to-worker manifest model that rejects unknown fields."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class PrepareWorkerConfigIdentity(PrepareWorkerModel):
-    """Stable config identity captured during batch preparation."""
-
-    config_name: str
-    config_path: str
-    config_file_name: str
 
 
 class WorkerOutputSpec(PrepareWorkerModel):
@@ -58,15 +53,15 @@ class PreparedHostEntryMetadata(PrepareWorkerModel):
     host: str
     input_name: str
     source_id: str
-    input_kind: str = "exact_host"
-    apex_scope: str = "exact_only"
-    source_format: str = "plain"
-    manual_filter_pass: bool = False
-    manual_add: bool = False
+    input_kind: str
+    apex_scope: str
+    source_format: str
+    manual_filter_pass: bool
+    manual_add: bool
     source_id_override: str | None = None
     source_input_label_override: str | None = None
-    source_ids: list[str] = Field(default_factory=list)
-    source_input_labels: list[str] = Field(default_factory=list)
+    source_ids: list[str]
+    source_input_labels: list[str]
 
     @model_validator(mode="after")
     def _validate_host_entry_metadata(self) -> "PreparedHostEntryMetadata":
@@ -105,9 +100,7 @@ class PreparedDelegationRootMetadata(PrepareWorkerModel):
 class PreparedRuntimeMetadata(PrepareWorkerModel):
     """Root-owned prepared metadata consumed by the worker runtime fast path."""
 
-    delegation_roots: dict[str, PreparedDelegationRootMetadata] = Field(
-        default_factory=dict
-    )
+    delegation_roots: dict[str, PreparedDelegationRootMetadata]
 
     @model_validator(mode="after")
     def _validate_delegation_root_keys(self) -> "PreparedRuntimeMetadata":
@@ -136,7 +129,6 @@ class WorkerRuntimeHostResolutionTTLSpec(PrepareWorkerModel):
     resolved: int | None = None
     nodata: int = 1
     nxdomain: int = 1
-    unknown: int = 0
 
 
 class WorkerRuntimeCacheSpec(PrepareWorkerModel):
@@ -166,20 +158,10 @@ class WorkerRuntimeStageConcurrencyMinimumsSpec(PrepareWorkerModel):
     ip_location: int
 
 
-class WorkerRuntimeStageConcurrencyAdaptiveSpec(PrepareWorkerModel):
+class WorkerRuntimeStageConcurrencyAdaptiveSpec(RuntimeStageConcurrencyAdaptiveConfig):
     """Adaptive worker-local stage concurrency settings in worker manifests."""
 
-    enabled: bool = True
-    delegation_enabled: bool = True
-    host_resolution_enabled: bool = True
-    supervisor_interval_seconds: float = 1.0
-    busy_scale_up_after_seconds: float = 5.0
-    idle_scale_down_after_seconds: float = 5.0
-    pressure_window_seconds: float = 5.0
-    queue_pressure_ratio: float = 0.8
-    max_concurrency_multiplier: int = 4
-    scale_up_step: int = 1
-    scale_down_step: int = 1
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class WorkerRuntimeStageConcurrencySpec(PrepareWorkerModel):
@@ -280,7 +262,7 @@ class WorkerRuntimeSourceConfig(PrepareWorkerModel):
 class WorkerRuntimeSpec(PrepareWorkerModel):
     """Prepare-owned runtime config for one worker execution."""
 
-    config_identity: PrepareWorkerConfigIdentity
+    config_name: str
     cache: WorkerRuntimeCacheSpec
     runtime: WorkerRuntimeSettingsSpec
     sources: list[WorkerRuntimeSourceConfig]
@@ -296,9 +278,7 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
         """Return the runtime config payload with paths resolved for execution."""
         payload = {
             "version": 2,
-            "config_name": self.config_identity.config_name,
-            "config_path": self.config_identity.config_path,
-            "config_file_name": self.config_identity.config_file_name,
+            "config_name": self.config_name,
             "cache": self.cache.model_dump(mode="json"),
             "runtime": self.runtime.model_dump(mode="json"),
             "sources": [source.model_dump(mode="json") for source in self.sources],
@@ -333,25 +313,6 @@ class PrepareWorkerManifest(PrepareWorkerModel):
     worker_id: str
     runtime_spec: WorkerRuntimeSpec
     prepared_metadata: PreparedRuntimeMetadata
-
-    @classmethod
-    def from_assignment(
-        cls,
-        *,
-        automation_format_version: int,
-        batch_id: str,
-        worker_id: str,
-        runtime_spec: WorkerRuntimeSpec,
-        prepared_metadata: PreparedRuntimeMetadata,
-    ) -> "PrepareWorkerManifest":
-        """Build one prepare-to-worker manifest from prepared assignment state."""
-        return cls(
-            automation_format_version=automation_format_version,
-            batch_id=batch_id,
-            worker_id=worker_id,
-            runtime_spec=runtime_spec,
-            prepared_metadata=prepared_metadata,
-        )
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved worker output paths for this manifest."""
