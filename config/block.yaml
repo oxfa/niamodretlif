@@ -79,8 +79,12 @@ defaults:
 
 runtime:
   # Worker-local async stage concurrency inside one GitHub matrix worker.
-  # Delegation and host-resolution can adapt between minimums and caps; ip location is
-  # static in this runtime version. Workflow matrix concurrency is separate.
+  # Delegation and enabled host-resolution stages can adapt between minimums
+  # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
+  # usable provider capacity; one pressured provider does not by itself block
+  # the whole stage, but all-provider pressure blocks creation. Disabled
+  # host-resolution starts no host-resolution consumers. Ip location is static.
+  # Workflow matrix concurrency is separate.
   stage_concurrency:
     minimums:
       delegation: 20

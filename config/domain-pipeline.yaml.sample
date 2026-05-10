@@ -192,10 +192,13 @@ defaults:
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub
   # matrix worker. Delegation consumes registrable-domain root work and fans
-  # results out to host rows; host_resolution and ip location stay host-level. Delegation
-  # and host_resolution can adapt between minimums and caps when DNS provider
-  # capacity is not pressured; ip location is static in this runtime version. GitHub
-  # matrix concurrency is controlled separately by workflow settings.
+  # results out to host rows; host_resolution and ip location stay host-level.
+  # Delegation and enabled host_resolution stages can adapt between minimums
+  # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
+  # usable provider capacity; one pressured provider does not by itself block
+  # the whole stage, but all-provider pressure blocks creation. Disabled
+  # host_resolution starts no host_resolution consumers. Ip location is static.
+  # GitHub matrix concurrency is controlled separately by workflow settings.
   stage_concurrency:
     minimums:
       delegation: 20
