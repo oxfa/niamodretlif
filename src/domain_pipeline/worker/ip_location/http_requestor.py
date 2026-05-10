@@ -1,4 +1,4 @@
-"""HTTP request retry logic owned by ip location providers."""
+"""HTTP request retry logic owned by IP-location providers."""
 
 from __future__ import annotations
 

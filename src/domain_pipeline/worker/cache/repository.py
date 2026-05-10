@@ -1,4 +1,4 @@
-"""Persistent cache storage for delegation, host resolution, and IP ip location data."""
+"""Persistent cache storage for delegation, host resolution, and IP-location data."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ class HostResolutionHistoryRecord:
 
 @dataclasses.dataclass(frozen=True)
 class IpLocationHistoryRecord:
-    """A cached IP geolocation lookup record."""
+    """A cached IP-location lookup record."""
 
     identity: IpLocationCacheIdentity
     evidence: IpLocationCacheEvidence
@@ -178,7 +178,7 @@ class IpLocationHistoryRecord:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "IpLocationHistoryRecord":
-        """Build a ip location cache record from one SQLite row."""
+        """Build an IP-location cache record from one SQLite row."""
         return cls(
             identity=IpLocationCacheIdentity(
                 provider=str(row["provider"]),
@@ -201,7 +201,7 @@ class IpLocationHistoryRecord:
 
 
 class CacheRepository:
-    """Persistent SQLite-backed cache for DNS and ip location results."""
+    """Persistent SQLite-backed cache for DNS and IP-location results."""
 
     def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
         self.path = path
@@ -373,7 +373,7 @@ class CacheRepository:
         self._connection.commit()
 
     def put_ip_location(self, request: IpLocationCacheWriteRequest) -> None:
-        """Store one ip location lookup result."""
+        """Store one IP-location lookup result."""
         expires_at = request.timestamps.effective_expires_at()
         self._connection.execute(
             f"""

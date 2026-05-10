@@ -128,7 +128,7 @@ def host_resolution_result_from_cache_record(record: Any) -> HostResolutionResul
 
 
 def ip_location_result_from_cache_record(record: Any) -> IPLocationResult:
-    """Build a ip location result from one cached ip location row."""
+    """Build an IP-location result from one cached IP-location row."""
     return IPLocationResult(
         ip=record.identity.ip,
         provider=record.identity.provider,

@@ -1,4 +1,4 @@
-"""IP geolocation providers and ip location policy evaluation for usable ip location results."""
+"""IP-location providers and policy evaluation for usable lookup results."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ IPINFO_LITE_BULK_CHUNK_SIZE = 1000
 
 
 class RetryableIPLocationLookupError(requests.RequestException):
-    """Raised for transient ip location HTTP failures that should be retried."""
+    """Raised for transient IP-location HTTP failures that should be retried."""
 
     def __init__(
         self,
@@ -52,7 +52,7 @@ class RetryableIPLocationLookupError(requests.RequestException):
 
 @dataclasses.dataclass(frozen=True)
 class IPLocationResult:
-    """IpLocationlocation result for one IP address."""
+    """IP-location result for one IP address."""
 
     ip: str
     provider: str
@@ -64,7 +64,7 @@ class IPLocationResult:
 
     @property
     def usable(self) -> bool:
-        """Return whether this result contains usable ip location data."""
+        """Return whether this result contains usable IP-location data."""
         return self.status in {IP_LOCATION_STATUS_OK, IP_LOCATION_STATUS_CACHE_HIT}
 
 
@@ -79,16 +79,16 @@ class LocationPolicyDecision:
 
 
 class IPLocationProvider(Protocol):
-    """Protocol for pluggable geolocation providers."""
+    """Protocol for pluggable IP-location providers."""
 
     provider_name: str
 
     def lookup_ip(self, ip: str) -> IPLocationResult:
-        """Return a ip location record for one IP."""
+        """Return an IP-location record for one IP."""
         raise NotImplementedError
 
     def lookup_ips(self, ips: list[str]) -> list[IPLocationResult]:
-        """Return ip location records for multiple IPs in input order."""
+        """Return IP-location records for multiple IPs in input order."""
         raise NotImplementedError
 
 
@@ -136,7 +136,7 @@ def _string_field(payload: object, key: str) -> str:
 
 
 class RequestsIPLocationProvider:
-    """Base class for simple HTTP JSON IP ip location providers."""
+    """Base class for HTTP JSON IP-location providers."""
 
     provider_name = ""
     MAX_RETRY_ATTEMPTS = 3
@@ -178,7 +178,7 @@ class RequestsIPLocationProvider:
     def _build_retryable_ip_location_transport_error(
         log_name: str, exc: requests.RequestException
     ) -> RetryableIPLocationLookupError:
-        """Create one retryable ip location transport error."""
+        """Create one retryable IP-location transport error."""
         return RetryableIPLocationLookupError(
             f"{log_name} request failed: {exc}",
             original_exception=exc,
@@ -188,7 +188,7 @@ class RequestsIPLocationProvider:
     def _build_retryable_ip_location_status_error(
         log_name: str, response: requests.Response
     ) -> RetryableIPLocationLookupError:
-        """Create one retryable ip location HTTP-status error."""
+        """Create one retryable IP-location HTTP-status error."""
         return RetryableIPLocationLookupError(
             f"{log_name} returned HTTP {response.status_code}",
             response=response,
@@ -245,7 +245,7 @@ class RequestsIPLocationProvider:
         *,
         provider_label: str,
     ) -> IPLocationResult:
-        """Map one provider exception into the normalized ip location result surface."""
+        """Map one provider exception into the normalized IP-location result surface."""
         logger.warning("%s lookup failed for %s: %s", provider_label, ip, exc)
         response = getattr(exc, "response", None)
         if getattr(response, "status_code", None) == 429:
@@ -257,7 +257,7 @@ class RequestsIPLocationProvider:
         raise NotImplementedError
 
     def lookup_ips(self, ips: list[str]) -> list[IPLocationResult]:
-        """Return ip location results for multiple IPs using sequential single-IP lookups."""
+        """Return IP-location results for multiple IPs using sequential lookups."""
         return [self.lookup_ip(ip) for ip in ips]
 
 
@@ -276,7 +276,7 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
         self.token = token
 
     def _result_from_payload(self, ip: str, payload: object) -> IPLocationResult:
-        """Build one normalized ip location result from an IPinfo Lite payload."""
+        """Build one normalized IP-location result from an IPinfo Lite payload."""
         if not isinstance(payload, dict):
             logger.debug("IPinfo Lite lookup for %s returned an invalid payload", ip)
             return IPLocationResult(
@@ -498,7 +498,7 @@ def build_ip_location_provider(
     token: str = "",
     session: Any = None,
 ) -> IPLocationProvider:
-    """Instantiate one inferred geolocation provider."""
+    """Instantiate one inferred IP-location provider."""
     if provider_name == PROVIDER_IPINFO_LITE:
         return IPInfoLiteProvider(timeout=timeout, session=session, token=token)
     if provider_name == PROVIDER_GEOJS:
@@ -521,7 +521,7 @@ def _ip_location_value_matches(
 
 
 def _ip_location_result_is_usable(result: IPLocationResult) -> bool:
-    """Return whether one ip location result should participate in ip location matching."""
+    """Return whether one IP-location result should participate in policy matching."""
     return result.usable
 
 
@@ -598,7 +598,7 @@ def _ip_location_decision(
     *,
     failed_ips: list[str] | None = None,
 ) -> LocationPolicyDecision:
-    """Build and log one ip location policy decision."""
+    """Build and log one IP-location policy decision."""
     if failed_ips is None:
         logger.debug(
             "IpLocation policy decision: status=%s reason=%s matched=%s rejected=%s",
@@ -621,7 +621,7 @@ def evaluate_ip_location_policy(
     ip_location_results: list[IPLocationResult],
     policy: dict[str, Any],
 ) -> LocationPolicyDecision:
-    """Evaluate a source-local policy after the selected provider yields usable ip location data."""
+    """Evaluate a source-local policy after the selected provider yields usable data."""
     criteria = _ip_location_policy_criteria(policy)
     _log_ip_location_policy_evaluation(criteria, len(ip_location_results))
     if not ip_location_results:

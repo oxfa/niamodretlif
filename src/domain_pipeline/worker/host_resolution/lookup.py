@@ -255,7 +255,13 @@ class HostResolutionCheckerRequest:
 class HostResolutionChecker(DNSQueryService):
     """Checker for exact-host A/AAAA/CNAME resolution lookups."""
 
-    def __init__(self, request: HostResolutionCheckerRequest) -> None:
+    def __init__(
+        self,
+        request: HostResolutionCheckerRequest,
+        *,
+        coordinator_state: Any | None = None,
+    ) -> None:
+        super().__init__(coordinator_state=coordinator_state)
         host_resolution_payload = dict(request.host_resolution_dns or {})
         if request.ecs and "ecs" not in host_resolution_payload:
             host_resolution_payload["ecs"] = request.ecs

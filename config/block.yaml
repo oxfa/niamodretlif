@@ -4,17 +4,20 @@ version: 2
 # - input/manual_filter_pass/block.txt
 # - input/manual_filter_out/block.txt
 # - input/manual_add/block.txt
-# manual_filter_pass and manual_add entries require DNS delegation when they
-# have a registrable domain. Source-matched public suffix manual_filter_pass
-# entries route to filtered during prepare because there is no registrable
-# domain to query. Actionable delegation means NS records exist, or NS returns
-# NODATA and the registrable domain is proven to have same-owner SOA, either
-# from the original NS negative-response authority section or from a separate
-# delegation SOA query. When delegation is actionable they bypass
-# host-resolution and ip location checks and route to filtered. manual_add takes
-# precedence over matching source entries for the same host. manual_filter_out
-# skips delegation, host resolution, and ip location and routes to review. Other
-# public-suffix inputs are prepare-owned review/audit rows.
+# manual_filter_pass and manual_add entries require actionable delegation when
+# they have a registrable domain. Source-matched public suffix
+# manual_filter_pass entries route to filtered during prepare because there is
+# no registrable domain to query. Actionable delegation means NS records exist,
+# or NS returns NODATA and the registrable domain is proven to have same-owner
+# SOA, either from the original NS negative-response authority section or from a
+# separate delegation SOA query. When delegation is actionable,
+# manual_filter_pass and manual_add bypass host-resolution and IP-location
+# checks and route to filtered. manual_add takes precedence over matching
+# source entries for the same host. Unmatched manual_filter_pass entries route
+# to review without DNS lookup; unmatched manual_add entries require all
+# enabled sources to share delegation/output behavior. manual_filter_out is
+# exact-host-only, skips delegation, host resolution, and IP-location, and
+# routes to review. Other public-suffix inputs are prepare-owned terminal rows.
 
 defaults:
   fetch:

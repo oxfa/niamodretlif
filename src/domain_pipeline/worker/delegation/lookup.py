@@ -203,7 +203,13 @@ def _delegation_status(result: DelegationResult) -> str:
 class DelegationChecker(DNSQueryService):
     """Checker for registrable-domain delegation lookups."""
 
-    def __init__(self, request: DelegationCheckerRequest) -> None:
+    def __init__(
+        self,
+        request: DelegationCheckerRequest,
+        *,
+        coordinator_state: Any | None = None,
+    ) -> None:
+        super().__init__(coordinator_state=coordinator_state)
         dns_config = self.stage_dns_base_config(
             default_resolvers=request.base.default_resolvers,
             timeout=request.base.timeout,

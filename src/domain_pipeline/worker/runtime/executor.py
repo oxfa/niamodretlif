@@ -30,7 +30,7 @@ from domain_pipeline.worker.ip_location.providers import (
 from domain_pipeline.worker.output.writer import ResultOutputWriter
 from domain_pipeline.worker.runtime.dns_factory import RuntimeDNSCheckerFactory
 from domain_pipeline.worker.dns_query.query_coordinator import (
-    DNSQueryCoordinatorRegistry,
+    DNSQueryCoordinatorState,
 )
 from domain_pipeline.worker.runtime.adaptive import (
     AdaptiveDNSPressureState,
@@ -150,6 +150,7 @@ class RuntimeWorkerResources:
 
     cache: RuntimeCacheResources
     writer: ResultOutputWriter
+    dns_coordinator_state: DNSQueryCoordinatorState
 
 
 @dataclasses.dataclass(frozen=True)
@@ -353,6 +354,7 @@ class PipelineExecutor:
         self._resources = RuntimeWorkerResources(
             cache=RuntimeCacheResources(bundle=cache_bundle),
             writer=ResultOutputWriter(),
+            dns_coordinator_state=DNSQueryCoordinatorState(),
         )
         stage_concurrency = _runtime_stage_concurrency_counts(config)
         concurrency_settings = _runtime_stage_concurrency_settings(config)
@@ -455,7 +457,9 @@ class PipelineExecutor:
         self, source_context: WorkerSourceContext, registrable_domain: str
     ) -> DelegationResult:
         """Run or join one root-level delegation lookup."""
-        checker = RuntimeDNSCheckerFactory().build(source_context.config)
+        checker = RuntimeDNSCheckerFactory(
+            coordinator_state=self._resources.dns_coordinator_state
+        ).build(source_context.config)
         resolver_key = checker.delegation_resolver_key()
         task_key = (registrable_domain, resolver_key)
         task = self._delegation_tasks.get(task_key)
@@ -494,7 +498,9 @@ class PipelineExecutor:
         self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional host_resolution stage."""
-        checker = RuntimeDNSCheckerFactory().build(source_context.config)
+        checker = RuntimeDNSCheckerFactory(
+            coordinator_state=self._resources.dns_coordinator_state
+        ).build(source_context.config)
         return await self._lookup_services.dns_cache.lookup_host_resolution(
             checker=checker,
             host=entry.host,
@@ -506,7 +512,7 @@ class PipelineExecutor:
         source_context: WorkerSourceContext,
         host_resolution_result: HostResolutionResult,
     ) -> tuple[str, list[IPLocationResult], Any | None]:
-        """Run or cache-read the optional ip location stage and evaluate its policy."""
+        """Run or cache-read the optional IP-location stage and evaluate its policy."""
         return await self._lookup_services.ip_location.lookup_ip_location(
             ip_location_config=source_context.config["ip_location"],
             host_resolution_result=host_resolution_result,
@@ -528,11 +534,11 @@ class PipelineExecutor:
     async def _host_resolution_stage_consumer(
         self, queue_bundle: RuntimeQueueSet
     ) -> None:
-        """Consume host-resolution work and route review, filtered, or ip location cases."""
+        """Consume host-resolution work and route review, filtered, or IP-location cases."""
         await HostResolutionStage(self).consume(queue_bundle)
 
     async def _ip_location_stage_consumer(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume ip location work and emit terminal policy results."""
+        """Consume IP-location work and emit terminal policy results."""
         await IpLocationStage(self).consume(queue_bundle)
 
     def log_delegation_fanout(self, registrable_domain: str, item_count: int) -> None:
@@ -603,7 +609,7 @@ class PipelineExecutor:
         self, groups: tuple[DNSStageCapacityGroup, ...]
     ) -> AdaptiveDNSPressureState:
         """Return stage-scoped DNS capacity and recent pressure state."""
-        snapshots = DNSQueryCoordinatorRegistry.provider_capacity_snapshot(
+        snapshots = self._resources.dns_coordinator_state.provider_capacity_snapshot(
             rate_limit_enabled=True,
             pressure_window_seconds=self.concurrency_settings.timing.pressure_window_seconds,
         )

@@ -1,4 +1,4 @@
-"""IpLocation pipeline result-code constants."""
+"""IP-location pipeline result-code constants."""
 
 from __future__ import annotations
 

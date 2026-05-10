@@ -1,4 +1,4 @@
-"""Async transport wrappers for worker DNS and ip location lookups."""
+"""Async transport wrappers for worker DNS and IP-location lookups."""
 
 from __future__ import annotations
 

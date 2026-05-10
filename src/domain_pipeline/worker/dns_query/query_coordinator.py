@@ -227,6 +227,9 @@ class DNSEndpointSelectionRequest:
     name: str
 
 
+DNSProviderPolicyKey = tuple[str, float, int, int]
+
+
 class DNSQueryExhaustedError(Exception):
     """Raised after one DNS query exhausts its retry budget."""
 
@@ -375,58 +378,29 @@ class PendingQueryLimiter:
             return bool(self._pressure_events)
 
 
-class DNSQueryCoordinatorBase:
-    """Resolve one DNS stage through a balanced worker-local endpoint pool.
+@dataclasses.dataclass
+class DNSQueryCoordinatorState:
+    """Worker-local DNS coordinator and provider limiter state."""
 
-    The limiter is intentionally process-local. Observed GitHub matrix runs
-    rarely share IPv4 egress, so the scheduler assumes distinct worker IPs and
-    avoids cross-worker DNS budget coordination by design.
-    """
+    coordinator_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    coordinators: dict[str, "DNSQueryCoordinatorBase"] = dataclasses.field(
+        default_factory=dict
+    )
+    limiter_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    token_limiters: dict[DNSProviderPolicyKey, TokenBucketRateLimiter] = (
+        dataclasses.field(default_factory=dict)
+    )
+    pending_limiters: dict[DNSProviderPolicyKey, PendingQueryLimiter] = (
+        dataclasses.field(default_factory=dict)
+    )
 
-    stage = ""
-    _limiter_lock = threading.Lock()
-    _token_limiters: dict[tuple[str, float, int, int], TokenBucketRateLimiter] = {}
-    _pending_limiters: dict[tuple[str, float, int, int], PendingQueryLimiter] = {}
-
-    def __init__(
+    def build_limiters(
         self,
-        *,
-        endpoints: list[DNSEndpoint],
-        resolver_key: str,
-        config: DNSQueryCoordinatorConfig,
-        retry_backoff_base_seconds: float = 1.0,
-    ) -> None:
-        if not endpoints:
-            raise ValueError("DNS query coordinator requires at least one endpoint")
-        if not self.stage:
-            raise ValueError("DNS query coordinator subclass must define a stage")
-        self.endpoints = list(endpoints)
-        self._resolver_key = resolver_key
-        self._config = config
-        self._retry_backoff_base_seconds = max(float(retry_backoff_base_seconds), 0.001)
-        endpoint_weights = self._endpoint_weights()
-        self._selection = DNSQuerySelectionState(
-            endpoint_weights=endpoint_weights,
-            total_weight=sum(endpoint_weights),
-            current_weights=[0] * len(self.endpoints),
-            position_lock=threading.Lock(),
-            query_counter=0,
-            query_counter_lock=threading.Lock(),
-            provider_count=len({endpoint.provider for endpoint in self.endpoints}),
-        )
-        self._rate_limiters, self._provider_pending_limiters = self._build_limiters(
-            config=config,
-            endpoints=self.endpoints,
-        )
-
-    @classmethod
-    def _build_limiters(
-        cls,
         *,
         config: DNSQueryCoordinatorConfig,
         endpoints: list[DNSEndpoint] | None = None,
     ) -> tuple[dict[str, TokenBucketRateLimiter], dict[str, PendingQueryLimiter]]:
-        """Return class-owned worker-local provider limiter state."""
+        """Return state-owned worker-local provider limiter state."""
         if not config.rate_limit_enabled:
             return {}, {}
         endpoint_providers = (
@@ -436,40 +410,27 @@ class DNSQueryCoordinatorBase:
         )
         rate_limiters: dict[str, TokenBucketRateLimiter] = {}
         pending_limiters: dict[str, PendingQueryLimiter] = {}
-        with cls._limiter_lock:
+        with self.limiter_lock:
             for provider in sorted(endpoint_providers):
                 limit = config.provider_limits.get(provider)
                 if limit is None:
                     continue
-                provider_policy_key = cls._provider_policy_key(provider, limit)
-                if provider_policy_key not in cls._token_limiters:
-                    cls._token_limiters[provider_policy_key] = TokenBucketRateLimiter(
+                provider_policy_key = _provider_policy_key(provider, limit)
+                if provider_policy_key not in self.token_limiters:
+                    self.token_limiters[provider_policy_key] = TokenBucketRateLimiter(
                         qps=limit.qps_per_worker,
                         burst=limit.burst,
                     )
-                if provider_policy_key not in cls._pending_limiters:
-                    cls._pending_limiters[provider_policy_key] = PendingQueryLimiter(
+                if provider_policy_key not in self.pending_limiters:
+                    self.pending_limiters[provider_policy_key] = PendingQueryLimiter(
                         limit.max_pending
                     )
-                rate_limiters[provider] = cls._token_limiters[provider_policy_key]
-                pending_limiters[provider] = cls._pending_limiters[provider_policy_key]
+                rate_limiters[provider] = self.token_limiters[provider_policy_key]
+                pending_limiters[provider] = self.pending_limiters[provider_policy_key]
         return rate_limiters, pending_limiters
 
-    @staticmethod
-    def _provider_policy_key(
-        provider: str, limit: DNSProviderRateLimit
-    ) -> tuple[str, float, int, int]:
-        """Return the worker-local static limiter key for one provider policy."""
-        return (
-            provider,
-            float(limit.qps_per_worker),
-            int(limit.burst),
-            int(limit.max_pending),
-        )
-
-    @classmethod
     def provider_capacity_snapshot(
-        cls, *, rate_limit_enabled: bool, pressure_window_seconds: float
+        self, *, rate_limit_enabled: bool, pressure_window_seconds: float
     ) -> tuple[DNSProviderCapacitySnapshot, ...]:
         """Return deduped provider-policy capacity snapshots."""
         if not rate_limit_enabled:
@@ -490,15 +451,11 @@ class DNSQueryCoordinatorBase:
                 ),
             )
         snapshots: list[DNSProviderCapacitySnapshot] = []
-        with cls._limiter_lock:
-            policy_keys = sorted(cls._token_limiters)
-            for provider, qps_per_worker, burst, max_pending in policy_keys:
-                token_limiter = cls._token_limiters[
-                    (provider, qps_per_worker, burst, max_pending)
-                ]
-                pending_limiter = cls._pending_limiters[
-                    (provider, qps_per_worker, burst, max_pending)
-                ]
+        with self.limiter_lock:
+            for provider_policy_key in sorted(self.token_limiters):
+                provider, qps_per_worker, burst, max_pending = provider_policy_key
+                token_limiter = self.token_limiters[provider_policy_key]
+                pending_limiter = self.pending_limiters[provider_policy_key]
                 token_snapshot = token_limiter.snapshot()
                 pending_snapshot = pending_limiter.snapshot()
                 recent_pressure = token_limiter.has_recent_pressure(
@@ -523,6 +480,103 @@ class DNSQueryCoordinatorBase:
                     )
                 )
         return tuple(snapshots)
+
+    def get_or_create(
+        self, request: DNSCoordinatorRegistryRequest
+    ) -> "DNSQueryCoordinatorBase":
+        """Return a shared coordinator for one normalized stage resolver profile."""
+        stage_key = f"{request.coordinator_cls.stage}|{request.registry_key}"
+        with self.coordinator_lock:
+            coordinator = self.coordinators.get(stage_key)
+            if coordinator is None:
+                coordinator = request.coordinator_cls(
+                    endpoints=request.endpoints,
+                    resolver_key=request.resolver_key,
+                    config=request.config,
+                    options=DNSQueryCoordinatorOptions(
+                        retry_backoff_base_seconds=request.retry_backoff_base_seconds,
+                        coordinator_state=self,
+                    ),
+                )
+                self.coordinators[stage_key] = coordinator
+            return coordinator
+
+
+@dataclasses.dataclass(frozen=True)
+class DNSQueryCoordinatorOptions:
+    """Optional coordinator construction controls."""
+
+    retry_backoff_base_seconds: float = 1.0
+    coordinator_state: DNSQueryCoordinatorState | None = None
+
+
+_DEFAULT_COORDINATOR_STATE = DNSQueryCoordinatorState()
+
+
+def default_dns_query_coordinator_state() -> DNSQueryCoordinatorState:
+    """Return the process-local default DNS coordinator state."""
+    return _DEFAULT_COORDINATOR_STATE
+
+
+def _provider_policy_key(
+    provider: str, limit: DNSProviderRateLimit
+) -> DNSProviderPolicyKey:
+    """Return the worker-local static limiter key for one provider policy."""
+    return (
+        provider,
+        float(limit.qps_per_worker),
+        int(limit.burst),
+        int(limit.max_pending),
+    )
+
+
+class DNSQueryCoordinatorBase:
+    """Resolve one DNS stage through a balanced worker-local endpoint pool.
+
+    The limiter is intentionally process-local. Observed GitHub matrix runs
+    rarely share IPv4 egress, so the scheduler assumes distinct worker IPs and
+    avoids cross-worker DNS budget coordination by design.
+    """
+
+    stage = ""
+
+    def __init__(
+        self,
+        *,
+        endpoints: list[DNSEndpoint],
+        resolver_key: str,
+        config: DNSQueryCoordinatorConfig,
+        options: DNSQueryCoordinatorOptions = DNSQueryCoordinatorOptions(),
+    ) -> None:
+        if not endpoints:
+            raise ValueError("DNS query coordinator requires at least one endpoint")
+        if not self.stage:
+            raise ValueError("DNS query coordinator subclass must define a stage")
+        self.endpoints = list(endpoints)
+        self._resolver_key = resolver_key
+        self._config = config
+        coordinator_state = (
+            options.coordinator_state or default_dns_query_coordinator_state()
+        )
+        self._retry_backoff_base_seconds = max(
+            float(options.retry_backoff_base_seconds), 0.001
+        )
+        endpoint_weights = self._endpoint_weights()
+        self._selection = DNSQuerySelectionState(
+            endpoint_weights=endpoint_weights,
+            total_weight=sum(endpoint_weights),
+            current_weights=[0] * len(self.endpoints),
+            position_lock=threading.Lock(),
+            query_counter=0,
+            query_counter_lock=threading.Lock(),
+            provider_count=len({endpoint.provider for endpoint in self.endpoints}),
+        )
+        self._rate_limiters, self._provider_pending_limiters = (
+            coordinator_state.build_limiters(
+                config=config,
+                endpoints=self.endpoints,
+            )
+        )
 
     def resolver_key(self) -> str:
         """Return the pool-level resolver cache key."""
@@ -850,33 +904,28 @@ def _answer_values(answer: Any) -> list[str]:
 class DNSQueryCoordinatorRegistry:
     """Process-local registry for sharing DNS query coordinators."""
 
-    _lock = threading.Lock()
-    _coordinators: dict[str, DNSQueryCoordinatorBase] = {}
-
     @classmethod
     def get_or_create(
-        cls, request: DNSCoordinatorRegistryRequest
+        cls,
+        request: DNSCoordinatorRegistryRequest,
+        *,
+        coordinator_state: DNSQueryCoordinatorState | None = None,
     ) -> DNSQueryCoordinatorBase:
         """Return a shared coordinator for one normalized stage resolver profile."""
-        stage_key = f"{request.coordinator_cls.stage}|{request.registry_key}"
-        with cls._lock:
-            coordinator = cls._coordinators.get(stage_key)
-            if coordinator is None:
-                coordinator = request.coordinator_cls(
-                    endpoints=request.endpoints,
-                    resolver_key=request.resolver_key,
-                    config=request.config,
-                    retry_backoff_base_seconds=request.retry_backoff_base_seconds,
-                )
-                cls._coordinators[stage_key] = coordinator
-            return coordinator
+        state = coordinator_state or default_dns_query_coordinator_state()
+        return state.get_or_create(request)
 
     @classmethod
     def provider_capacity_snapshot(
-        cls, *, rate_limit_enabled: bool, pressure_window_seconds: float
+        cls,
+        *,
+        rate_limit_enabled: bool,
+        pressure_window_seconds: float,
+        coordinator_state: DNSQueryCoordinatorState | None = None,
     ) -> tuple[DNSProviderCapacitySnapshot, ...]:
         """Return shared DNS provider capacity for adaptive runtime decisions."""
-        return DNSQueryCoordinatorBase.provider_capacity_snapshot(
+        state = coordinator_state or default_dns_query_coordinator_state()
+        return state.provider_capacity_snapshot(
             rate_limit_enabled=rate_limit_enabled,
             pressure_window_seconds=pressure_window_seconds,
         )
