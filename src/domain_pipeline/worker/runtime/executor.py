@@ -159,6 +159,7 @@ class RuntimeStageSettings:
     concurrency: RuntimeStageConcurrencyCounts
     adaptive: RuntimeStageConcurrencySettings
     dns_capacity_groups: RuntimeDNSCapacityGroups
+    host_resolution_stage_enabled: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -312,6 +313,19 @@ def _runtime_dns_capacity_groups(
     )
 
 
+def _runtime_host_resolution_stage_enabled(
+    config: dict[str, Any],
+    *,
+    prepared_metadata: dict[str, Any] | None,
+) -> bool:
+    """Return whether any active source enables host-resolution work."""
+    loader = RuntimeItemLoader(config=config, prepared_metadata=prepared_metadata)
+    return any(
+        bool(source_context.config["host_resolution"].get("enabled", False))
+        for source_context in loader.source_contexts()
+    )
+
+
 class PipelineExecutor:
     """Worker-local async DAG for prepared and config-sourced runtime payloads."""
 
@@ -346,6 +360,10 @@ class PipelineExecutor:
             concurrency=stage_concurrency,
             adaptive=concurrency_settings,
             dns_capacity_groups=_runtime_dns_capacity_groups(
+                config,
+                prepared_metadata=prepared_metadata,
+            ),
+            host_resolution_stage_enabled=_runtime_host_resolution_stage_enabled(
                 config,
                 prepared_metadata=prepared_metadata,
             ),
@@ -697,6 +715,15 @@ class PipelineExecutor:
     ) -> RuntimeRunTasks:
         """Start stage consumers, result writer, cache writers, and loader."""
         adaptive_enabled = self.concurrency_settings.adaptive_enabled
+        host_stage_enabled = self._stage_settings.host_resolution_stage_enabled
+        delegation_uses_adaptive = (
+            adaptive_enabled and self.concurrency_settings.delegation.enabled
+        )
+        host_uses_adaptive = (
+            adaptive_enabled
+            and self.concurrency_settings.host_resolution.enabled
+            and host_stage_enabled
+        )
         ip_location_tasks = [
             asyncio.create_task(
                 self._ip_location_stage_consumer(queue_bundle),
@@ -711,20 +738,7 @@ class PipelineExecutor:
             asyncio.create_task(writer.run(), name=f"cache-writer-{index}")
             for index, writer in enumerate(self.cache_bundle.writers)
         ]
-        if adaptive_enabled:
-            host_resolution_supervisor: AdaptiveStageSupervisor | None = (
-                self._adaptive_supervisor(
-                    RuntimeAdaptiveSupervisorBuildRequest(
-                        stage_name="host-resolution",
-                        queue=queue_bundle.delegation_to_host_resolution,
-                        task_factory=lambda: self._host_resolution_stage_consumer(
-                            queue_bundle
-                        ),
-                        limits=self.concurrency_settings.host_resolution,
-                        capacity_groups=self.dns_capacity_groups.host_resolution,
-                    )
-                )
-            )
+        if delegation_uses_adaptive:
             delegation_supervisor: AdaptiveStageSupervisor | None = (
                 self._adaptive_supervisor(
                     RuntimeAdaptiveSupervisorBuildRequest(
@@ -738,13 +752,10 @@ class PipelineExecutor:
                     )
                 )
             )
-            await host_resolution_supervisor.start()
             await delegation_supervisor.start()
             delegation_tasks = delegation_supervisor.tasks
-            host_resolution_tasks = host_resolution_supervisor.tasks
         else:
             delegation_supervisor = None
-            host_resolution_supervisor = None
             delegation_tasks = [
                 asyncio.create_task(
                     self._delegation_stage_consumer(queue_bundle),
@@ -752,6 +763,30 @@ class PipelineExecutor:
                 )
                 for index in range(self.stage_concurrency.delegation)
             ]
+
+        if not host_stage_enabled:
+            logger.debug(
+                "Adaptive stage disabled stage=host-resolution "
+                "reason=stage_config_disabled"
+            )
+            host_resolution_supervisor = None
+            host_resolution_tasks: list[asyncio.Task[Any]] = []
+        elif host_uses_adaptive:
+            host_resolution_supervisor = self._adaptive_supervisor(
+                RuntimeAdaptiveSupervisorBuildRequest(
+                    stage_name="host-resolution",
+                    queue=queue_bundle.delegation_to_host_resolution,
+                    task_factory=lambda: self._host_resolution_stage_consumer(
+                        queue_bundle
+                    ),
+                    limits=self.concurrency_settings.host_resolution,
+                    capacity_groups=self.dns_capacity_groups.host_resolution,
+                )
+            )
+            await host_resolution_supervisor.start()
+            host_resolution_tasks = host_resolution_supervisor.tasks
+        else:
+            host_resolution_supervisor = None
             host_resolution_tasks = [
                 asyncio.create_task(
                     self._host_resolution_stage_consumer(queue_bundle),
@@ -761,7 +796,7 @@ class PipelineExecutor:
             ]
         loader_task = asyncio.create_task(
             self._load_delegation_input(
-                queue_bundle, send_sentinels=not adaptive_enabled
+                queue_bundle, send_sentinels=not delegation_uses_adaptive
             ),
             name="delegation-loader",
         )
@@ -802,12 +837,22 @@ class PipelineExecutor:
     async def _drain_host_resolution_stage(
         self, queue_bundle: RuntimeQueueSet, tasks: RuntimeRunTasks
     ) -> None:
+        if not self._stage_settings.host_resolution_stage_enabled:
+            if queue_bundle.delegation_to_host_resolution.qsize():
+                raise RuntimeError(
+                    "host resolution disabled but host queue received work"
+                )
+            logger.debug(
+                "Async pipeline host-resolution stage disabled; "
+                "no queue consumers to drain"
+            )
+            return
         if tasks.supervisors.host_resolution is None:
-            for _ in range(self.stage_concurrency.host_resolution):
+            for _ in tasks.host_resolution_tasks:
                 await queue_bundle.delegation_to_host_resolution.put(None)
             logger.debug(
                 "Async pipeline sent host-resolution sentinels count=%d",
-                self.stage_concurrency.host_resolution,
+                len(tasks.host_resolution_tasks),
             )
         logger.debug("Async pipeline waiting for delegation_to_host_resolution drain")
         await self.join_or_raise(
