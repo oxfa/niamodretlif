@@ -60,7 +60,7 @@ class IpLocationCachePartition:
 
 
 def _ip_location_provider_token(ip_location_config: dict[str, Any]) -> str:
-    """Return runtime-only ip location token without persisting environment secrets."""
+    """Return runtime-only IP-location token without persisting environment secrets."""
     config_token = str(ip_location_config.get("token", "")).strip()
     if config_token:
         logger.debug("IpLocation provider token source=config")
@@ -228,7 +228,7 @@ class RuntimeIpLocationService:
         ip_location_config: dict[str, Any],
         host_resolution_result: HostResolutionResult,
     ) -> tuple[str, list[IPLocationResult], Any | None]:
-        """Run or cache-read the optional ip location stage and evaluate its policy."""
+        """Run or cache-read the optional IP-location stage and evaluate its policy."""
         provider_name = str(ip_location_config.get("effective_provider", ""))
         now = utc_now()
         cache_partition = await self._partition_ip_location_cache(

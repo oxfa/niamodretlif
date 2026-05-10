@@ -9,6 +9,7 @@ from domain_pipeline.worker.delegation.lookup import (
     DelegationCheckerRequest,
 )
 from domain_pipeline.worker.dns_query.lookup import DNSCheckerBaseRequest
+from domain_pipeline.worker.dns_query.query_coordinator import DNSQueryCoordinatorState
 from domain_pipeline.worker.host_resolution.lookup import (
     HostResolutionChecker,
     HostResolutionCheckerRequest,
@@ -72,6 +73,11 @@ class RuntimeDNSChecker:
 class RuntimeDNSCheckerFactory:
     """Build DNS checkers from normalized runtime source configuration."""
 
+    def __init__(
+        self, *, coordinator_state: DNSQueryCoordinatorState | None = None
+    ) -> None:
+        self._coordinator_state = coordinator_state
+
     def build_from_checkers(
         self,
         *,
@@ -110,7 +116,8 @@ class RuntimeDNSCheckerFactory:
                     delegation_retry_attempts=int(
                         dns_config.get("delegation", {}).get("retry_attempts", 3)
                     ),
-                )
+                ),
+                coordinator_state=self._coordinator_state,
             ),
             host_resolution_checker=HostResolutionChecker(
                 HostResolutionCheckerRequest(
@@ -119,6 +126,7 @@ class RuntimeDNSCheckerFactory:
                     host_retry_attempts=int(
                         dns_config.get("host_resolution", {}).get("retry_attempts", 3)
                     ),
-                )
+                ),
+                coordinator_state=self._coordinator_state,
             ),
         )

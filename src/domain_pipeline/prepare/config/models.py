@@ -66,7 +66,7 @@ class IpLocationMatchList(StrictModel):
 
 
 class LocationPolicyConfig(StrictModel):
-    """IpLocationlocation policy settings."""
+    """IP-location policy settings."""
 
     enabled: bool = False
     match_scope: Literal["all_ips", "any_ip"] = "all_ips"
@@ -75,7 +75,7 @@ class LocationPolicyConfig(StrictModel):
 
 
 class IPLocationConfig(StrictModel):
-    """Source or default ip location configuration."""
+    """Source or default IP-location configuration."""
 
     enabled: bool = False
     timeout: float = 5.0

@@ -60,26 +60,88 @@ class AdaptiveRetirementResult:
 
 
 @dataclasses.dataclass(frozen=True)
-# Adaptive decisions need these scalar fields in debug logs and tests.
-# pylint: disable=too-many-instance-attributes
-class AdaptiveDNSPressureState:
-    """Stage-scoped DNS provider capacity state used by adaptive decisions."""
+class AdaptiveDecisionLogTiming:
+    """Busy and idle durations observed for one adaptive decision."""
+
+    busy_seconds: float
+    idle_seconds: float
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDecisionPressureLogContext:
+    """DNS pressure fields attached to one adaptive decision log entry."""
+
+    summary: str = ""
+    usable_parallelism: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDecisionWorkerLogContext:
+    """Worker lifecycle details attached to one adaptive decision log entry."""
+
+    active_before: int | None = None
+    created_task_names: tuple[str, ...] = ()
+    retirement: AdaptiveRetirementResult | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDecisionLogContext:
+    """Operator-facing context for one adaptive decision log entry."""
+
+    timing: AdaptiveDecisionLogTiming
+    pressure: AdaptiveDecisionPressureLogContext = dataclasses.field(
+        default_factory=AdaptiveDecisionPressureLogContext
+    )
+    workers: AdaptiveDecisionWorkerLogContext = dataclasses.field(
+        default_factory=AdaptiveDecisionWorkerLogContext
+    )
+    now: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDNSPressureFlags:
+    """Boolean DNS pressure gates used by adaptive decisions."""
 
     any_provider_pressure: bool = False
     stage_pressure: bool = False
     capacity_available: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDNSProviderCounts:
+    """Provider counts behind one DNS pressure snapshot."""
+
     provider_count: int = 0
     usable_provider_count: int = 0
     pressured_provider_count: int = 0
     constrained_provider_count: int = 0
+
+
+@dataclasses.dataclass(frozen=True)
+class AdaptiveDNSPressureState:
+    """Stage-scoped DNS provider capacity state used by adaptive decisions."""
+
+    flags: AdaptiveDNSPressureFlags = dataclasses.field(
+        default_factory=AdaptiveDNSPressureFlags
+    )
+    providers: AdaptiveDNSProviderCounts = dataclasses.field(
+        default_factory=AdaptiveDNSProviderCounts
+    )
     usable_parallelism: int | None = None
     summary: str = "unlimited"
 
 
 @dataclasses.dataclass(frozen=True)
-# Snapshot fields intentionally mirror the decision inputs instead of hiding
-# blockers inside an opaque mapping.
-# pylint: disable=too-many-instance-attributes
+class AdaptiveDecisionDNSContext:
+    """DNS capacity context inspected by the adaptive decision engine."""
+
+    capacity_available: bool = True
+    stage_pressure: bool = False
+    any_provider_pressure: bool = False
+    usable_parallelism: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class AdaptiveDecisionSnapshot:
     """Current stage state inspected by the adaptive decision engine."""
 
@@ -87,10 +149,9 @@ class AdaptiveDecisionSnapshot:
     active_count: int
     backlog: int
     consumer_states: tuple[BusyStateSnapshot, ...]
-    dns_capacity_available: bool = True
-    dns_stage_pressure: bool = False
-    dns_any_provider_pressure: bool = False
-    dns_usable_parallelism: int | None = None
+    dns: AdaptiveDecisionDNSContext = dataclasses.field(
+        default_factory=AdaptiveDecisionDNSContext
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,7 +171,7 @@ class AdaptiveStageDecisionEngine:
         if snapshot.active_count > self.minimum:
             scale_down = self._scale_down_count(snapshot)
             if scale_down:
-                reason = "dns_stage_pressure" if snapshot.dns_stage_pressure else "idle"
+                reason = "dns_stage_pressure" if snapshot.dns.stage_pressure else "idle"
                 return AdaptiveStageDecision(0, scale_down, reason)
         blocker = self._scale_up_blocker(snapshot)
         if blocker is not None:
@@ -125,18 +186,18 @@ class AdaptiveStageDecisionEngine:
 
     def _target_active_count(self, snapshot: AdaptiveDecisionSnapshot) -> int:
         """Return the DNS-capacity-bounded active consumer target."""
-        if snapshot.dns_usable_parallelism is None:
+        if snapshot.dns.usable_parallelism is None:
             return self.cap
-        return min(self.cap, max(self.minimum, snapshot.dns_usable_parallelism))
+        return min(self.cap, max(self.minimum, snapshot.dns.usable_parallelism))
 
     def _scale_up_blocker(self, snapshot: AdaptiveDecisionSnapshot) -> str | None:
         """Return the stable reason scale-up is blocked, if any."""
         reason = None
         if snapshot.backlog <= 0:
             reason = "queue_empty"
-        elif snapshot.dns_stage_pressure:
+        elif snapshot.dns.stage_pressure:
             reason = "dns_stage_pressure"
-        elif not snapshot.dns_capacity_available:
+        elif not snapshot.dns.capacity_available:
             reason = "dns_capacity_unavailable"
         elif snapshot.active_count >= self._target_active_count(snapshot):
             reason = "at_dns_parallelism_target"
@@ -162,7 +223,7 @@ class AdaptiveStageDecisionEngine:
 
     def _scale_down_count(self, snapshot: AdaptiveDecisionSnapshot) -> int:
         """Return idle consumer retirement count for this tick."""
-        if snapshot.backlog > 0 and not snapshot.dns_stage_pressure:
+        if snapshot.backlog > 0 and not snapshot.dns.stage_pressure:
             return 0
         idle_count = 0
         for state in snapshot.consumer_states:
@@ -191,22 +252,38 @@ class AdaptiveStageSupervisorRequest:
 
 
 @dataclasses.dataclass
-# Handles and counters are kept together so the supervisor can log one summary.
-# pylint: disable=too-many-instance-attributes
-class AdaptiveStageSupervisorState:
-    """Mutable task counters and task handles owned by a supervisor."""
+class AdaptiveStageSupervisorCounters:
+    """Mutable lifecycle and decision counters owned by a supervisor."""
 
-    tasks: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
-    monitor_task: asyncio.Task[None] | None = None
     created: int = 0
     retired: int = 0
     max_active: int = 0
     ticks: int = 0
     scale_up_decisions: int = 0
     scale_down_decisions: int = 0
+
+
+@dataclasses.dataclass
+class AdaptiveStageBlockerLogState:
+    """Mutable blocker-log throttle state owned by a supervisor."""
+
     blocked_decisions: Counter[str] = dataclasses.field(default_factory=Counter)
     last_logged_blocker: str | None = None
     last_blocker_log_at: float = 0.0
+
+
+@dataclasses.dataclass
+class AdaptiveStageSupervisorState:
+    """Mutable task handles, counters, and blocker-log state."""
+
+    tasks: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
+    monitor_task: asyncio.Task[None] | None = None
+    counters: AdaptiveStageSupervisorCounters = dataclasses.field(
+        default_factory=AdaptiveStageSupervisorCounters
+    )
+    blocker_log: AdaptiveStageBlockerLogState = dataclasses.field(
+        default_factory=AdaptiveStageBlockerLogState
+    )
 
 
 class AdaptiveStageSupervisor:
@@ -290,13 +367,13 @@ class AdaptiveStageSupervisor:
             "ticks=%d scale_up_decisions=%d scale_down_decisions=%d "
             "blocked_decisions=%s",
             self.stage_name,
-            self.state.created,
-            self.state.retired,
-            self.state.max_active,
-            self.state.ticks,
-            self.state.scale_up_decisions,
-            self.state.scale_down_decisions,
-            dict(self.state.blocked_decisions),
+            self.state.counters.created,
+            self.state.counters.retired,
+            self.state.counters.max_active,
+            self.state.counters.ticks,
+            self.state.counters.scale_up_decisions,
+            self.state.counters.scale_down_decisions,
+            dict(self.state.blocker_log.blocked_decisions),
         )
 
     async def cancel(self) -> None:
@@ -319,13 +396,15 @@ class AdaptiveStageSupervisor:
 
     def create_consumer(self, *, reason: str = "manual") -> asyncio.Task[None]:
         """Create one stage consumer task."""
-        self.state.created += 1
+        self.state.counters.created += 1
         task = asyncio.create_task(
             self.task_factory(),
-            name=f"{self.stage_name}-adaptive-consumer-{self.state.created}",
+            name=f"{self.stage_name}-adaptive-consumer-{self.state.counters.created}",
         )
         self.state.tasks.append(task)
-        self.state.max_active = max(self.state.max_active, len(self._active_tasks()))
+        self.state.counters.max_active = max(
+            self.state.counters.max_active, len(self._active_tasks())
+        )
         logger.debug(
             "Adaptive stage consumer created stage=%s reason=%s task=%s "
             "active=%d created=%d",
@@ -333,7 +412,7 @@ class AdaptiveStageSupervisor:
             reason,
             task.get_name(),
             len(self._active_tasks()),
-            self.state.created,
+            self.state.counters.created,
         )
         return task
 
@@ -347,17 +426,19 @@ class AdaptiveStageSupervisor:
             now = time.monotonic()
             snapshots = self.stage_snapshots()
             pressure = self.dns_pressure_state()
-            self.state.ticks += 1
+            self.state.counters.ticks += 1
             decision = self.decision_engine.decide(
                 AdaptiveDecisionSnapshot(
                     now=now,
                     active_count=len(active_tasks),
                     backlog=self.queue.qsize(),
                     consumer_states=snapshots,
-                    dns_capacity_available=pressure.capacity_available,
-                    dns_stage_pressure=pressure.stage_pressure,
-                    dns_any_provider_pressure=pressure.any_provider_pressure,
-                    dns_usable_parallelism=pressure.usable_parallelism,
+                    dns=AdaptiveDecisionDNSContext(
+                        capacity_available=pressure.flags.capacity_available,
+                        stage_pressure=pressure.flags.stage_pressure,
+                        any_provider_pressure=pressure.flags.any_provider_pressure,
+                        usable_parallelism=pressure.usable_parallelism,
+                    ),
                 )
             )
             self._record_decision(decision)
@@ -374,14 +455,22 @@ class AdaptiveStageSupervisor:
                 )
             self.log_decision(
                 decision,
-                busy_seconds=self._busy_seconds(snapshots, now),
-                idle_seconds=self._idle_seconds(snapshots, now),
-                pressure_summary=pressure.summary,
-                usable_parallelism=pressure.usable_parallelism,
-                active_before=active_before,
-                created_task_names=tuple(created_task_names),
-                retirement=retirement,
-                now=now,
+                AdaptiveDecisionLogContext(
+                    timing=AdaptiveDecisionLogTiming(
+                        busy_seconds=self._busy_seconds(snapshots, now),
+                        idle_seconds=self._idle_seconds(snapshots, now),
+                    ),
+                    pressure=AdaptiveDecisionPressureLogContext(
+                        summary=pressure.summary,
+                        usable_parallelism=pressure.usable_parallelism,
+                    ),
+                    workers=AdaptiveDecisionWorkerLogContext(
+                        active_before=active_before,
+                        created_task_names=tuple(created_task_names),
+                        retirement=retirement,
+                    ),
+                    now=now,
+                ),
             )
 
     def _retire_idle_consumers(
@@ -406,7 +495,7 @@ class AdaptiveStageSupervisor:
                 continue
             self.busy_state.mark_stopping(task)
             task.cancel()
-            self.state.retired += 1
+            self.state.counters.retired += 1
             retired_task_names.append(task.get_name())
             logger.debug(
                 "Adaptive stage consumer retired stage=%s reason=%s task=%s "
@@ -415,7 +504,7 @@ class AdaptiveStageSupervisor:
                 reason,
                 task.get_name(),
                 len(self._active_tasks()),
-                self.state.retired,
+                self.state.counters.retired,
                 self.queue.qsize(),
             )
             if len(retired_task_names) >= count:
@@ -429,34 +518,35 @@ class AdaptiveStageSupervisor:
     def _record_decision(self, decision: AdaptiveStageDecision) -> None:
         """Update per-supervisor decision counters for final summaries."""
         if decision.scale_up:
-            self.state.scale_up_decisions += 1
+            self.state.counters.scale_up_decisions += 1
             return
         if decision.scale_down:
-            self.state.scale_down_decisions += 1
+            self.state.counters.scale_down_decisions += 1
             return
         if self._is_blocked_reason(decision.reason):
-            self.state.blocked_decisions[decision.reason] += 1
+            self.state.blocker_log.blocked_decisions[decision.reason] += 1
 
-    def log_decision(  # pylint: disable=too-many-arguments
+    def log_decision(
         self,
         decision: AdaptiveStageDecision,
-        *,
-        busy_seconds: float,
-        idle_seconds: float,
-        pressure_summary: str = "",
-        usable_parallelism: int | None = None,
-        active_before: int | None = None,
-        created_task_names: tuple[str, ...] = (),
-        retirement: AdaptiveRetirementResult | None = None,
-        now: float | None = None,
+        context: AdaptiveDecisionLogContext,
     ) -> None:
         """Log operator context for one non-stable adaptive decision."""
-        pressure = pressure_summary or "unreported"
+        timing = context.timing
+        pressure_context = context.pressure
+        worker_context = context.workers
+        pressure = pressure_context.summary or "unreported"
         parallelism = (
-            "unlimited" if usable_parallelism is None else str(usable_parallelism)
+            "unlimited"
+            if pressure_context.usable_parallelism is None
+            else str(pressure_context.usable_parallelism)
         )
-        before = len(self._active_tasks()) if active_before is None else active_before
-        retirement_result = retirement or AdaptiveRetirementResult(
+        before = (
+            len(self._active_tasks())
+            if worker_context.active_before is None
+            else worker_context.active_before
+        )
+        retirement_result = worker_context.retirement or AdaptiveRetirementResult(
             requested=decision.scale_down
         )
         if decision.scale_up:
@@ -468,22 +558,22 @@ class AdaptiveStageSupervisor:
                 self.stage_name,
                 decision.reason,
                 decision.scale_up,
-                len(created_task_names),
+                len(worker_context.created_task_names),
                 before,
                 len(self._active_tasks()),
                 self.decision_engine.minimum,
                 self.decision_engine.cap,
                 self.queue.qsize(),
-                busy_seconds,
+                timing.busy_seconds,
                 parallelism,
                 pressure,
-                self._format_task_names(created_task_names),
+                self._format_task_names(worker_context.created_task_names),
             )
         if decision.scale_down:
             logger.debug(
                 "Adaptive stage scale-down stage=%s reason=%s requested=%d retired=%d "
-                "active_before=%d active_after=%d min=%d cap=%d backlog=%d "
-                "idle_seconds=%.3f eligible_idle=%d unfulfilled=%d "
+                "active_before=%d active_after_cancel_requests=%d min=%d cap=%d "
+                "backlog=%d idle_seconds=%.3f eligible_idle=%d unfulfilled=%d "
                 "usable_parallelism=%s pressure=%s retired_tasks=%s",
                 self.stage_name,
                 decision.reason,
@@ -494,7 +584,7 @@ class AdaptiveStageSupervisor:
                 self.decision_engine.minimum,
                 self.decision_engine.cap,
                 self.queue.qsize(),
-                idle_seconds,
+                timing.idle_seconds,
                 retirement_result.eligible_idle,
                 retirement_result.unfulfilled,
                 parallelism,
@@ -502,7 +592,8 @@ class AdaptiveStageSupervisor:
                 self._format_task_names(retirement_result.retired_task_names),
             )
         if self._is_blocked_reason(decision.reason) and self._should_log_blocker(
-            decision.reason, time.monotonic() if now is None else now
+            decision.reason,
+            time.monotonic() if context.now is None else context.now,
         ):
             logger.debug(
                 "Adaptive stage decision stage=%s action=blocked reason=%s "
@@ -514,8 +605,8 @@ class AdaptiveStageSupervisor:
                 self.decision_engine.minimum,
                 self.decision_engine.cap,
                 self.queue.qsize(),
-                busy_seconds,
-                idle_seconds,
+                timing.busy_seconds,
+                timing.idle_seconds,
                 parallelism,
                 pressure,
             )
@@ -527,12 +618,13 @@ class AdaptiveStageSupervisor:
 
     def _should_log_blocker(self, reason: str, now: float) -> bool:
         """Return whether a blocked decision should be logged this tick."""
-        if self.state.last_logged_blocker != reason:
-            self.state.last_logged_blocker = reason
-            self.state.last_blocker_log_at = now
+        blocker_log = self.state.blocker_log
+        if blocker_log.last_logged_blocker != reason:
+            blocker_log.last_logged_blocker = reason
+            blocker_log.last_blocker_log_at = now
             return True
-        if now - self.state.last_blocker_log_at >= BLOCKER_LOG_INTERVAL_SECONDS:
-            self.state.last_blocker_log_at = now
+        if now - blocker_log.last_blocker_log_at >= BLOCKER_LOG_INTERVAL_SECONDS:
+            blocker_log.last_blocker_log_at = now
             return True
         return False
 

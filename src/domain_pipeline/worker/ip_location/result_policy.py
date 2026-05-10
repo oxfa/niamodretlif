@@ -1,4 +1,4 @@
-"""IpLocation result-code policy helpers owned by the worker ip location stage."""
+"""IP-location result-code policy helpers owned by the worker IP-location stage."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def ip_location_policy_result_code(
     results: list[IPLocationResult],
     policy_payload: dict[str, Any],
 ) -> str:
-    """Return the terminal ip location result code for one host."""
+    """Return the terminal IP-location result code for one host."""
     if policy is None:
         return PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED
     if policy.status == "accepted":

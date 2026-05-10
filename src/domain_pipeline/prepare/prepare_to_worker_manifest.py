@@ -195,14 +195,14 @@ class WorkerRuntimeFetchConfig(PrepareWorkerModel):
 
 
 class WorkerRuntimeIpLocationMatchList(PrepareWorkerModel):
-    """IpLocation include/exclude country and region values in worker manifests."""
+    """IP-location include/exclude country and region values in worker manifests."""
 
     countries: list[str] = Field(default_factory=list)
     regions: list[str] = Field(default_factory=list)
 
 
 class WorkerRuntimeLocationPolicyConfig(PrepareWorkerModel):
-    """IpLocation policy config persisted in worker manifests."""
+    """IP-location policy config persisted in worker manifests."""
 
     enabled: bool = False
     match_scope: Literal["all_ips", "any_ip"] = "all_ips"
@@ -215,7 +215,7 @@ class WorkerRuntimeLocationPolicyConfig(PrepareWorkerModel):
 
 
 class WorkerRuntimeIPLocationConfig(PrepareWorkerModel):
-    """Effective ip location settings persisted after config normalization."""
+    """Effective IP-location settings persisted after config normalization."""
 
     enabled: bool = False
     timeout: float = 5.0

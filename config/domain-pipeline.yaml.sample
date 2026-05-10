@@ -16,17 +16,17 @@ version: 2
 # exist, or when NS returns NODATA and the registrable domain is proven to have
 # same-owner SOA, either from the original NS negative-response authority
 # section or from a separate delegation SOA query. If delegation is actionable,
-# manual_filter_pass and manual_add skip host-resolution and ip location and route to
-# filtered. manual_add takes precedence over matching source entries for the
-# same host. If delegation is not actionable, they route to unactionable or
-# review using the normal delegation result. Unmatched manual_add entries
-# require all enabled sources to share
-# delegation/output behavior. Unmatched manual_filter_pass entries route to
-# review without delegation or host-resolution lookup because they are operator
-# reconciliation rows. manual_filter_out is exact-host-only, takes precedence
-# over matching source entries, bypasses delegation, host resolution, and ip_location
+# manual_filter_pass and manual_add skip host-resolution and IP-location and
+# route to filtered. manual_add takes precedence over matching source entries
+# for the same host. If delegation is not actionable, they route to
+# unactionable or review using the normal delegation result. Unmatched
+# manual_add entries require all enabled sources to share delegation/output
+# behavior. Unmatched manual_filter_pass entries route to review without
+# delegation or host-resolution lookup because they are operator reconciliation
+# rows. manual_filter_out is exact-host-only, takes precedence over matching
+# source entries, bypasses delegation, host resolution, and ip_location
 # entirely, and routes to review. Other public suffix inputs are prepare-owned
-# review/audit rows because there is no registrable domain to query.
+# terminal rows because there is no registrable domain to query.
 #
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.
@@ -36,7 +36,7 @@ version: 2
 # Duplicate host collapse is keyed by final host and compares delegation,
 # host_resolution, ip_location, and output behavior across enabled sources. For
 # manual_add-matched hosts, only delegation/output behavior must match because
-# manual_add bypasses host-resolution and ip location after delegation passes.
+# manual_add bypasses host-resolution and IP-location after delegation passes.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
@@ -152,16 +152,16 @@ defaults:
     retry_attempts: 3
 
   ip_location:
-    # Enable ip location lookups and evaluate the resolved IPs against the policy block
-    # below. IpLocation only runs after delegation passes and host_resolution passes
+    # Enable IP-location lookups and evaluate the resolved IPs against the policy block
+    # below. IP-location only runs after delegation passes and host_resolution passes
     # when host_resolution is enabled.
     enabled: false
     # Runtime provider selection is inferred from the policy below:
     # - no region rules -> ipinfo_lite
     # - any region rules -> geojs
-    # Per-request timeout, in seconds, for ip location lookups.
+    # Per-request timeout, in seconds, for IP-location lookups.
     timeout: 5.0
-    # Number of days to keep successful usable ip location results cached. Provider
+    # Number of days to keep successful usable IP-location results cached. Provider
     # failures, invalid payloads, rate limits, exceptions, and non-usable
     # results are not cached.
     cache_ttl_days: 7
@@ -182,8 +182,8 @@ defaults:
         regions: []
 
   output:
-    # Output directory for files written by the pipeline.
-    # For a config named config/domain-pipeline.yaml, the runtime writes:
+    # Output directory for final aggregate publish files.
+    # For a config named config/domain-pipeline.yaml, aggregation writes:
     # - output/filtered/domain-pipeline.txt
     # - output/unactionable/domain-pipeline.txt
     # - output/review/domain-pipeline.csv
@@ -192,7 +192,7 @@ defaults:
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub
   # matrix worker. Delegation consumes registrable-domain root work and fans
-  # results out to host rows; host_resolution and ip location stay host-level.
+  # results out to host rows; host_resolution and IP-location stay host-level.
   # Delegation and enabled host_resolution stages can adapt between minimums
   # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
   # usable provider capacity; one pressured provider does not by itself block

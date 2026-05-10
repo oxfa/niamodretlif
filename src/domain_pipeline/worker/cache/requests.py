@@ -121,7 +121,7 @@ class HostResolutionCacheWriteRequest:
 
 @dataclass(frozen=True)
 class IpLocationCacheWriteRequest:
-    """Write request for the ip location cache table."""
+    """Write request for the IP-location cache table."""
 
     identity: IpLocationCacheIdentity
     evidence: IpLocationCacheEvidence

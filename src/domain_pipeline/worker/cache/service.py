@@ -90,7 +90,7 @@ class AsyncCacheService:
     async def get_fresh_ip_location_with_source(
         self, provider: str, ip: str, now: Any
     ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
-        """Return a fresh ip location record and cache-hit source."""
+        """Return a fresh IP-location record and cache-hit source."""
         return await asyncio.to_thread(
             self._get_fresh_ip_location_sync_with_source, provider, ip, now
         )
@@ -237,7 +237,7 @@ def build_host_resolution_cache_writer(path: Path) -> CacheWriteDispatcher:
 
 
 def build_ip_location_cache_writer(path: Path) -> CacheWriteDispatcher:
-    """Build the async writer responsible for ip location cache rows."""
+    """Build the async writer responsible for IP-location cache rows."""
     return CacheWriteDispatcher(path, _write_ip_location)
 
 

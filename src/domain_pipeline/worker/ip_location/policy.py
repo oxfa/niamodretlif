@@ -1,4 +1,4 @@
-"""IpLocation config validation policy owner."""
+"""IP-location config validation policy owner."""
 
 from __future__ import annotations
 
@@ -20,23 +20,23 @@ def is_iso_subdivision_code(value: str) -> bool:
 
 
 class IPLocationConfigPolicy:
-    """Validate ip location provider selection, credentials, and region rules."""
+    """Validate IP-location provider selection, credentials, and region rules."""
 
     def requires_region_lookup(self, ip_location_payload: dict[str, Any]) -> bool:
-        """Return whether the policy requires region-capable ip location lookup."""
+        """Return whether the policy requires region-capable IP-location lookup."""
         policy = ip_location_payload.get("policy", {})
         include = policy.get("include", {})
         exclude = policy.get("exclude", {})
         return bool(include.get("regions", []) or exclude.get("regions", []))
 
     def effective_provider_name(self, ip_location_payload: dict[str, Any]) -> str:
-        """Return the effective ip location provider for one normalized ip location payload."""
+        """Return the effective IP-location provider for one normalized payload."""
         if self.requires_region_lookup(ip_location_payload):
             return IP_LOCATION_PROVIDER_GEOJS
         return IP_LOCATION_PROVIDER_IPINFO_LITE
 
     def inject_effective_fields(self, ip_location_payload: dict[str, Any]) -> None:
-        """Inject effective ip location fields into a normalized ip location payload."""
+        """Inject effective IP-location fields into a normalized payload."""
         ip_location_payload["requires_region_lookup"] = self.requires_region_lookup(
             ip_location_payload
         )

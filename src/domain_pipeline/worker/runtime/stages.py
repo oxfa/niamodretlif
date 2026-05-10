@@ -153,7 +153,7 @@ class HostResolutionStage:
         self.runtime = runtime
 
     async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume host-resolution work and route review, filtered, or ip location cases."""
+        """Consume host-resolution work and route review, filtered, or IP-location cases."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
                 work_item = await queue_bundle.delegation_to_host_resolution.get()
@@ -216,13 +216,13 @@ class HostResolutionStage:
 
 
 class IpLocationStage:
-    """Own ip location queue consumption and terminal policy routing."""
+    """Own IP-location queue consumption and terminal policy routing."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
     async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume ip location work and emit terminal policy results."""
+        """Consume IP-location work and emit terminal policy results."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
                 work_item = await queue_bundle.host_resolution_to_ip_location.get()

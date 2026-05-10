@@ -13,7 +13,11 @@ from domain_pipeline.worker.dns_query.query_coordinator import (
     DNSProviderRateLimit,
     provider_for_nameserver,
 )
-from domain_pipeline.worker.runtime.adaptive import AdaptiveDNSPressureState
+from domain_pipeline.worker.runtime.adaptive import (
+    AdaptiveDNSPressureFlags,
+    AdaptiveDNSPressureState,
+    AdaptiveDNSProviderCounts,
+)
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 
 
@@ -108,10 +112,14 @@ def capacity_state_for_groups(
     )
     if not matched_snapshots:
         return AdaptiveDNSPressureState(
-            stage_pressure=True,
-            capacity_available=False,
-            provider_count=len(groups),
-            constrained_provider_count=len(groups),
+            flags=AdaptiveDNSPressureFlags(
+                stage_pressure=True,
+                capacity_available=False,
+            ),
+            providers=AdaptiveDNSProviderCounts(
+                provider_count=len(groups),
+                constrained_provider_count=len(groups),
+            ),
             usable_parallelism=0,
             summary=f"no_provider_snapshots provider_groups={len(groups)}",
         )
@@ -126,13 +134,17 @@ def capacity_state_for_groups(
     )
     constrained_provider_count = provider_count - usable_provider_count
     return AdaptiveDNSPressureState(
-        any_provider_pressure=pressured_provider_count > 0,
-        stage_pressure=usable_provider_count == 0,
-        capacity_available=usable_provider_count > 0,
-        provider_count=provider_count,
-        usable_provider_count=usable_provider_count,
-        pressured_provider_count=pressured_provider_count,
-        constrained_provider_count=constrained_provider_count,
+        flags=AdaptiveDNSPressureFlags(
+            any_provider_pressure=pressured_provider_count > 0,
+            stage_pressure=usable_provider_count == 0,
+            capacity_available=usable_provider_count > 0,
+        ),
+        providers=AdaptiveDNSProviderCounts(
+            provider_count=provider_count,
+            usable_provider_count=usable_provider_count,
+            pressured_provider_count=pressured_provider_count,
+            constrained_provider_count=constrained_provider_count,
+        ),
         usable_parallelism=usable_parallelism,
         summary=_capacity_state_summary(
             snapshots=matched_snapshots,

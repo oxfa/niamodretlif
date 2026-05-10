@@ -91,7 +91,12 @@ def prepare_worker_manifest_relative_path(*, batch_id: str, worker_id: str) -> P
 
 def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutputSpec:
     """Return manifest-persisted aggregate paths derived during preparation."""
-    output_directory = Path(str(config["sources"][0]["output"]["directory"]))
+    enabled_sources = [
+        source for source in config["sources"] if source.get("enabled", True)
+    ]
+    if not enabled_sources:
+        raise ValueError("config must include at least one enabled source")
+    output_directory = Path(str(enabled_sources[0]["output"]["directory"]))
     config_name = str(config["config_name"])
     aggregate_paths = _path_layout().aggregate_paths(
         config_name=config_name,

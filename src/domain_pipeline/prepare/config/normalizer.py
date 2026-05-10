@@ -13,7 +13,7 @@ from domain_pipeline.worker.ip_location.policy import IPLocationConfigPolicy
 
 
 class ConfigNormalizer:
-    """Merge defaults, source overrides, cache defaults, and ip location effective fields."""
+    """Merge defaults, source overrides, cache defaults, and IP-location effective fields."""
 
     def __init__(
         self, *, ip_location_policy: IPLocationConfigPolicy | None = None

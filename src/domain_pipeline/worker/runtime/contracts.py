@@ -75,7 +75,7 @@ class HostResolutionWorkItem:
 
 @dataclass(frozen=True)
 class IpLocationWorkItem:
-    """Item emitted by host resolution for ip location processing."""
+    """Item emitted by host resolution for IP-location processing."""
 
     parsed: ParsedHostItem
     delegation_result: DelegationResult

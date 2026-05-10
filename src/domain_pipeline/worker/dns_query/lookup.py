@@ -13,6 +13,8 @@ from domain_pipeline.worker.dns_query.query_coordinator import (
     DNSProviderRateLimit,
     DNSQueryCoordinatorBase,
     DNSQueryCoordinatorConfig,
+    DNSQueryCoordinatorOptions,
+    DNSQueryCoordinatorState,
     DNSQueryCoordinatorRegistry,
     DNSQueryExhaustedError,
     DNSCoordinatorRegistryRequest,
@@ -294,6 +296,11 @@ class DNSQueryService:
 
     DEFAULT_NAMESERVERS: tuple[str, ...] = ()
 
+    def __init__(
+        self, *, coordinator_state: DNSQueryCoordinatorState | None = None
+    ) -> None:
+        self._coordinator_state = coordinator_state
+
     def stage_dns_base_config(
         self,
         *,
@@ -361,7 +368,8 @@ class DNSQueryService:
                 retry_backoff_base_seconds=float(
                     dns_profile.get("retry_backoff_base_seconds", 1.0)
                 ),
-            )
+            ),
+            coordinator_state=self._coordinator_state,
         )
 
     def single_resolver_coordinator(
@@ -386,7 +394,9 @@ class DNSQueryService:
             ],
             resolver_key=resolver_key,
             config=query_config,
-            retry_backoff_base_seconds=1.0,
+            options=DNSQueryCoordinatorOptions(
+                coordinator_state=self._coordinator_state
+            ),
         )
 
     def resolve_with_coordinator(
