@@ -41,6 +41,25 @@ class AdaptiveStageDecision:
 
 
 @dataclasses.dataclass(frozen=True)
+class AdaptiveRetirementResult:
+    """Observed result of one idle-consumer retirement attempt."""
+
+    requested: int = 0
+    eligible_idle: int = 0
+    retired_task_names: tuple[str, ...] = ()
+
+    @property
+    def retired(self) -> int:
+        """Return the number of consumers actually retired."""
+        return len(self.retired_task_names)
+
+    @property
+    def unfulfilled(self) -> int:
+        """Return requested retirements that could not be applied."""
+        return max(self.requested - self.retired, 0)
+
+
+@dataclasses.dataclass(frozen=True)
 # Adaptive decisions need these scalar fields in debug logs and tests.
 # pylint: disable=too-many-instance-attributes
 class AdaptiveDNSPressureState:
@@ -298,7 +317,7 @@ class AdaptiveStageSupervisor:
         for task in self.state.tasks:
             raise_task_exception(task)
 
-    def create_consumer(self, *, reason: str = "manual") -> None:
+    def create_consumer(self, *, reason: str = "manual") -> asyncio.Task[None]:
         """Create one stage consumer task."""
         self.state.created += 1
         task = asyncio.create_task(
@@ -316,6 +335,7 @@ class AdaptiveStageSupervisor:
             len(self._active_tasks()),
             self.state.created,
         )
+        return task
 
     async def _monitor(self) -> None:
         """Periodically apply adaptive scale decisions."""
@@ -341,33 +361,53 @@ class AdaptiveStageSupervisor:
                 )
             )
             self._record_decision(decision)
+            active_before = len(active_tasks)
+            created_task_names = []
             for _ in range(decision.scale_up):
-                self.create_consumer(reason=decision.reason)
+                created_task_names.append(
+                    self.create_consumer(reason=decision.reason).get_name()
+                )
+            retirement = AdaptiveRetirementResult()
             if decision.scale_down:
-                self._retire_idle_consumers(decision.scale_down, reason=decision.reason)
+                retirement = self._retire_idle_consumers(
+                    decision.scale_down, reason=decision.reason
+                )
             self.log_decision(
                 decision,
                 busy_seconds=self._busy_seconds(snapshots, now),
                 idle_seconds=self._idle_seconds(snapshots, now),
                 pressure_summary=pressure.summary,
                 usable_parallelism=pressure.usable_parallelism,
+                active_before=active_before,
+                created_task_names=tuple(created_task_names),
+                retirement=retirement,
                 now=now,
             )
 
-    def _retire_idle_consumers(self, count: int, *, reason: str) -> None:
+    def _retire_idle_consumers(
+        self, count: int, *, reason: str
+    ) -> AdaptiveRetirementResult:
         """Cancel idle queue-waiting consumers only."""
         snapshots = {
             snapshot.task_name: snapshot for snapshot in self.stage_snapshots()
         }
-        retired = 0
-        for task in self._active_tasks():
+        eligible_tasks = tuple(
+            task
+            for task in self._active_tasks()
+            if (
+                (snapshot := snapshots.get(task.get_name())) is not None
+                and snapshot.reason == BusyReason.QUEUE_WAIT
+            )
+        )
+        retired_task_names = []
+        for task in eligible_tasks:
             snapshot = snapshots.get(task.get_name())
             if snapshot is None or snapshot.reason != BusyReason.QUEUE_WAIT:
                 continue
             self.busy_state.mark_stopping(task)
             task.cancel()
             self.state.retired += 1
-            retired += 1
+            retired_task_names.append(task.get_name())
             logger.debug(
                 "Adaptive stage consumer retired stage=%s reason=%s task=%s "
                 "active=%d retired=%d backlog=%d",
@@ -378,8 +418,13 @@ class AdaptiveStageSupervisor:
                 self.state.retired,
                 self.queue.qsize(),
             )
-            if retired >= count:
+            if len(retired_task_names) >= count:
                 break
+        return AdaptiveRetirementResult(
+            requested=count,
+            eligible_idle=len(eligible_tasks),
+            retired_task_names=tuple(retired_task_names),
+        )
 
     def _record_decision(self, decision: AdaptiveStageDecision) -> None:
         """Update per-supervisor decision counters for final summaries."""
@@ -400,6 +445,9 @@ class AdaptiveStageSupervisor:
         idle_seconds: float,
         pressure_summary: str = "",
         usable_parallelism: int | None = None,
+        active_before: int | None = None,
+        created_task_names: tuple[str, ...] = (),
+        retirement: AdaptiveRetirementResult | None = None,
         now: float | None = None,
     ) -> None:
         """Log operator context for one non-stable adaptive decision."""
@@ -407,33 +455,51 @@ class AdaptiveStageSupervisor:
         parallelism = (
             "unlimited" if usable_parallelism is None else str(usable_parallelism)
         )
+        before = len(self._active_tasks()) if active_before is None else active_before
+        retirement_result = retirement or AdaptiveRetirementResult(
+            requested=decision.scale_down
+        )
         if decision.scale_up:
             logger.debug(
-                "Adaptive stage scale-up stage=%s reason=%s created=%d active=%d "
-                "min=%d cap=%d backlog=%d busy_seconds=%.3f pressure=%s",
+                "Adaptive stage scale-up stage=%s reason=%s requested=%d created=%d "
+                "active_before=%d active_after=%d min=%d cap=%d backlog=%d "
+                "busy_seconds=%.3f usable_parallelism=%s pressure=%s "
+                "created_tasks=%s",
                 self.stage_name,
                 decision.reason,
                 decision.scale_up,
+                len(created_task_names),
+                before,
                 len(self._active_tasks()),
                 self.decision_engine.minimum,
                 self.decision_engine.cap,
                 self.queue.qsize(),
                 busy_seconds,
+                parallelism,
                 pressure,
+                self._format_task_names(created_task_names),
             )
         if decision.scale_down:
             logger.debug(
-                "Adaptive stage scale-down stage=%s reason=%s retired=%d active=%d "
-                "min=%d cap=%d backlog=%d idle_seconds=%.3f pressure=%s",
+                "Adaptive stage scale-down stage=%s reason=%s requested=%d retired=%d "
+                "active_before=%d active_after=%d min=%d cap=%d backlog=%d "
+                "idle_seconds=%.3f eligible_idle=%d unfulfilled=%d "
+                "usable_parallelism=%s pressure=%s retired_tasks=%s",
                 self.stage_name,
                 decision.reason,
-                decision.scale_down,
-                len(self._active_tasks()),
+                retirement_result.requested,
+                retirement_result.retired,
+                before,
+                max(before - retirement_result.retired, 0),
                 self.decision_engine.minimum,
                 self.decision_engine.cap,
                 self.queue.qsize(),
                 idle_seconds,
+                retirement_result.eligible_idle,
+                retirement_result.unfulfilled,
+                parallelism,
                 pressure,
+                self._format_task_names(retirement_result.retired_task_names),
             )
         if self._is_blocked_reason(decision.reason) and self._should_log_blocker(
             decision.reason, time.monotonic() if now is None else now
@@ -469,6 +535,11 @@ class AdaptiveStageSupervisor:
             self.state.last_blocker_log_at = now
             return True
         return False
+
+    @staticmethod
+    def _format_task_names(task_names: tuple[str, ...]) -> str:
+        """Return compact task-name text for lifecycle debug logs."""
+        return ",".join(task_names) if task_names else "none"
 
     def _busy_seconds(
         self, snapshots: tuple[BusyStateSnapshot, ...], now: float
