@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.paths import PathLayout, WorkflowPathLayout
+from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
 from domain_pipeline.prepare.assignment import relative_path
 
 

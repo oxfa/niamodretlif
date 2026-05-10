@@ -4,7 +4,7 @@ from domain_pipeline.prepare.sources.jobs import (
     SourceJob,
     SourceJobFactory,
     SourceLineReader,
-    SourceReader,
+    read_source_lines,
 )
 from domain_pipeline.prepare.sources.parser import (
     DomainListParser,
@@ -21,5 +21,5 @@ __all__ = [
     "SourceJob",
     "SourceJobFactory",
     "SourceLineReader",
-    "SourceReader",
+    "read_source_lines",
 ]

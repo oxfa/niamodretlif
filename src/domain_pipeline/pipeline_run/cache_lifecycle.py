@@ -32,21 +32,97 @@ _DETAIL_MAX_LENGTH = 160
 
 
 @dataclass(frozen=True)
-class CacheLifecycleSnapshot:
-    """One layered cache lifecycle observation rendered into workflow logs."""
+class GitHubCacheLifecycleState:
+    """GitHub cache restore and visible-candidate state."""
 
-    scope: CacheScope
     github_restore_state: GitHubRestoreState
     github_cache_hit_raw: str
     github_visible_candidate_count: int
     github_visible_candidate_page_count: int
     github_visible_candidate_state: VisibleCandidateState
+
+
+@dataclass(frozen=True)
+class LocalCacheLifecycleState:
+    """Local cache file, sidecar, and sqlite usability state."""
+
     db_file_state: DbFileState
     db_size_bytes: int
     sqlite_sidecar_state: SidecarState
     sqlite_check_state: SqliteCheckState
     sqlite_check_detail: str
+
+
+@dataclass(frozen=True)
+class CacheLifecycleSnapshot:
+    """One layered cache lifecycle observation rendered into workflow logs."""
+
+    scope: CacheScope
+    github: GitHubCacheLifecycleState
+    local: LocalCacheLifecycleState
     lifecycle_outcome: LifecycleOutcome
+
+    @property
+    def github_restore_state(self) -> GitHubRestoreState:
+        """Return GitHub actions/cache restore state."""
+        return self.github.github_restore_state
+
+    @property
+    def github_cache_hit_raw(self) -> str:
+        """Return the raw actions/cache cache-hit value."""
+        return self.github.github_cache_hit_raw
+
+    @property
+    def github_visible_candidate_count(self) -> int:
+        """Return total visible candidate count from the GitHub API response."""
+        return self.github.github_visible_candidate_count
+
+    @property
+    def github_visible_candidate_page_count(self) -> int:
+        """Return visible candidates present in the inspected response page."""
+        return self.github.github_visible_candidate_page_count
+
+    @property
+    def github_visible_candidate_state(self) -> VisibleCandidateState:
+        """Return whether GitHub-visible candidates were observed."""
+        return self.github.github_visible_candidate_state
+
+    @property
+    def db_file_state(self) -> DbFileState:
+        """Return whether the local sqlite cache file exists."""
+        return self.local.db_file_state
+
+    @property
+    def db_size_bytes(self) -> int:
+        """Return local sqlite cache file size."""
+        return self.local.db_size_bytes
+
+    @property
+    def sqlite_sidecar_state(self) -> SidecarState:
+        """Return local sqlite WAL/SHM sidecar state."""
+        return self.local.sqlite_sidecar_state
+
+    @property
+    def sqlite_check_state(self) -> SqliteCheckState:
+        """Return sqlite quick-check state."""
+        return self.local.sqlite_check_state
+
+    @property
+    def sqlite_check_detail(self) -> str:
+        """Return sqlite quick-check detail."""
+        return self.local.sqlite_check_detail
+
+
+@dataclass(frozen=True)
+class CacheLifecycleInspectionRequest:
+    """Filesystem inputs for one cache lifecycle inspection."""
+
+    scope: CacheScope
+    cache_hit: str
+    candidate_response_path: Path
+    cache_path: Path
+    wal_path: Path
+    shm_path: Path
 
 
 def github_restore_state(cache_hit: str) -> GitHubRestoreState:
@@ -59,39 +135,37 @@ def github_restore_state(cache_hit: str) -> GitHubRestoreState:
 
 
 def inspect_cache_lifecycle(
-    *,
-    scope: CacheScope,
-    cache_hit: str,
-    candidate_response_path: Path,
-    cache_path: Path,
-    wal_path: Path,
-    shm_path: Path,
+    request: CacheLifecycleInspectionRequest,
 ) -> CacheLifecycleSnapshot:
     """Inspect restore, visible candidate, local file, and sqlite usability state."""
-    restore_state = github_restore_state(cache_hit)
+    restore_state = github_restore_state(request.cache_hit)
     candidate_count, page_count, candidate_state = _candidate_state(
-        candidate_response_path
+        request.candidate_response_path
     )
-    db_state, db_size = _db_file_state(cache_path)
-    sidecar_state = _sidecar_state(wal_path, shm_path)
-    sqlite_state, sqlite_detail = _sqlite_check_state(cache_path, db_state)
+    db_state, db_size = _db_file_state(request.cache_path)
+    sidecar_state = _sidecar_state(request.wal_path, request.shm_path)
+    sqlite_state, sqlite_detail = _sqlite_check_state(request.cache_path, db_state)
     outcome = _lifecycle_outcome(
         restore_state=restore_state,
         candidate_state=candidate_state,
         sqlite_state=sqlite_state,
     )
     return CacheLifecycleSnapshot(
-        scope=scope,
-        github_restore_state=restore_state,
-        github_cache_hit_raw=cache_hit,
-        github_visible_candidate_count=candidate_count,
-        github_visible_candidate_page_count=page_count,
-        github_visible_candidate_state=candidate_state,
-        db_file_state=db_state,
-        db_size_bytes=db_size,
-        sqlite_sidecar_state=sidecar_state,
-        sqlite_check_state=sqlite_state,
-        sqlite_check_detail=sqlite_detail,
+        scope=request.scope,
+        github=GitHubCacheLifecycleState(
+            github_restore_state=restore_state,
+            github_cache_hit_raw=request.cache_hit,
+            github_visible_candidate_count=candidate_count,
+            github_visible_candidate_page_count=page_count,
+            github_visible_candidate_state=candidate_state,
+        ),
+        local=LocalCacheLifecycleState(
+            db_file_state=db_state,
+            db_size_bytes=db_size,
+            sqlite_sidecar_state=sidecar_state,
+            sqlite_check_state=sqlite_state,
+            sqlite_check_detail=sqlite_detail,
+        ),
         lifecycle_outcome=outcome,
     )
 

@@ -25,10 +25,11 @@ defaults:
     # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled. Delegation
     # starts with NS queries and uses separate SOA fallback queries after
     # NS NODATA. SOA fallback stays in delegation because it determines
-    # registrable-domain actionability, not host A/AAAA resolution. Resolver
-    # weights are stage-local traffic preference, not rate control.
-    # Per-provider qps_per_worker values are worker-local project safety caps,
-    # not provider-published guarantees.
+    # registrable-domain actionability, not host A/AAAA resolution. Stage
+    # resolver entries can omit weight on every entry for equal first-attempt
+    # share, or set weight on every entry for explicit stage-local traffic
+    # preference. Weight is not rate control. Per-provider qps_per_worker values
+    # are worker-local project safety caps, not provider-published guarantees.
     default_resolvers: []
     timeout: 25.0
     # Retryable DNS timeout/SERVFAIL waits use this exponential backoff base,
@@ -41,19 +42,7 @@ defaults:
           qps_per_worker: 60.0
           burst: 10
           max_pending: 32
-        google_public_dns:
-          qps_per_worker: 30.0
-          burst: 5
-          max_pending: 16
-        quad9_ecs_public_dns:
-          qps_per_worker: 30.0
-          burst: 5
-          max_pending: 16
         cloudflare_public_dns:
-          qps_per_worker: 12.0
-          burst: 2
-          max_pending: 8
-        opendns_public_dns:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
@@ -62,10 +51,6 @@ defaults:
           burst: 2
           max_pending: 8
         dns_sb_public_dns:
-          qps_per_worker: 12.0
-          burst: 2
-          max_pending: 8
-        unrecognized_resolver:
           qps_per_worker: 12.0
           burst: 2
           max_pending: 8
@@ -88,7 +73,6 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: false
-    retry_attempts: 3
 
   output:
     directory: output
@@ -122,11 +106,6 @@ cache:
     # Stable unactionable delegation, including explicitly checked NS-NODATA
     # with SOA absent.
     delegation_unactionable: 1
-  host_resolution_ttl_days:
-    resolved: 7
-    nodata: 1
-    nxdomain: 1
-    unknown: 0
 
 sources:
   - id: block

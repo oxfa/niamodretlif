@@ -7,10 +7,7 @@ from domain_pipeline.aggregate.readiness import (
     AggregateReadinessChecker,
     validate_aggregate_readiness,
 )
-from domain_pipeline.aggregate.runner import (
-    AggregateBatchRunner,
-    aggregate_batch,
-)
+from domain_pipeline.aggregate.runner import AggregateBatchRunner, aggregate_batch
 
 __all__ = [
     "AggregateBatchRunner",

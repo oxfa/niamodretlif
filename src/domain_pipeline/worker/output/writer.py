@@ -13,6 +13,7 @@ from domain_pipeline.worker.output.manager import (
     csv_row_signature,
     output_paths_for_source,
     review_output_path_for_source,
+    txt_output_value,
     write_review_rows,
 )
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
@@ -38,14 +39,6 @@ def _audit_row(row: dict[str, Any], *, route: str) -> dict[str, Any]:
     return audit_row
 
 
-def _txt_output_value(row: dict[str, Any]) -> str:
-    """Return the public TXT value while host remains the duplicate key."""
-    input_name = str(row.get("input_name", "")).strip()
-    if input_name:
-        return input_name
-    return str(row["host"])
-
-
 @dataclass
 class WriterResult:
     """Collected counts and concrete output paths for one runtime run."""
@@ -58,17 +51,42 @@ GroupKey = tuple[Path, Path, Path, Path]
 
 
 @dataclass
+class OutputGroupRows:
+    """Buffered output rows accepted for one output-path group."""
+
+    filtered: list[dict[str, Any]]
+    unactionable: list[dict[str, Any]]
+    audit: list[dict[str, Any]]
+    review: list[dict[str, Any]]
+
+
+@dataclass
+class OutputGroupSeen:
+    """Duplicate-detection state for one output-path group."""
+
+    host_outputs: dict[str, set[str]]
+    audit_rows: set[str]
+    review_rows: set[str]
+
+
+@dataclass
 class OutputGroupBuffer:
     """In-memory rows accepted for one output-path group."""
 
     source_context: WorkerSourceContext
-    filtered_rows: list[dict[str, Any]]
-    unactionable_rows: list[dict[str, Any]]
-    audit_rows: list[dict[str, Any]]
-    review_rows: list[dict[str, Any]]
-    seen_host_outputs: dict[str, set[str]]
-    seen_audit_rows: set[str]
-    seen_review_rows: set[str]
+    rows: OutputGroupRows
+    seen: OutputGroupSeen
+
+
+@dataclass(frozen=True)
+class OutputGroupWriteRequest:
+    """Concrete output targets and buffered rows for one output group write."""
+
+    filtered_path: Path
+    unactionable_path: Path
+    audit_path: Path
+    review_path: Path
+    group: OutputGroupBuffer
 
 
 class ResultOutputWriter:
@@ -104,13 +122,17 @@ class ResultOutputWriter:
             )
             group = OutputGroupBuffer(
                 source_context=source_context,
-                filtered_rows=[],
-                unactionable_rows=[],
-                audit_rows=[],
-                review_rows=[],
-                seen_host_outputs={"filtered": set(), "unactionable": set()},
-                seen_audit_rows=set(),
-                seen_review_rows=set(),
+                rows=OutputGroupRows(
+                    filtered=[],
+                    unactionable=[],
+                    audit=[],
+                    review=[],
+                ),
+                seen=OutputGroupSeen(
+                    host_outputs={"filtered": set(), "unactionable": set()},
+                    audit_rows=set(),
+                    review_rows=set(),
+                ),
             )
             self.groups[group_key] = group
         for path in group_key:
@@ -127,7 +149,7 @@ class ResultOutputWriter:
         row: dict[str, Any],
     ) -> None:
         review_signature = csv_row_signature(build_review_output_row(row))
-        if review_signature in group.seen_review_rows:
+        if review_signature in group.seen.review_rows:
             raise DuplicateOutputInvariantError(
                 "review_row",
                 str(row["host"]),
@@ -136,8 +158,8 @@ class ResultOutputWriter:
                     "signature": review_signature,
                 },
             )
-        group.seen_review_rows.add(review_signature)
-        group.review_rows.append(row)
+        group.seen.review_rows.add(review_signature)
+        group.rows.review.append(row)
 
     def add(self, result: CompletedHostResult) -> None:
         """Record one completed terminal result."""
@@ -146,30 +168,30 @@ class ResultOutputWriter:
         self.counts[f"route_{result.route}"] += 1
         if result.route == "unactionable":
             host = result.row["host"]
-            if host in group.seen_host_outputs["unactionable"]:
+            if host in group.seen.host_outputs["unactionable"]:
                 raise DuplicateOutputInvariantError(
                     "unactionable_host",
                     str(host),
                     context={"source": group.source_context.source_id},
                 )
-            group.seen_host_outputs["unactionable"].add(host)
-            group.unactionable_rows.append(result.row)
+            group.seen.host_outputs["unactionable"].add(host)
+            group.rows.unactionable.append(result.row)
         elif result.route == "filtered":
             host = result.row["host"]
-            if host in group.seen_host_outputs["filtered"]:
+            if host in group.seen.host_outputs["filtered"]:
                 raise DuplicateOutputInvariantError(
                     "filtered_host",
                     str(host),
                     context={"source": group.source_context.source_id},
                 )
-            group.seen_host_outputs["filtered"].add(host)
-            group.filtered_rows.append(result.row)
+            group.seen.host_outputs["filtered"].add(host)
+            group.rows.filtered.append(result.row)
         elif result.route == "review":
             self._queue_review_row(group=group, row=result.row)
 
         audit_row = _audit_row(result.row, route=result.route)
         audit_signature = _json_row_signature(audit_row)
-        if audit_signature in group.seen_audit_rows:
+        if audit_signature in group.seen.audit_rows:
             raise DuplicateOutputInvariantError(
                 "audit_row",
                 str(result.row["host"]),
@@ -178,18 +200,16 @@ class ResultOutputWriter:
                     "signature": audit_signature,
                 },
             )
-        group.seen_audit_rows.add(audit_signature)
-        group.audit_rows.append(audit_row)
+        group.seen.audit_rows.add(audit_signature)
+        group.rows.audit.append(audit_row)
 
-    def _write_group_files(
-        self,
-        filtered_path: Path,
-        unactionable_path: Path,
-        audit_path: Path,
-        review_path: Path,
-        group: OutputGroupBuffer,
-    ) -> None:
+    def _write_group_files(self, request: OutputGroupWriteRequest) -> None:
         """Write one buffered group to explicit target paths."""
+        filtered_path = request.filtered_path
+        unactionable_path = request.unactionable_path
+        audit_path = request.audit_path
+        review_path = request.review_path
+        group = request.group
         filtered_path.parent.mkdir(parents=True, exist_ok=True)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         with (
@@ -197,30 +217,30 @@ class ResultOutputWriter:
             audit_path.open("w", encoding="utf-8", newline="") as audit_handle,
         ):
             for row in sorted(
-                group.filtered_rows,
-                key=lambda current: (_txt_output_value(current), current["host"]),
+                group.rows.filtered,
+                key=lambda current: (txt_output_value(current), current["host"]),
             ):
-                filtered_handle.write(f"{_txt_output_value(row)}\n")
-            for row in sorted(group.audit_rows, key=lambda current: current["host"]):
+                filtered_handle.write(f"{txt_output_value(row)}\n")
+            for row in sorted(group.rows.audit, key=lambda current: current["host"]):
                 json.dump(row, audit_handle)
                 audit_handle.write("\n")
-        if group.unactionable_rows:
+        if group.rows.unactionable:
             unactionable_path.parent.mkdir(parents=True, exist_ok=True)
             with unactionable_path.open(
                 "w", encoding="utf-8", newline=""
             ) as unactionable_handle:
                 for row in sorted(
-                    group.unactionable_rows,
-                    key=lambda current: (_txt_output_value(current), current["host"]),
+                    group.rows.unactionable,
+                    key=lambda current: (txt_output_value(current), current["host"]),
                 ):
-                    unactionable_handle.write(f"{_txt_output_value(row)}\n")
+                    unactionable_handle.write(f"{txt_output_value(row)}\n")
         elif unactionable_path.exists():
             unactionable_path.unlink()
-        if group.review_rows:
-            write_review_rows(review_path, group.review_rows)
+        if group.rows.review:
+            write_review_rows(review_path, group.rows.review)
             logger.debug(
                 "Wrote %d review rows to %s",
-                len(group.review_rows),
+                len(group.rows.review),
                 review_path,
             )
         elif review_path.exists():
@@ -238,17 +258,19 @@ class ResultOutputWriter:
                 "Writing output group for source=%s filtered_rows=%d unactionable_rows=%d "
                 "audit_rows=%d review_rows=%d",
                 group.source_context.source_id,
-                len(group.filtered_rows),
-                len(group.unactionable_rows),
-                len(group.audit_rows),
-                len(group.review_rows),
+                len(group.rows.filtered),
+                len(group.rows.unactionable),
+                len(group.rows.audit),
+                len(group.rows.review),
             )
             self._write_group_files(
-                filtered_path,
-                unactionable_path,
-                audit_path,
-                review_path,
-                group,
+                OutputGroupWriteRequest(
+                    filtered_path=filtered_path,
+                    unactionable_path=unactionable_path,
+                    audit_path=audit_path,
+                    review_path=review_path,
+                    group=group,
+                )
             )
 
         return WriterResult(

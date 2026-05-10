@@ -13,6 +13,28 @@ MANUAL_ADD_SOURCE_ID = "manual_add"
 
 
 @dataclasses.dataclass(frozen=True)
+class PreparedSourcePosition:
+    """Source-file position for one prepared host entry."""
+
+    source_id: str
+    source_index: int
+    line_index: int
+    raw_line: str
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedProvenance:
+    """Preparation provenance that affects routing and emitted source fields."""
+
+    manual_filter_pass: bool = False
+    manual_add: bool = False
+    source_id_override: str | None = None
+    source_input_label_override: str | None = None
+    source_ids: tuple[str, ...] = ()
+    source_input_labels: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
 class PreparedRootPlan:
     """Preparation-time delegation metadata for one registrable domain."""
 
@@ -27,17 +49,11 @@ class PreparedRootPlan:
 class PreparedHostEntry:
     """One prepared parsed entry and its source provenance."""
 
-    source_id: str
-    source_index: int
-    line_index: int
-    raw_line: str
     entry: ParsedDomainEntry
-    manual_filter_pass: bool = False
-    manual_add: bool = False
-    source_id_override: str | None = None
-    source_input_label_override: str | None = None
-    source_ids: tuple[str, ...] = ()
-    source_input_labels: tuple[str, ...] = ()
+    position: PreparedSourcePosition
+    provenance: PreparedProvenance = dataclasses.field(
+        default_factory=PreparedProvenance
+    )
 
 
 @dataclasses.dataclass
@@ -60,7 +76,7 @@ class PreparedInputSet:
         for entries in self.entries_by_source.values():
             for entry in entries:
                 if (
-                    entry.entry.is_public_suffix_input
+                    entry.entry.semantics.is_public_suffix_input
                     or not entry.entry.registrable_domain
                 ):
                     public_suffix_entries.append(entry)

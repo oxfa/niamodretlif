@@ -9,11 +9,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.aggregate import (
-    aggregate_batch,
-    validate_aggregate_readiness,
-)
+from domain_pipeline.aggregate.readiness import validate_aggregate_readiness
+from domain_pipeline.aggregate.runner import aggregate_batch
 from domain_pipeline.pipeline_run.cache_lifecycle import (
+    CacheLifecycleInspectionRequest,
     inspect_cache_lifecycle,
     render_lifecycle_log_lines,
 )
@@ -22,20 +21,23 @@ from domain_pipeline.pipeline_run.settings import (
     default_worker_ids,
     validate_run_settings,
 )
-from domain_pipeline.paths import PathLayout
-from domain_pipeline.prepare import prepare_batch, write_prepared_batch
-from domain_pipeline.publish import (
+from domain_pipeline.paths.layout import PathLayout
+from domain_pipeline.prepare.batch_writer import prepare_batch, write_prepared_batch
+from domain_pipeline.publish.git import (
     commit_paths,
     configure_actor,
     prepare_publish_worktree,
     push_current_branch,
     validate_publish_candidate_sizes,
 )
-from domain_pipeline.worker.runtime import run_worker
+from domain_pipeline.worker.runtime.runner import run_worker
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     finalize_worker_aggregate_handoff,
 )
-from domain_pipeline.worker.status import (
+from domain_pipeline.worker.status.lifecycle import (
+    WorkerStatusFinalizeRequest,
+    WorkerStatusIdentity,
+    WorkerStatusMaterializeIncompleteRequest,
     finalize_worker_statuses,
     initialize_worker_statuses,
     materialize_incomplete_statuses,
@@ -158,13 +160,13 @@ def _handle_finalize_worker_statuses(
     state_root: Path,
 ) -> int:
     written_paths = finalize_worker_statuses(
-        batch_id=args.batch_id,
-        worker_id=args.worker_id,
-        state_root=state_root,
-        output_commit_sha=args.output_commit_sha,
-        push_retry_count=args.push_retry_count,
-        fallback_conclusion=args.fallback_conclusion,
-        fallback_failure_reason=args.fallback_failure_reason,
+        WorkerStatusFinalizeRequest(
+            identity=WorkerStatusIdentity(args.batch_id, args.worker_id, state_root),
+            output_commit_sha=args.output_commit_sha,
+            push_retry_count=args.push_retry_count,
+            fallback_conclusion=args.fallback_conclusion,
+            fallback_failure_reason=args.fallback_failure_reason,
+        )
     )
     _print_json({"written_paths": written_paths})
     return 0
@@ -205,9 +207,11 @@ def _handle_materialize_incomplete_statuses(
 ) -> int:
     _configure_command_logging(args.log_level)
     payload = materialize_incomplete_statuses(
-        batch_id=args.batch_id,
-        state_root=state_root,
-        failure_reason=args.failure_reason,
+        WorkerStatusMaterializeIncompleteRequest(
+            batch_id=args.batch_id,
+            state_root=state_root,
+            failure_reason=args.failure_reason,
+        )
     )
     _print_json(payload)
     return 0
@@ -216,12 +220,14 @@ def _handle_materialize_incomplete_statuses(
 def _handle_inspect_cache_lifecycle(args: argparse.Namespace) -> int:
     """Emit layered GitHub Actions sqlite cache lifecycle log lines."""
     snapshot = inspect_cache_lifecycle(
-        scope=args.scope,
-        cache_hit=args.cache_hit,
-        candidate_response_path=Path(args.candidate_response),
-        cache_path=Path(args.cache_path),
-        wal_path=Path(args.wal_path),
-        shm_path=Path(args.shm_path),
+        CacheLifecycleInspectionRequest(
+            scope=args.scope,
+            cache_hit=args.cache_hit,
+            candidate_response_path=Path(args.candidate_response),
+            cache_path=Path(args.cache_path),
+            wal_path=Path(args.wal_path),
+            shm_path=Path(args.shm_path),
+        )
     )
     for line in render_lifecycle_log_lines(snapshot):
         print(line)

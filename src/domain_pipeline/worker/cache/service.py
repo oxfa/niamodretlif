@@ -35,6 +35,18 @@ logger = logging.getLogger(__name__)
 CacheHitSource = Literal["overlay", "baseline"]
 
 
+@dataclass(frozen=True)
+class CacheFetchRequest:
+    """Read-through cache lookup request for one physical cache table."""
+
+    table_name: str
+    columns: str
+    where_sql: str
+    values: tuple[str, ...]
+    record_factory: Callable[[sqlite3.Row], Any]
+    now: Any
+
+
 def _open_read_connection(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -84,14 +96,7 @@ class AsyncCacheService:
         )
 
     def _fetch_one(
-        self,
-        *,
-        table_name: str,
-        columns: str,
-        where_sql: str,
-        values: tuple[str, ...],
-        record_factory: Callable[[sqlite3.Row], Any],
-        now: Any,
+        self, request: CacheFetchRequest
     ) -> tuple[Any | None, CacheHitSource | None]:
         for source, path in self._candidate_paths():
             if not path.is_file():
@@ -99,8 +104,11 @@ class AsyncCacheService:
             try:
                 with contextlib.closing(_open_read_connection(path)) as connection:
                     row = connection.execute(
-                        f"SELECT {columns} FROM {table_name} WHERE {where_sql}",
-                        values,
+                        (
+                            f"SELECT {request.columns} FROM {request.table_name} "
+                            f"WHERE {request.where_sql}"
+                        ),
+                        request.values,
                     ).fetchone()
             except sqlite3.DatabaseError as exc:
                 logger.warning(
@@ -109,8 +117,8 @@ class AsyncCacheService:
                 continue
             if row is None:
                 continue
-            record = record_factory(row)
-            if record.is_expired(now):
+            record = request.record_factory(row)
+            if record.is_expired(request.now):
                 continue
             return record, source
         return None, None
@@ -119,36 +127,42 @@ class AsyncCacheService:
         self, domain: str, resolver_key: str, now: Any
     ) -> tuple[DelegationHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
-            table_name=DELEGATION_TABLE,
-            columns="*",
-            where_sql="domain = ? AND resolver_key = ?",
-            values=(domain, resolver_key),
-            record_factory=DelegationHistoryRecord.from_row,
-            now=now,
+            CacheFetchRequest(
+                table_name=DELEGATION_TABLE,
+                columns="*",
+                where_sql="domain = ? AND resolver_key = ?",
+                values=(domain, resolver_key),
+                record_factory=DelegationHistoryRecord.from_row,
+                now=now,
+            )
         )
 
     def _get_fresh_host_resolution_sync_with_source(
         self, host: str, resolver_key: str, now: Any
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
-            table_name=HOST_RESOLUTION_TABLE,
-            columns="*",
-            where_sql="host = ? AND resolver_key = ?",
-            values=(host, resolver_key),
-            record_factory=HostResolutionHistoryRecord.from_row,
-            now=now,
+            CacheFetchRequest(
+                table_name=HOST_RESOLUTION_TABLE,
+                columns="*",
+                where_sql="host = ? AND resolver_key = ?",
+                values=(host, resolver_key),
+                record_factory=HostResolutionHistoryRecord.from_row,
+                now=now,
+            )
         )
 
     def _get_fresh_ip_location_sync_with_source(
         self, provider: str, ip: str, now: Any
     ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
-            table_name=IP_LOCATION_TABLE,
-            columns="*",
-            where_sql="provider = ? AND ip = ?",
-            values=(provider, ip),
-            record_factory=IpLocationHistoryRecord.from_row,
-            now=now,
+            CacheFetchRequest(
+                table_name=IP_LOCATION_TABLE,
+                columns="*",
+                where_sql="provider = ? AND ip = ?",
+                values=(provider, ip),
+                record_factory=IpLocationHistoryRecord.from_row,
+                now=now,
+            )
         )
 
 
@@ -161,6 +175,14 @@ class CacheWriteDispatcher:
         self.path = path
         self.handler = handler
         self.queue: asyncio.Queue[Any | None] = asyncio.Queue()
+
+    async def enqueue(self, request: Any | None) -> None:
+        """Queue one cache write request or shutdown sentinel."""
+        await self.queue.put(request)
+
+    async def join(self) -> None:
+        """Wait until all queued cache requests are processed."""
+        await self.queue.join()
 
     async def run(self) -> None:
         """Drain cache write requests until a sentinel is received."""
@@ -189,19 +211,19 @@ class CacheBundle:
 def _write_delegation(
     cache: CacheRepository, request: DelegationCacheWriteRequest
 ) -> None:
-    cache.put_delegation(**request.__dict__)
+    cache.put_delegation(request)
 
 
 def _write_host_resolution(
     cache: CacheRepository, request: HostResolutionCacheWriteRequest
 ) -> None:
-    cache.put_host_resolution(**request.__dict__)
+    cache.put_host_resolution(request)
 
 
 def _write_ip_location(
     cache: CacheRepository, request: IpLocationCacheWriteRequest
 ) -> None:
-    cache.put_ip_location(**request.__dict__)
+    cache.put_ip_location(request)
 
 
 def build_delegation_cache_writer(path: Path) -> CacheWriteDispatcher:

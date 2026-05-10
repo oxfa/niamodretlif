@@ -27,18 +27,24 @@ class PreparedEntryMerger:
         self, current: PreparedHostEntry, incoming: PreparedHostEntry
     ) -> PreparedHostEntry:
         """Merge same-host prepared entries while preserving earliest ordering."""
-        return dataclasses.replace(
-            current,
+        provenance = dataclasses.replace(
+            current.provenance,
             manual_filter_pass=(
-                current.manual_filter_pass or incoming.manual_filter_pass
+                current.provenance.manual_filter_pass
+                or incoming.provenance.manual_filter_pass
             ),
-            manual_add=current.manual_add or incoming.manual_add,
+            manual_add=current.provenance.manual_add or incoming.provenance.manual_add,
             source_ids=self.stable_unique_merge(
-                current.source_ids, incoming.source_ids
+                current.provenance.source_ids, incoming.provenance.source_ids
             ),
             source_input_labels=self.stable_unique_merge(
-                current.source_input_labels, incoming.source_input_labels
+                current.provenance.source_input_labels,
+                incoming.provenance.source_input_labels,
             ),
+        )
+        return dataclasses.replace(
+            current,
+            provenance=provenance,
         )
 
     def merge_entry_by_host(

@@ -6,7 +6,7 @@ from domain_pipeline.worker.delegation.lookup import (
     delegation_stage_dns_profile,
 )
 from domain_pipeline.worker.delegation.result_policy import classify_delegation
-from domain_pipeline.worker.dns_query import RetryableDNSLookupError
+from domain_pipeline.worker.dns_query.lookup import RetryableDNSLookupError
 
 __all__ = [
     "DelegationChecker",

@@ -122,7 +122,10 @@ defaults:
     retry_attempts: 4
     # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
     # coordinator from delegation. It inherits dns_query.default_resolvers unless
-    # resolvers is provided here. ECS applies only to host resolution; when
+    # resolvers is provided here. Host-resolution resolver entries accept the
+    # same all-or-none weight field as delegation: omit weight on every entry
+    # for equal first-attempt share, or set weight on every entry for explicit
+    # stage-local traffic preference. ECS applies only to host resolution; when
     # enabled, use resolvers that preserve ECS behavior, such as Google Public
     # DNS (8.8.8.8, 8.8.4.4) and Quad9 ECS (9.9.9.11, 149.112.112.11).
     # Cloudflare 1.1.1.1 and Cisco Umbrella are not default ECS targets here
@@ -134,7 +137,9 @@ defaults:
     enabled: false
     # resolvers:
     #   - resolver: 8.8.8.8
+    #     weight: 2
     #   - resolver: 8.8.4.4
+    #     weight: 1
     # Optional EDNS Client Subnet (ECS) settings. Set enabled=true and provide
     # a CIDR subnet when querying a resolver that accepts client-supplied ECS.
     ecs:
@@ -220,13 +225,11 @@ cache:
     delegation_unactionable: 1
   # Cache retention, in days, for stable exact-host host_resolution results.
   # CNAME aliases are followed before the final outcome is chosen. Transient
-  # timeout/SERVFAIL and inconsistent unknown host-resolution results are not
-  # cached after retry exhaustion.
+  # timeout/SERVFAIL host-resolution results are not cached after retry exhaustion.
   host_resolution_ttl_days:
     resolved: 1
     nodata: 1
     nxdomain: 1
-    unknown: 0
 
 sources:
   - id: local-default

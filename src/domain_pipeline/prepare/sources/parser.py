@@ -70,17 +70,26 @@ def _icann_public_suffix_list() -> publicsuffix2.PublicSuffixList:
 
 
 @dataclasses.dataclass(frozen=True)
-class ParsedDomainEntry:
-    """A normalized host entry paired with its registrable domain."""
+class ParsedInputSemantics:
+    """Input-origin semantics attached to a normalized parsed domain entry."""
 
-    host: str
-    registrable_domain: str
     input_name: str = ""
     public_suffix: str = ""
     is_public_suffix_input: bool = False
     input_kind: str = "exact_host"
     apex_scope: str = "exact_only"
     source_format: str = "plain"
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedDomainEntry:
+    """A normalized host entry paired with its registrable domain."""
+
+    host: str
+    registrable_domain: str
+    semantics: ParsedInputSemantics = dataclasses.field(
+        default_factory=ParsedInputSemantics
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -329,14 +338,7 @@ class DomainListParser:
     ) -> Iterator[ParsedDomainEntryRecord]:
         """Process lines into unique normalized entries with source provenance."""
         lines = list(lines)
-        if forced_format is None or forced_format == "auto":
-            file_format = self.detect_file_format(lines)
-        else:
-            file_format = (
-                forced_format
-                if isinstance(forced_format, InputFileFormat)
-                else InputFileFormat(str(forced_format))
-            )
+        file_format = self._resolve_file_format(lines, forced_format)
         if stats is not None:
             stats[f"format_{file_format.value}"] = (
                 stats.get(f"format_{file_format.value}", 0) + 1
@@ -353,51 +355,84 @@ class DomainListParser:
 
         seen_entries: Set[tuple[str, str, str]] = set()
         for line_index, raw_line in enumerate(lines):
-            input_name, input_kind, apex_scope = self._entry_semantics(
-                raw_line, file_format
-            )
-            normalized = self.normalize(input_name)
-            if not normalized:
-                log.debug("Skipped (empty after normalization): %r", raw_line.strip())
+            parsed_record = self._parse_record(raw_line, line_index, file_format)
+            if parsed_record is None:
                 continue
-            if not self.is_valid_syntax(normalized):
-                log.debug("Skipped (invalid syntax): %r", normalized)
-                continue
-
-            try:
-                public_suffix_list = _icann_public_suffix_list()
-                public_suffix = public_suffix_list.get_tld(normalized, strict=True)
-                root = public_suffix_list.get_sld(normalized, strict=True)
-            except (ValueError, TypeError) as exc:
-                log.debug("Skipped (publicsuffix2 error for %r): %s", normalized, exc)
-                continue
-
-            if public_suffix is None:
-                log.debug("Skipped (no strict public suffix match): %s", normalized)
-                continue
-
-            registrable_domain = "" if normalized == public_suffix else str(root)
-            entry_key = (normalized, input_kind, apex_scope)
+            entry_key, record = parsed_record
             if entry_key in seen_entries:
                 log.debug(
                     "Skipped (duplicate entry): %s kind=%s apex=%s",
-                    normalized,
-                    input_kind,
-                    apex_scope,
+                    entry_key[0],
+                    entry_key[1],
+                    entry_key[2],
                 )
                 continue
             seen_entries.add(entry_key)
-            yield ParsedDomainEntryRecord(
-                entry=ParsedDomainEntry(
-                    host=normalized,
-                    registrable_domain=registrable_domain,
+            yield record
+
+    def _resolve_file_format(
+        self,
+        lines: list[str],
+        forced_format: InputFileFormat | str | None,
+    ) -> InputFileFormat:
+        """Return the detected or explicitly forced source file format."""
+        if forced_format is None or forced_format == "auto":
+            return self.detect_file_format(lines)
+        if isinstance(forced_format, InputFileFormat):
+            return forced_format
+        return InputFileFormat(str(forced_format))
+
+    def _parse_record(
+        self,
+        raw_line: str,
+        line_index: int,
+        file_format: InputFileFormat,
+    ) -> tuple[tuple[str, str, str], ParsedDomainEntryRecord] | None:
+        """Return a deduplication key and parsed record for one raw source line."""
+        input_name, input_kind, apex_scope = self._entry_semantics(
+            raw_line, file_format
+        )
+        normalized = self.normalize(input_name)
+        if not normalized:
+            log.debug("Skipped (empty after normalization): %r", raw_line.strip())
+            return None
+        if not self.is_valid_syntax(normalized):
+            log.debug("Skipped (invalid syntax): %r", normalized)
+            return None
+
+        public_suffix_parts = self._public_suffix_parts(normalized)
+        if public_suffix_parts is None:
+            return None
+        public_suffix, root = public_suffix_parts
+        entry_key = (normalized, input_kind, apex_scope)
+        return entry_key, ParsedDomainEntryRecord(
+            entry=ParsedDomainEntry(
+                host=normalized,
+                registrable_domain="" if normalized == public_suffix else root,
+                semantics=ParsedInputSemantics(
                     input_name=input_name,
-                    public_suffix=str(public_suffix),
+                    public_suffix=public_suffix,
                     is_public_suffix_input=normalized == public_suffix,
                     input_kind=input_kind,
                     apex_scope=apex_scope,
                     source_format=file_format.value,
                 ),
-                raw_line=raw_line,
-                line_index=line_index,
-            )
+            ),
+            raw_line=raw_line,
+            line_index=line_index,
+        )
+
+    def _public_suffix_parts(self, normalized: str) -> tuple[str, str] | None:
+        """Return the strict ICANN public suffix and registrable root."""
+        try:
+            public_suffix_list = _icann_public_suffix_list()
+            public_suffix = public_suffix_list.get_tld(normalized, strict=True)
+            root = public_suffix_list.get_sld(normalized, strict=True)
+        except (ValueError, TypeError) as exc:
+            log.debug("Skipped (publicsuffix2 error for %r): %s", normalized, exc)
+            return None
+
+        if public_suffix is None:
+            log.debug("Skipped (no strict public suffix match): %s", normalized)
+            return None
+        return str(public_suffix), str(root)

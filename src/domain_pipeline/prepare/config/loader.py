@@ -60,6 +60,22 @@ class PipelineConfigLoader:
         """Load and validate one version 2 YAML configuration file."""
         config_namespace = config_namespace_from_path(path)
         payload = _load_yaml_payload(path)
+        return self.load_payload(
+            payload,
+            config_namespace=config_namespace,
+            config_path=path,
+            validate_runtime_credentials=validate_runtime_credentials,
+        )
+
+    def load_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        config_namespace: str,
+        config_path: Path,
+        validate_runtime_credentials: bool,
+    ) -> dict[str, Any]:
+        """Validate and normalize an already-loaded version 2 config payload."""
         if payload.get("version") != 2:
             raise ValueError(
                 "config must declare version: 2 and use top-level keys defaults, "
@@ -72,14 +88,9 @@ class PipelineConfigLoader:
         return self.normalizer.normalize(
             raw_config,
             config_namespace=config_namespace,
-            config_path=path,
+            config_path=config_path,
             validate_runtime_credentials=validate_runtime_credentials,
         )
-
-
-def load_config(path: Path) -> dict[str, Any]:
-    """Load a runtime-ready version 2 YAML configuration file."""
-    return PipelineConfigLoader().load(path, validate_runtime_credentials=True)
 
 
 def load_config_without_runtime_credentials(path: Path) -> dict[str, Any]:

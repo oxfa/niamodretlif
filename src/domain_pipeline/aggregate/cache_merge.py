@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sqlite3
@@ -19,6 +20,31 @@ from domain_pipeline.worker.cache.repository import (
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class AggregateCacheRows:
+    """Merged cache rows keyed by each table's identity columns."""
+
+    delegation: dict[tuple[str, ...], sqlite3.Row] = dataclasses.field(
+        default_factory=dict
+    )
+    host_resolution: dict[tuple[str, ...], sqlite3.Row] = dataclasses.field(
+        default_factory=dict
+    )
+    ip_location: dict[tuple[str, ...], sqlite3.Row] = dataclasses.field(
+        default_factory=dict
+    )
+
+
+@dataclasses.dataclass
+class AggregateCacheMergeCounts:
+    """Aggregate cache merge outcome counters."""
+
+    candidate_cache_count: int
+    merged_cache_count: int = 0
+    missing_cache_count: int = 0
+    invalid_cache_count: int = 0
+
+
 class AggregateCacheMerger:
     """Merge deterministic worker cache fragments into the shared cache path."""
 
@@ -33,110 +59,109 @@ class AggregateCacheMerger:
             len(candidate_source_paths),
         )
         target_cache = CacheRepository.load(target_path)
-        rows_by_key: dict[str, dict[tuple[str, ...], sqlite3.Row]] = {
-            DELEGATION_TABLE: {},
-            HOST_RESOLUTION_TABLE: {},
-            IP_LOCATION_TABLE: {},
-        }
-        target_delegation_rows = self._merge_cache_table(
-            rows_by_key=rows_by_key[DELEGATION_TABLE],
-            cache_path=target_path,
-            table_name=DELEGATION_TABLE,
-            key_columns=("domain", "resolver_key"),
+        rows = AggregateCacheRows()
+        counts = AggregateCacheMergeCounts(
+            candidate_cache_count=len(candidate_source_paths)
         )
-        target_host_resolution_rows = self._merge_cache_table(
-            rows_by_key=rows_by_key[HOST_RESOLUTION_TABLE],
-            cache_path=target_path,
-            table_name=HOST_RESOLUTION_TABLE,
-            key_columns=("host", "resolver_key"),
-        )
-        target_ip_location_rows = self._merge_cache_table(
-            rows_by_key=rows_by_key[IP_LOCATION_TABLE],
-            cache_path=target_path,
-            table_name=IP_LOCATION_TABLE,
-            key_columns=("provider", "ip"),
-        )
-        logger.debug(
-            "Seeded cache merge target %s with delegation_rows=%d "
-            "host_resolution_rows=%d ip_location_rows=%d",
-            target_path,
-            target_delegation_rows,
-            target_host_resolution_rows,
-            target_ip_location_rows,
-        )
-        merged_cache_count = 0
-        missing_cache_count = 0
-        invalid_cache_count = 0
         try:
+            self.merge_source_cache_rows(rows=rows, cache_path=target_path)
             for cache_path in candidate_source_paths:
-                if not cache_path.exists():
-                    missing_cache_count += 1
-                    logger.debug("Skipping missing worker cache %s", cache_path)
-                    continue
-                try:
-                    source_delegation_rows = self._merge_cache_table(
-                        rows_by_key=rows_by_key[DELEGATION_TABLE],
-                        cache_path=cache_path,
-                        table_name=DELEGATION_TABLE,
-                        key_columns=("domain", "resolver_key"),
-                    )
-                    source_host_resolution_rows = self._merge_cache_table(
-                        rows_by_key=rows_by_key[HOST_RESOLUTION_TABLE],
-                        cache_path=cache_path,
-                        table_name=HOST_RESOLUTION_TABLE,
-                        key_columns=("host", "resolver_key"),
-                    )
-                    source_ip_location_rows = self._merge_cache_table(
-                        rows_by_key=rows_by_key[IP_LOCATION_TABLE],
-                        cache_path=cache_path,
-                        table_name=IP_LOCATION_TABLE,
-                        key_columns=("provider", "ip"),
-                    )
-                except sqlite3.DatabaseError as exc:
-                    invalid_cache_count += 1
-                    logger.warning(
-                        "Skipping invalid worker cache %s: %s", cache_path, exc
-                    )
-                    continue
-                merged_cache_count += 1
-                logger.debug(
-                    "Merged worker cache %s with delegation_rows=%d "
-                    "host_resolution_rows=%d ip_location_rows=%d",
-                    cache_path,
-                    source_delegation_rows,
-                    source_host_resolution_rows,
-                    source_ip_location_rows,
+                self.merge_candidate_cache(
+                    rows=rows, counts=counts, cache_path=cache_path
                 )
             target_cache.replace_cache_table_rows(
-                delegation_rows=rows_by_key[DELEGATION_TABLE].values(),
-                host_resolution_rows=rows_by_key[HOST_RESOLUTION_TABLE].values(),
-                ip_location_rows=rows_by_key[IP_LOCATION_TABLE].values(),
+                delegation_rows=rows.delegation.values(),
+                host_resolution_rows=rows.host_resolution.values(),
+                ip_location_rows=rows.ip_location.values(),
             )
             logger.debug(
                 "Finished cache merge into %s with delegation_rows=%d "
                 "host_resolution_rows=%d ip_location_rows=%d "
                 "merged_cache_count=%d missing_cache_count=%d invalid_cache_count=%d",
                 target_path,
-                len(rows_by_key[DELEGATION_TABLE]),
-                len(rows_by_key[HOST_RESOLUTION_TABLE]),
-                len(rows_by_key[IP_LOCATION_TABLE]),
-                merged_cache_count,
-                missing_cache_count,
-                invalid_cache_count,
+                len(rows.delegation),
+                len(rows.host_resolution),
+                len(rows.ip_location),
+                counts.merged_cache_count,
+                counts.missing_cache_count,
+                counts.invalid_cache_count,
             )
         finally:
             target_cache.close()
         return {
-            "candidate_cache_count": len(candidate_source_paths),
-            "merged_cache_count": merged_cache_count,
-            "missing_cache_count": missing_cache_count,
-            "invalid_cache_count": invalid_cache_count,
+            "candidate_cache_count": counts.candidate_cache_count,
+            "merged_cache_count": counts.merged_cache_count,
+            "missing_cache_count": counts.missing_cache_count,
+            "invalid_cache_count": counts.invalid_cache_count,
             "final_cache_path": relative_path(target_path),
         }
 
-    def _choose_cache_row(
+    def merge_candidate_cache(
+        self,
+        *,
+        rows: AggregateCacheRows,
+        counts: AggregateCacheMergeCounts,
+        cache_path: Path,
+    ) -> None:
+        """Merge one worker cache candidate and update outcome counts."""
+        if not cache_path.exists():
+            counts.missing_cache_count += 1
+            logger.debug("Skipping missing worker cache %s", cache_path)
+            return
+        try:
+            row_counts = self.merge_source_cache_rows(rows=rows, cache_path=cache_path)
+        except sqlite3.DatabaseError as exc:
+            counts.invalid_cache_count += 1
+            logger.warning("Skipping invalid worker cache %s: %s", cache_path, exc)
+            return
+        counts.merged_cache_count += 1
+        logger.debug(
+            "Merged worker cache %s with delegation_rows=%d "
+            "host_resolution_rows=%d ip_location_rows=%d",
+            cache_path,
+            row_counts[DELEGATION_TABLE],
+            row_counts[HOST_RESOLUTION_TABLE],
+            row_counts[IP_LOCATION_TABLE],
+        )
+
+    def merge_source_cache_rows(
+        self, *, rows: AggregateCacheRows, cache_path: Path
+    ) -> dict[str, int]:
+        """Merge all cache tables from one SQLite cache path."""
+        row_counts = {
+            DELEGATION_TABLE: self.merge_cache_table(
+                rows_by_key=rows.delegation,
+                cache_path=cache_path,
+                table_name=DELEGATION_TABLE,
+                key_columns=("domain", "resolver_key"),
+            ),
+            HOST_RESOLUTION_TABLE: self.merge_cache_table(
+                rows_by_key=rows.host_resolution,
+                cache_path=cache_path,
+                table_name=HOST_RESOLUTION_TABLE,
+                key_columns=("host", "resolver_key"),
+            ),
+            IP_LOCATION_TABLE: self.merge_cache_table(
+                rows_by_key=rows.ip_location,
+                cache_path=cache_path,
+                table_name=IP_LOCATION_TABLE,
+                key_columns=("provider", "ip"),
+            ),
+        }
+        logger.debug(
+            "Read cache rows from %s with delegation_rows=%d "
+            "host_resolution_rows=%d ip_location_rows=%d",
+            cache_path,
+            row_counts[DELEGATION_TABLE],
+            row_counts[HOST_RESOLUTION_TABLE],
+            row_counts[IP_LOCATION_TABLE],
+        )
+        return row_counts
+
+    def choose_cache_row(
         self, existing: sqlite3.Row | None, candidate: sqlite3.Row
     ) -> sqlite3.Row:
+        """Choose the deterministic winning row for one cache identity."""
         if existing is None:
             return candidate
         existing_key = (
@@ -151,7 +176,7 @@ class AggregateCacheMerger:
         )
         return candidate if candidate_key >= existing_key else existing
 
-    def _merge_cache_table(
+    def merge_cache_table(
         self,
         *,
         rows_by_key: dict[tuple[str, ...], sqlite3.Row],
@@ -159,6 +184,7 @@ class AggregateCacheMerger:
         table_name: str,
         key_columns: tuple[str, ...],
     ) -> int:
+        """Merge one physical cache table from a SQLite cache file."""
         if not cache_path.exists():
             return 0
         connection = sqlite3.connect(cache_path)
@@ -168,7 +194,7 @@ class AggregateCacheMerger:
             for row in connection.execute(f"SELECT * FROM {table_name}"):
                 row_count += 1
                 key = tuple(str(row[column]) for column in key_columns)
-                rows_by_key[key] = self._choose_cache_row(rows_by_key.get(key), row)
+                rows_by_key[key] = self.choose_cache_row(rows_by_key.get(key), row)
         finally:
             connection.close()
         return row_count
