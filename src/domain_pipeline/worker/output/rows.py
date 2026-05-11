@@ -50,6 +50,9 @@ from domain_pipeline.prepare.models import PreparedProvenance
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
 from domain_pipeline.worker.ip_location.providers import (
+    IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD,
+    IP_LOCATION_FAILURE_REASON_RATE_LIMITED,
+    IP_LOCATION_FAILURE_REASON_REQUEST_FAILED,
     LocationPolicyDecision,
     IPLocationResult,
 )
@@ -91,6 +94,24 @@ _PUBLIC_REVIEW_LABEL_BY_RESULT_CODE = {
     ),
     PIPELINE_RESULT_CODE_DELEGATION_NS_NODATA_SOA_SERVFAIL: (
         REVIEW_LABEL_DELEGATION_NS_NODATA_SOA_SERVFAIL
+    ),
+}
+
+_IP_LOCATION_FAILURE_REASON_PRIORITY = (
+    IP_LOCATION_FAILURE_REASON_RATE_LIMITED,
+    IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD,
+    IP_LOCATION_FAILURE_REASON_REQUEST_FAILED,
+)
+
+_IP_LOCATION_LOOKUP_FAILURE_REVIEW_REASON = {
+    IP_LOCATION_FAILURE_REASON_RATE_LIMITED: (
+        "ip_location lookup failed because the ip_location provider rate limited the request"
+    ),
+    IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD: (
+        "ip_location lookup failed because the ip_location provider returned unusable data"
+    ),
+    IP_LOCATION_FAILURE_REASON_REQUEST_FAILED: (
+        "ip_location lookup failed because the ip_location provider request failed"
     ),
 }
 
@@ -203,6 +224,51 @@ def public_review_label(row: dict[str, Any]) -> str:
     return pipeline_result_code
 
 
+def _ip_location_failure_reason(result: IPLocationResult) -> str:
+    """Return one normalized failure reason from an IP-location result."""
+    return str(result.failure_reason).strip()
+
+
+def _representative_ip_location_result(
+    ip_location_results: list[IPLocationResult],
+) -> IPLocationResult | None:
+    """Return the result that best explains the row-level IP-location status."""
+    if not ip_location_results:
+        return None
+    failed_results = [result for result in ip_location_results if not result.usable]
+    if not failed_results:
+        return ip_location_results[0]
+    for failure_reason in _IP_LOCATION_FAILURE_REASON_PRIORITY:
+        for result in failed_results:
+            if _ip_location_failure_reason(result) == failure_reason:
+                return result
+    return failed_results[0]
+
+
+def _ip_location_status_for_row(
+    ip_location_policy: LocationPolicyDecision | None,
+    selected_result: IPLocationResult | None,
+) -> str:
+    """Return the row-level IP-location status for raw and review output."""
+    if ip_location_policy is not None:
+        return ip_location_policy.status
+    if selected_result is not None:
+        return selected_result.status
+    return "skipped"
+
+
+def _ip_location_reason_for_row(
+    ip_location_policy: LocationPolicyDecision | None,
+    selected_result: IPLocationResult | None,
+) -> str:
+    """Return the row-level IP-location reason for raw and review output."""
+    if ip_location_policy is not None:
+        return ip_location_policy.reason
+    if selected_result is not None:
+        return _ip_location_failure_reason(selected_result) or "skipped"
+    return "skipped"
+
+
 def review_reason_for_row(row: dict[str, Any]) -> str:
     """Return a user-facing reason for why one row landed in review output."""
     pipeline_result_code = str(row.get("classification", ""))
@@ -214,6 +280,13 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         and host_resolution_reason != host_resolution_status
     ):
         return host_resolution_reason
+    if pipeline_result_code == PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED:
+        ip_location_reason = str(row.get("ip_location_reason", ""))
+        specific_reason = _IP_LOCATION_LOOKUP_FAILURE_REVIEW_REASON.get(
+            ip_location_reason
+        )
+        if specific_reason is not None:
+            return specific_reason
     reason_by_pipeline_result_code = {
         PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX: (
             "input is a public suffix rather than a registrable host"
@@ -296,6 +369,9 @@ def build_base_row(request: BaseRowRequest) -> dict[str, Any]:
     usable_ip_location_results = [
         result for result in ip_location_results or [] if result.usable
     ]
+    selected_ip_location_result = _representative_ip_location_result(
+        list(ip_location_results or [])
+    )
     row: dict[str, Any] = {
         "input_name": entry.semantics.input_name or entry.host,
         "host": entry.host,
@@ -334,11 +410,11 @@ def build_base_row(request: BaseRowRequest) -> dict[str, Any]:
             else ""
         ),
         "resolved_ips": resolved_ips,
-        "ip_location_status": (
-            ip_location_policy.status if ip_location_policy is not None else "skipped"
+        "ip_location_status": _ip_location_status_for_row(
+            ip_location_policy, selected_ip_location_result
         ),
-        "ip_location_reason": (
-            ip_location_policy.reason if ip_location_policy is not None else "skipped"
+        "ip_location_reason": _ip_location_reason_for_row(
+            ip_location_policy, selected_ip_location_result
         ),
         "ip_location_policy_status": (
             ip_location_policy.status if ip_location_policy is not None else "skipped"
@@ -347,7 +423,9 @@ def build_base_row(request: BaseRowRequest) -> dict[str, Any]:
             ip_location_policy.reason if ip_location_policy is not None else "skipped"
         ),
         "ip_location_provider": (
-            usable_ip_location_results[0].provider if usable_ip_location_results else ""
+            selected_ip_location_result.provider
+            if selected_ip_location_result is not None
+            else ""
         ),
         "ip_location_countries": sorted(
             {

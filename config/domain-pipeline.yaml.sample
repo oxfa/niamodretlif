@@ -165,10 +165,17 @@ defaults:
     # failures, invalid payloads, rate limits, exceptions, and non-usable
     # results are not cached.
     cache_ttl_days: 7
-    # In GitHub Actions, pass IP_LOCATION_IPINFO_TOKEN through step-level env for
-    # country-only ipinfo_lite lookups. Runtime consumes that env token without
-    # writing it into prepare-to-worker manifests; leave ip_location.token blank unless
-    # you intentionally commit an explicit config token.
+    # GitHub Actions secret storage name: IPINFO_API_TOKEN. The reusable workflow
+    # passes it to Python as runtime env IP_LOCATION_IPINFO_TOKEN for country-only
+    # ipinfo_lite lookups. Runtime consumes that env token without writing it into
+    # prepare-to-worker manifests; leave ip_location.token blank unless you
+    # intentionally commit an explicit config token. Prepare-batch exits before
+    # worker manifests are created when ipinfo_lite is enabled without a token.
+    # When a token exists, prepare-batch sends one non-retried IPinfo validation
+    # probe and fails only when IPinfo proves credential rejection with HTTP 401
+    # or 403. Rate limits, network failures, and inconclusive validation payloads
+    # do not fail prepare; worker lookup logic handles later provider availability
+    # and data-quality outcomes.
     policy:
       enabled: false
       match_scope: all_ips

@@ -149,8 +149,12 @@ sources:
       location: https://is.gd/43bKSw
     ip_location:
       enabled: true
-      # Country-only ipinfo_lite lookups read IP_LOCATION_IPINFO_TOKEN at runtime when
-      # ip_location.token is blank. Provide it through workflow/env secrets, not config.
+      # GitHub Actions secret storage name: IPINFO_API_TOKEN.
+      # Runtime reads IP_LOCATION_IPINFO_TOKEN for country-only ipinfo_lite lookups when
+      # ip_location.token is blank. Provide it through workflow/env secrets,
+      # not config. Prepare-batch exits if the required token is absent; worker
+      # manifests are created only after one non-retried validation probe. That
+      # probe fails prepare only on IPinfo HTTP 401/403 credential rejection.
       timeout: 5.0
       cache_ttl_days: 7
       policy:

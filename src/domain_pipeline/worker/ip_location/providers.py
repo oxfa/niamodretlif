@@ -31,6 +31,11 @@ IP_LOCATION_STATUS_CACHE_HIT = "cache_hit"
 IP_LOCATION_STATUS_RATE_LIMITED = "rate_limited"
 IP_LOCATION_STATUS_REQUEST_FAILED = "request_failed"
 IP_LOCATION_STATUS_INVALID_PAYLOAD = "invalid_payload"
+IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN = "missing_api_token"
+IP_LOCATION_FAILURE_REASON_ACCESS_DENIED = "access_denied"
+IP_LOCATION_FAILURE_REASON_RATE_LIMITED = "rate_limited"
+IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD = "invalid_payload"
+IP_LOCATION_FAILURE_REASON_REQUEST_FAILED = "request_failed"
 GEOJS_BULK_CHUNK_SIZE = 100
 IPINFO_LITE_BULK_CHUNK_SIZE = 1000
 
@@ -50,6 +55,14 @@ class RetryableIPLocationLookupError(requests.RequestException):
         self.original_exception = original_exception
 
 
+class FatalIPLocationCredentialError(RuntimeError):
+    """Raised when an IP-location provider rejects required credentials."""
+
+    def __init__(self, message: str, *, failure_reason: str) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
+
+
 @dataclasses.dataclass(frozen=True)
 class IPLocationResult:
     """IP-location result for one IP address."""
@@ -60,7 +73,7 @@ class IPLocationResult:
     region_code: str
     region_name: str
     status: str
-    retry_after_seconds: float | None = None
+    failure_reason: str = ""
 
     @property
     def usable(self) -> bool:
@@ -206,17 +219,11 @@ class RequestsIPLocationProvider:
         response.raise_for_status()
         return response.json()
 
-    def _retry_after_seconds(self, response: object) -> float | None:
-        """Return one provider-specific retry-after value when present."""
-        retry_after_seconds = self._requestor.retry_after_seconds(response)
-        if retry_after_seconds is None:
-            return None
-        return float(retry_after_seconds)
-
     def _rate_limited_result(
         self, ip: str, response: object | None
     ) -> IPLocationResult:
         """Return one exhausted-rate-limit result for a provider lookup."""
+        del response
         return IPLocationResult(
             ip=ip,
             provider=self.provider_name,
@@ -224,10 +231,15 @@ class RequestsIPLocationProvider:
             region_code="",
             region_name="",
             status=IP_LOCATION_STATUS_RATE_LIMITED,
-            retry_after_seconds=self._retry_after_seconds(response),
+            failure_reason=IP_LOCATION_FAILURE_REASON_RATE_LIMITED,
         )
 
-    def _request_failed_result(self, ip: str) -> IPLocationResult:
+    def _request_failed_result(
+        self,
+        ip: str,
+        *,
+        failure_reason: str = IP_LOCATION_FAILURE_REASON_REQUEST_FAILED,
+    ) -> IPLocationResult:
         """Return one generic request-failed result for a provider lookup."""
         return IPLocationResult(
             ip=ip,
@@ -236,7 +248,35 @@ class RequestsIPLocationProvider:
             region_code="",
             region_name="",
             status=IP_LOCATION_STATUS_REQUEST_FAILED,
+            failure_reason=failure_reason,
         )
+
+    def _invalid_payload_result(self, ip: str) -> IPLocationResult:
+        """Return one invalid-payload result for a provider lookup."""
+        return IPLocationResult(
+            ip=ip,
+            provider=self.provider_name,
+            country_code="",
+            region_code="",
+            region_name="",
+            status=IP_LOCATION_STATUS_INVALID_PAYLOAD,
+            failure_reason=IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD,
+        )
+
+    def _failure_reason_for_exception(
+        self, exc: requests.RequestException | ValueError
+    ) -> str:
+        """Return the normalized provider failure reason for one exception."""
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 429:
+            return IP_LOCATION_FAILURE_REASON_RATE_LIMITED
+        return IP_LOCATION_FAILURE_REASON_REQUEST_FAILED
+
+    def _raise_if_fatal_credential_error(
+        self, exc: requests.RequestException | ValueError
+    ) -> None:
+        """Raise a fatal credential error when the exception proves one."""
+        del exc
 
     def _handle_lookup_exception(
         self,
@@ -246,11 +286,14 @@ class RequestsIPLocationProvider:
         provider_label: str,
     ) -> IPLocationResult:
         """Map one provider exception into the normalized IP-location result surface."""
+        self._raise_if_fatal_credential_error(exc)
         logger.warning("%s lookup failed for %s: %s", provider_label, ip, exc)
         response = getattr(exc, "response", None)
         if getattr(response, "status_code", None) == 429:
             return self._rate_limited_result(ip, response)
-        return self._request_failed_result(ip)
+        return self._request_failed_result(
+            ip, failure_reason=self._failure_reason_for_exception(exc)
+        )
 
     def lookup_ip(self, ip: str) -> IPLocationResult:
         """Return a provider-specific lookup result for one IP."""
@@ -279,17 +322,49 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
         """Build one normalized IP-location result from an IPinfo Lite payload."""
         if not isinstance(payload, dict):
             logger.debug("IPinfo Lite lookup for %s returned an invalid payload", ip)
-            return IPLocationResult(
-                ip, self.provider_name, "", "", "", IP_LOCATION_STATUS_INVALID_PAYLOAD
-            )
+            return self._invalid_payload_result(ip)
+        country_code = normalize_country_code(_string_field(payload, "country_code"))
+        if not country_code:
+            logger.debug("IPinfo Lite lookup for %s returned no country_code", ip)
+            return self._invalid_payload_result(ip)
         return IPLocationResult(
             ip=ip,
             provider=self.provider_name,
-            country_code=normalize_country_code(_string_field(payload, "country_code")),
+            country_code=country_code,
             region_code="",
             region_name="",
             status=IP_LOCATION_STATUS_OK,
         )
+
+    def _failure_reason_for_exception(
+        self, exc: requests.RequestException | ValueError
+    ) -> str:
+        """Return an IPinfo-specific failure reason for authentication failures."""
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) in {401, 403}:
+            if self.token:
+                return IP_LOCATION_FAILURE_REASON_ACCESS_DENIED
+            return IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN
+        return super()._failure_reason_for_exception(exc)
+
+    def _raise_if_fatal_credential_error(
+        self, exc: requests.RequestException | ValueError
+    ) -> None:
+        """Raise fatal IPinfo credential errors for HTTP auth failures."""
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code not in {401, 403}:
+            return
+        if self.token:
+            raise FatalIPLocationCredentialError(
+                f"IPinfo Lite API token was rejected by the provider with HTTP {status_code}",
+                failure_reason=IP_LOCATION_FAILURE_REASON_ACCESS_DENIED,
+            ) from exc
+        raise FatalIPLocationCredentialError(
+            "IPinfo Lite API token is missing or was not sent; set "
+            "IP_LOCATION_IPINFO_TOKEN or ip_location.token",
+            failure_reason=IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN,
+        ) from exc
 
     def lookup_ip(self, ip: str) -> IPLocationResult:
         token_suffix = f"?token={self.token}" if self.token else ""
@@ -332,30 +407,25 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
                 json=chunk,
             )
         except (requests.RequestException, ValueError) as exc:
+            self._raise_if_fatal_credential_error(exc)
             response = getattr(exc, "response", None)
             if getattr(response, "status_code", None) == 429:
                 return [self._rate_limited_result(ip, response) for ip in chunk]
             logger.warning(
                 "IPinfo Lite bulk lookup failed for %s: %s", ",".join(chunk), exc
             )
-            return [self._request_failed_result(ip) for ip in chunk]
+            failure_reason = self._failure_reason_for_exception(exc)
+            return [
+                self._request_failed_result(ip, failure_reason=failure_reason)
+                for ip in chunk
+            ]
 
         if not isinstance(payload, dict):
             logger.debug(
                 "IPinfo Lite bulk lookup for %s returned an invalid payload",
                 ",".join(chunk),
             )
-            return [
-                IPLocationResult(
-                    ip,
-                    self.provider_name,
-                    "",
-                    "",
-                    "",
-                    IP_LOCATION_STATUS_INVALID_PAYLOAD,
-                )
-                for ip in chunk
-            ]
+            return [self._invalid_payload_result(ip) for ip in chunk]
 
         results: list[IPLocationResult] = []
         for ip in chunk:
@@ -363,16 +433,7 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
                 logger.debug(
                     "IPinfo Lite bulk lookup for %s omitted IP %s", ",".join(chunk), ip
                 )
-                results.append(
-                    IPLocationResult(
-                        ip,
-                        self.provider_name,
-                        "",
-                        "",
-                        "",
-                        IP_LOCATION_STATUS_INVALID_PAYLOAD,
-                    )
-                )
+                results.append(self._invalid_payload_result(ip))
                 continue
             results.append(self._result_from_payload(ip, payload[ip]))
         return results
@@ -421,24 +482,18 @@ class IPLocationJSProvider(RequestsIPLocationProvider):
             logger.warning(
                 "IPLocationJS bulk lookup failed for %s: %s", query_value, exc
             )
-            return [self._request_failed_result(ip) for ip in chunk]
+            failure_reason = self._failure_reason_for_exception(exc)
+            return [
+                self._request_failed_result(ip, failure_reason=failure_reason)
+                for ip in chunk
+            ]
 
         if not isinstance(payload, list):
             logger.debug(
                 "IPLocationJS bulk lookup for %s returned an invalid payload",
                 query_value,
             )
-            return [
-                IPLocationResult(
-                    ip,
-                    self.provider_name,
-                    "",
-                    "",
-                    "",
-                    IP_LOCATION_STATUS_INVALID_PAYLOAD,
-                )
-                for ip in chunk
-            ]
+            return [self._invalid_payload_result(ip) for ip in chunk]
 
         payloads_by_ip: dict[str, list[object]] = {}
         for row in payload:
@@ -453,16 +508,7 @@ class IPLocationJSProvider(RequestsIPLocationProvider):
                 logger.debug(
                     "IPLocationJS bulk lookup for %s omitted IP %s", query_value, ip
                 )
-                results.append(
-                    IPLocationResult(
-                        ip,
-                        self.provider_name,
-                        "",
-                        "",
-                        "",
-                        IP_LOCATION_STATUS_INVALID_PAYLOAD,
-                    )
-                )
+                results.append(self._invalid_payload_result(ip))
                 continue
             results.append(self._result_from_payload(ip, matching_rows.pop(0)))
         return results
@@ -471,9 +517,7 @@ class IPLocationJSProvider(RequestsIPLocationProvider):
         """Build one normalized IPLocationJS result from one payload object."""
         if not isinstance(payload, dict):
             logger.debug("IPLocationJS lookup for %s returned an invalid payload", ip)
-            return IPLocationResult(
-                ip, self.provider_name, "", "", "", IP_LOCATION_STATUS_INVALID_PAYLOAD
-            )
+            return self._invalid_payload_result(ip)
         result = IPLocationResult(
             ip=ip,
             provider=self.provider_name,
