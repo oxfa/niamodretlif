@@ -27,8 +27,9 @@ defaults:
     # Delegation-only block checks use the platform resolver plus Cloudflare
     # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled. Delegation
     # starts with NS queries and uses separate SOA fallback queries after
-    # NS NODATA. SOA fallback stays in delegation because it determines
-    # registrable-domain actionability, not host A/AAAA resolution. Stage
+    # NS NODATA or retry-exhausted SERVFAIL. SOA fallback stays in delegation
+    # because it determines registrable-domain actionability, not host A/AAAA
+    # resolution. Stage
     # resolver entries can omit weight on every entry for equal first-attempt
     # share, or set weight on every entry for explicit stage-local traffic
     # preference. Weight is not rate control. Per-provider qps_per_worker values

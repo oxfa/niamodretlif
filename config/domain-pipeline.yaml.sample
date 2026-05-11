@@ -94,15 +94,16 @@ defaults:
           burst: 2
           max_pending: 8
     # Mandatory delegation authority check for the parsed registrable domain.
-    # The check starts with an NS query and uses SOA fallback only when NS
-    # returns NODATA. The original NS response is reused only when its authority
-    # section contains same-owner SOA; otherwise the runtime creates a separate
-    # SOA query because NS and SOA answers have different DNS cache keys.
+    # The check starts with an NS query and uses SOA fallback when NS returns
+    # NODATA or retry-exhausted SERVFAIL. The original NS response is reused
+    # only when its authority section contains same-owner SOA; otherwise the
+    # runtime creates a separate SOA query because NS and SOA answers have
+    # different DNS cache keys.
     # Delegation does not use ECS.
     # Stage-level resolvers/timeout/query_rate_limit override the top-level
-    # DNS defaults when present. Timeout/SERVFAIL, including SOA fallback
-    # timeout/SERVFAIL, are retried up to this stage-specific attempt count and
-    # are not cached after retry exhaustion.
+    # DNS defaults when present. Unresolved timeout/SERVFAIL, including SOA
+    # fallback timeout/SERVFAIL, are retried up to this stage-specific attempt
+    # count and are not cached after retry exhaustion.
   delegation:
     # Example non-ECS delegation pool:
     # resolvers:
