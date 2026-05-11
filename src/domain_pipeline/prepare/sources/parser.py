@@ -1,7 +1,7 @@
 """Domain list parsing and normalization.
 
 This module provides ``DomainListParser``, the prepare-stage parser for the
-root-filter plus host-processing pipeline. It inspects each input source,
+source-to-worker pipeline. It inspects each input source,
 determines which predefined file format it uses, and then parses the file with
 the corresponding extractor before worker runtime checks begin.
 

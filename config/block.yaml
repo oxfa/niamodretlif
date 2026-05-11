@@ -8,16 +8,17 @@ version: 2
 # they have a registrable domain. Source-matched public suffix
 # manual_filter_pass entries route to filtered during prepare because there is
 # no registrable domain to query. Actionable delegation means NS records exist,
-# or NS returns NODATA and the registrable domain is proven to have same-owner
-# SOA, either from the original NS negative-response authority section or from a
-# separate delegation SOA query. When delegation is actionable,
+# NS returns NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS retry
+# budget is exhausted with same-owner SOA. NS NODATA does not require SOA
+# fallback. When delegation is actionable,
 # manual_filter_pass and manual_add bypass host-resolution and IP-location
 # checks and route to filtered. manual_add takes precedence over matching
 # source entries for the same host. Unmatched manual_filter_pass entries route
 # to review without DNS lookup; unmatched manual_add entries require all
-# enabled sources to share delegation/output behavior. manual_filter_out is
-# exact-host-only, skips delegation, host resolution, and IP-location, and
-# routes to review. Other public-suffix inputs are prepare-owned terminal rows.
+# enabled sources to share dns_query/delegation/output behavior.
+# manual_filter_out is exact-host-only, skips delegation, host resolution, and
+# IP-location, and routes to review. Other public-suffix inputs are
+# prepare-owned terminal rows.
 
 defaults:
   fetch:
@@ -26,10 +27,11 @@ defaults:
   dns_query:
     # Delegation-only block checks use the platform resolver plus Cloudflare
     # Public DNS, Control D unfiltered, and DNS.SB with ECS disabled. Delegation
-    # starts with NS queries and uses separate SOA fallback queries after
-    # NS NODATA or retry-exhausted SERVFAIL. SOA fallback stays in delegation
-    # because it determines registrable-domain actionability, not host A/AAAA
-    # resolution. Stage
+    # starts with NS queries. Separate SOA fallback queries after NS NXDOMAIN
+    # or NS retry exhaustion use the same pool with ECS disabled. SOA fallback
+    # is not used for NS NODATA. SOA fallback stays in delegation because it
+    # determines registrable-domain actionability, not host A/AAAA resolution.
+    # Stage
     # resolver entries can omit weight on every entry for equal first-attempt
     # share, or set weight on every entry for explicit stage-local traffic
     # preference. Weight is not rate control. Per-provider qps_per_worker values
@@ -87,7 +89,8 @@ runtime:
   # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
   # usable provider capacity; one pressured provider does not by itself block
   # the whole stage, but all-provider pressure blocks creation. Disabled
-  # host-resolution starts no host-resolution consumers. Ip location is static.
+  # host-resolution starts no host-resolution consumers. IP-location uses
+  # static worker-local consumers.
   # Workflow matrix concurrency is separate.
   stage_concurrency:
     minimums:
@@ -109,10 +112,12 @@ runtime:
 
 cache:
   classification_ttl_days:
-    # NS-present and NS-NODATA with same-owner SOA use the actionable TTL.
+    # Actionable delegation results use this TTL: NS records exist, NS NODATA,
+    # NS NXDOMAIN with same-owner SOA, and NS retry-exhausted with same-owner SOA.
     delegation_actionable: 7
-    # Stable unactionable delegation, including explicitly checked NS-NODATA
-    # with SOA absent.
+    # Stable unactionable delegation uses this TTL: NS NXDOMAIN with SOA absent
+    # and successful NS answers with no nameserver targets. Review delegation
+    # outcomes are not cached.
     delegation_unactionable: 1
 
 sources:

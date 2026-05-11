@@ -40,16 +40,14 @@ IP_LOCATION_TABLE = "ip_location_history"
 DELEGATION_COLUMNS = (
     "domain",
     "resolver_key",
-    "ns_exists",
+    "ns_records_exist",
     "ns_nodata",
     "ns_nxdomain",
-    "ns_timeout",
-    "ns_servfail",
+    "ns_retry_exhausted",
+    "ns_lookup_error",
     "soa_exists",
-    "soa_nodata",
-    "soa_nxdomain",
-    "soa_timeout",
-    "soa_servfail",
+    "soa_absent",
+    "soa_inconclusive",
     "no_nameservers",
     "nameservers",
     "checked_at",
@@ -223,16 +221,14 @@ class CacheRepository:
             CREATE TABLE IF NOT EXISTS {DELEGATION_TABLE} (
                 domain TEXT NOT NULL,
                 resolver_key TEXT NOT NULL,
-                ns_exists INTEGER NOT NULL,
+                ns_records_exist INTEGER NOT NULL,
                 ns_nodata INTEGER NOT NULL,
                 ns_nxdomain INTEGER NOT NULL,
-                ns_timeout INTEGER NOT NULL,
-                ns_servfail INTEGER NOT NULL,
-                soa_exists INTEGER NOT NULL DEFAULT 0,
-                soa_nodata INTEGER NOT NULL DEFAULT 0,
-                soa_nxdomain INTEGER NOT NULL DEFAULT 0,
-                soa_timeout INTEGER NOT NULL DEFAULT 0,
-                soa_servfail INTEGER NOT NULL DEFAULT 0,
+                ns_retry_exhausted INTEGER NOT NULL,
+                ns_lookup_error INTEGER NOT NULL,
+                soa_exists INTEGER NOT NULL,
+                soa_absent INTEGER NOT NULL,
+                soa_inconclusive INTEGER NOT NULL,
                 no_nameservers INTEGER NOT NULL,
                 nameservers TEXT NOT NULL,
                 checked_at TEXT NOT NULL,
@@ -318,24 +314,22 @@ class CacheRepository:
         self._connection.execute(
             f"""
             INSERT OR REPLACE INTO {DELEGATION_TABLE} (
-                domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
-                ns_servfail, soa_exists, soa_nodata, soa_nxdomain, soa_timeout,
-                soa_servfail, no_nameservers, nameservers, checked_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                domain, resolver_key, ns_records_exist, ns_nodata, ns_nxdomain,
+                ns_retry_exhausted, ns_lookup_error, soa_exists, soa_absent,
+                soa_inconclusive, no_nameservers, nameservers, checked_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request.identity.name,
                 request.identity.resolver_key,
-                int(request.dns.ns_exists),
+                int(request.dns.ns_records_exist),
                 int(request.dns.ns_nodata),
                 int(request.dns.ns_nxdomain),
-                int(request.dns.ns_timeout),
-                int(request.dns.ns_servfail),
+                int(request.dns.ns_retry_exhausted),
+                int(request.dns.ns_lookup_error),
                 int(request.soa.soa_exists),
-                int(request.soa.soa_nodata),
-                int(request.soa.soa_nxdomain),
-                int(request.soa.soa_timeout),
-                int(request.soa.soa_servfail),
+                int(request.soa.soa_absent),
+                int(request.soa.soa_inconclusive),
                 int(request.no_nameservers),
                 json.dumps(request.nameservers, sort_keys=True),
                 request.timestamps.checked_at.isoformat(),
@@ -408,10 +402,11 @@ class CacheRepository:
             self._connection.execute(
                 f"""
                 INSERT OR REPLACE INTO {DELEGATION_TABLE} (
-                    domain, resolver_key, ns_exists, ns_nodata, ns_nxdomain, ns_timeout,
-                    ns_servfail, soa_exists, soa_nodata, soa_nxdomain, soa_timeout,
-                    soa_servfail, no_nameservers, nameservers, checked_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    domain, resolver_key, ns_records_exist, ns_nodata, ns_nxdomain,
+                    ns_retry_exhausted, ns_lookup_error, soa_exists, soa_absent,
+                    soa_inconclusive, no_nameservers, nameservers, checked_at,
+                    expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(row[column] for column in DELEGATION_COLUMNS),
             )

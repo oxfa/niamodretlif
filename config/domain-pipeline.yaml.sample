@@ -13,30 +13,30 @@ version: 2
 # result for the registrable domain. Source-matched public suffix
 # manual_filter_pass entries route to filtered during prepare because there is
 # no registrable domain to query. Delegation is actionable when NS records
-# exist, or when NS returns NODATA and the registrable domain is proven to have
-# same-owner SOA, either from the original NS negative-response authority
-# section or from a separate delegation SOA query. If delegation is actionable,
+# exist, NS returns NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS
+# retry budget is exhausted with same-owner SOA. NS NODATA does not require SOA
+# fallback. If delegation is actionable,
 # manual_filter_pass and manual_add skip host-resolution and IP-location and
 # route to filtered. manual_add takes precedence over matching source entries
 # for the same host. If delegation is not actionable, they route to
 # unactionable or review using the normal delegation result. Unmatched
-# manual_add entries require all enabled sources to share delegation/output
-# behavior. Unmatched manual_filter_pass entries route to review without
-# delegation or host-resolution lookup because they are operator reconciliation
-# rows. manual_filter_out is exact-host-only, takes precedence over matching
-# source entries, bypasses delegation, host resolution, and ip_location
-# entirely, and routes to review. Other public suffix inputs are prepare-owned
-# terminal rows because there is no registrable domain to query.
+# manual_add entries require all enabled sources to share dns_query,
+# delegation, and output behavior. Unmatched manual_filter_pass entries route
+# to review without delegation or host-resolution lookup because they are
+# operator reconciliation rows. manual_filter_out is exact-host-only, takes
+# precedence over matching source entries, bypasses delegation, host resolution,
+# and IP-location entirely, and routes to review. Other public suffix inputs are
+# prepare-owned terminal rows because there is no registrable domain to query.
 #
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.
 # - review: uncertain or operator-attention rows.
-# - unactionable: rows whose registrable domain has no actionable delegation,
-#   including NS NODATA with SOA absent.
-# Duplicate host collapse is keyed by final host and compares delegation,
-# host_resolution, ip_location, and output behavior across enabled sources. For
-# manual_add-matched hosts, only delegation/output behavior must match because
-# manual_add bypasses host-resolution and IP-location after delegation passes.
+# - unactionable: rows whose registrable domain has no actionable delegation.
+# Duplicate host collapse is keyed by final host and compares dns_query,
+# delegation, host_resolution, ip_location, and output behavior across enabled
+# sources. For manual_add-matched hosts, only dns_query/delegation/output
+# behavior must match because manual_add bypasses host-resolution and
+# IP-location after delegation passes.
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
@@ -94,16 +94,18 @@ defaults:
           burst: 2
           max_pending: 8
     # Mandatory delegation authority check for the parsed registrable domain.
-    # The check starts with an NS query and uses SOA fallback when NS returns
-    # NODATA or retry-exhausted SERVFAIL. The original NS response is reused
-    # only when its authority section contains same-owner SOA; otherwise the
-    # runtime creates a separate SOA query because NS and SOA answers have
-    # different DNS cache keys.
+    # The check starts with an NS query. SOA fallback is used after NS NXDOMAIN
+    # or NS retry exhaustion, and is not used for NS NODATA. The original NS
+    # negative response is reused only when its authority section contains
+    # same-owner SOA; otherwise the runtime creates a separate SOA query because
+    # the original NS response may not prove the queried registrable domain's
+    # SOA ownership. The terminal delegation result is cached as one
+    # domain-plus-resolver-profile row, not as separate NS and SOA cache rows.
     # Delegation does not use ECS.
     # Stage-level resolvers/timeout/query_rate_limit override the top-level
-    # DNS defaults when present. Unresolved timeout/SERVFAIL, including SOA
-    # fallback timeout/SERVFAIL, are retried up to this stage-specific attempt
-    # count and are not cached after retry exhaustion.
+    # DNS defaults when present. Retryable NS timeout/SERVFAIL outcomes share
+    # the NS retry-exhausted delegation status family after this
+    # stage-specific attempt count. Review delegation outcomes are not cached.
   delegation:
     # Example non-ECS delegation pool:
     # resolvers:
@@ -194,7 +196,7 @@ defaults:
     # For a config named config/domain-pipeline.yaml, aggregation writes:
     # - output/filtered/domain-pipeline.txt
     # - output/unactionable/domain-pipeline.txt
-    # - output/review/domain-pipeline.csv
+    # - output/review/domain-pipeline.csv when review rows exist
     directory: output
 
 runtime:
@@ -205,7 +207,8 @@ runtime:
   # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
   # usable provider capacity; one pressured provider does not by itself block
   # the whole stage, but all-provider pressure blocks creation. Disabled
-  # host_resolution starts no host_resolution consumers. Ip location is static.
+  # host_resolution starts no host_resolution consumers. IP-location uses
+  # static worker-local consumers.
   # GitHub matrix concurrency is controlled separately by workflow settings.
   stage_concurrency:
     minimums:
@@ -227,12 +230,13 @@ runtime:
 
 cache:
   classification_ttl_days:
-    # Cache retention, in days, for actionable registrable domains: NS-present
-    # or NS-NODATA with same-owner SOA present.
+    # Cache retention, in days, for actionable registrable domains: NS records
+    # exist, NS NODATA, NS NXDOMAIN with same-owner SOA, or NS retry-exhausted
+    # with same-owner SOA.
     delegation_actionable: 7
-    # Cache retention, in days, for stable unactionable delegation, including
-    # explicitly checked NS-NODATA with SOA absent. Transient timeout/SERVFAIL
-    # delegation results are not cached.
+    # Cache retention, in days, for stable unactionable delegation: NS NXDOMAIN
+    # with SOA absent, or successful NS answers with no nameserver targets.
+    # Review delegation outcomes are not cached.
     delegation_unactionable: 1
   # Cache retention, in days, for stable exact-host host_resolution results.
   # CNAME aliases are followed before the final outcome is chosen. Transient
@@ -248,7 +252,8 @@ sources:
     input:
       # Valid values: file, url
       type: file
-      # For file inputs, glob patterns such as input/*.txt are expanded.
+      # For file inputs, provide one concrete file path. The source reader opens
+      # input.location directly and does not expand glob patterns.
       location: input/test.txt
       # Valid values: auto, plain, hosts, adblock, dnsmasq
       format: auto

@@ -67,11 +67,11 @@ def cache_identity_from_mapping(row: Any, *, name_field: str) -> CacheIdentity:
 def delegation_dns_evidence_from_mapping(row: Any) -> DelegationDnsEvidence:
     """Build delegation NS evidence from a row-like mapping."""
     return DelegationDnsEvidence(
-        ns_exists=bool(row["ns_exists"]),
+        ns_records_exist=bool(row["ns_records_exist"]),
         ns_nodata=bool(row["ns_nodata"]),
         ns_nxdomain=bool(row["ns_nxdomain"]),
-        ns_timeout=bool(row["ns_timeout"]),
-        ns_servfail=bool(row["ns_servfail"]),
+        ns_retry_exhausted=bool(row["ns_retry_exhausted"]),
+        ns_lookup_error=bool(row["ns_lookup_error"]),
     )
 
 
@@ -79,10 +79,8 @@ def delegation_soa_evidence_from_mapping(row: Any) -> DelegationSoaEvidence:
     """Build delegation SOA evidence from a row-like mapping."""
     return DelegationSoaEvidence(
         soa_exists=bool(row["soa_exists"]),
-        soa_nodata=bool(row["soa_nodata"]),
-        soa_nxdomain=bool(row["soa_nxdomain"]),
-        soa_timeout=bool(row["soa_timeout"]),
-        soa_servfail=bool(row["soa_servfail"]),
+        soa_absent=bool(row["soa_absent"]),
+        soa_inconclusive=bool(row["soa_inconclusive"]),
     )
 
 

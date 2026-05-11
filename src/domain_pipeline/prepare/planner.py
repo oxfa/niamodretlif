@@ -318,7 +318,7 @@ class PreparationPlanner:
             if previous is not None and previous != fingerprint:
                 raise ValueError(
                     f"manual-add host {request.host!r} appears in multiple enabled "
-                    "sources with different delegation/output behavior"
+                    "sources with different dns_query/delegation/output behavior"
                 )
             request.routing.manual_add_fingerprints_by_host[request.host] = fingerprint
             return
@@ -327,7 +327,7 @@ class PreparationPlanner:
         previous = request.routing.host_fingerprints.get(request.host)
         if previous is not None and previous != fingerprint:
             raise ValueError(
-                f"duplicate host {request.host!r} has conflicting stage/output behavior"
+                f"duplicate host {request.host!r} has conflicting dns/stage/output behavior"
             )
         request.routing.host_fingerprints[request.host] = fingerprint
 
@@ -389,7 +389,7 @@ class PreparationPlanner:
                     raise ValueError(
                         f"manual-add file {state.manual_inputs.manual_add_path} contains "
                         f"unmatched host {host!r}; unmatched manual_add requires "
-                        "all enabled sources to share delegation/output behavior"
+                        "all enabled sources to share dns_query/delegation/output behavior"
                     )
                 state.collections.entries_by_host[host] = incoming
             else:
