@@ -25,10 +25,11 @@ defaults:
 
   dns_query:
     # Delegation and host-resolution use separate resolver pools. Delegation
-    # starts with NS queries; separate SOA fallback queries for NS NODATA use
-    # the same pool with ECS disabled. SOA fallback stays in delegation because
-    # it determines registrable-domain actionability, not host A/AAAA
-    # resolution. The delegation pool uses the platform resolver plus
+    # starts with NS queries; separate SOA fallback queries for NS NODATA or
+    # retry-exhausted SERVFAIL use the same pool with ECS disabled. SOA
+    # fallback stays in delegation because it determines registrable-domain
+    # actionability, not host A/AAAA resolution. The delegation pool uses the
+    # platform resolver plus
     # Cloudflare Public DNS, Control D unfiltered, and DNS.SB.
     # Stage resolver entries can omit weight on every entry for equal
     # first-attempt share, or set weight on every entry for explicit stage-local

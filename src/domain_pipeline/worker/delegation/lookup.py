@@ -58,7 +58,7 @@ class DelegationDnsEvidence:
 
 @dataclasses.dataclass(frozen=True)
 class DelegationSoaEvidence:
-    """DNS evidence from SOA fallback after NS NODATA."""
+    """DNS evidence from SOA fallback after inconclusive NS authority checks."""
 
     soa_exists: bool = False
     soa_nodata: bool = False
@@ -72,8 +72,8 @@ class DelegationSoaEvidence:
 class DelegationResult:
     """Delegation result with NS state and SOA fallback state.
 
-    ``soa_*`` fields are meaningful only with ``ns_nodata`` and distinguish
-    plain NS-NODATA from the SOA-only-domain path.
+    ``soa_*`` fields are meaningful only with an inconclusive NS authority
+    result and distinguish plain NS-NODATA/SERVFAIL from SOA-positive roots.
     """
 
     domain: str
@@ -150,7 +150,11 @@ class DelegationResult:
     @property
     def actionable(self) -> bool:
         """Return whether the domain is delegated and currently actionable."""
-        return self.status in {"exists", "ns_nodata_soa_exists"}
+        return self.status in {
+            "exists",
+            "ns_nodata_soa_exists",
+            "ns_servfail_soa_exists",
+        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +188,10 @@ _DELEGATION_STATUS_RULES: tuple[tuple[str, _DelegationStatusPredicate], ...] = (
     (
         "ns_nodata_soa_servfail",
         lambda result: result.dns.ns_nodata and result.soa.soa_servfail,
+    ),
+    (
+        "ns_servfail_soa_exists",
+        lambda result: result.dns.ns_servfail and result.soa.soa_exists,
     ),
     ("nodata", lambda result: result.dns.ns_nodata),
     ("no_nameservers", lambda result: result.no_nameservers),
@@ -328,6 +336,83 @@ class DelegationChecker(DNSQueryService):
         # collapse malformed or wrong-owner answers into an actionable result.
         return False
 
+    def _delegation_soa_query_fallback(
+        self,
+        *,
+        domain: str,
+        dns_evidence: DelegationDnsEvidence,
+        reason: str,
+    ) -> DelegationResult:
+        """Resolve direct SOA fallback after NS authority evidence was inconclusive."""
+        logger.debug(
+            "DNS delegation %s starting SOA fallback domain=%s soa_source=%s",
+            reason,
+            domain,
+            "soa_query",
+        )
+        try:
+            answer = self._resolve_delegation_record(
+                domain, "SOA", self.delegation_retry_attempts
+            )
+        except dns.resolver.NXDOMAIN:
+            result = DelegationResult(
+                domain=domain,
+                dns=dns_evidence,
+                soa=DelegationSoaEvidence(soa_nxdomain=True),
+            )
+        except dns.resolver.NoAnswer:
+            result = DelegationResult(
+                domain=domain,
+                dns=dns_evidence,
+                soa=DelegationSoaEvidence(soa_nodata=True),
+            )
+        except RetryableDNSLookupError as fallback_exc:
+            result = (
+                DelegationResult(
+                    domain=domain,
+                    dns=dns_evidence,
+                    soa=DelegationSoaEvidence(soa_timeout=True),
+                )
+                if fallback_exc.is_timeout
+                else DelegationResult(
+                    domain=domain,
+                    dns=dns_evidence,
+                    soa=DelegationSoaEvidence(soa_servfail=True),
+                )
+            )
+        except (dns.exception.DNSException, socket.gaierror):
+            result = DelegationResult(
+                domain=domain,
+                dns=dns_evidence,
+                soa=DelegationSoaEvidence(soa_servfail=True),
+            )
+        else:
+            result = (
+                DelegationResult(
+                    domain=domain,
+                    dns=dns_evidence,
+                    soa=DelegationSoaEvidence(
+                        soa_exists=True,
+                        soa_source="soa_query",
+                    ),
+                )
+                if self._soa_answer_exists_for_domain(answer, domain)
+                else DelegationResult(
+                    domain=domain,
+                    dns=dns_evidence,
+                    soa=DelegationSoaEvidence(soa_nodata=True),
+                )
+            )
+        logger.debug(
+            "DNS delegation %s SOA fallback completed domain=%s status=%s "
+            "soa_source=%s",
+            reason,
+            domain,
+            result.status,
+            result.soa_source or "soa_query",
+        )
+        return result
+
     def _delegation_nodata_with_soa_fallback(
         self, domain: str, exc: dns.resolver.NoAnswer
     ) -> DelegationResult:
@@ -349,75 +434,22 @@ class DelegationChecker(DNSQueryService):
             )
         # Ask SOA directly when NS authority did not prove it. This is a new
         # query because DNS cache semantics are keyed by QNAME/QTYPE/QCLASS.
-        logger.debug(
-            "DNS delegation NS NODATA starting SOA fallback domain=%s soa_source=%s",
-            domain,
-            "soa_query",
+        return self._delegation_soa_query_fallback(
+            domain=domain,
+            dns_evidence=DelegationDnsEvidence(ns_nodata=True),
+            reason="NS NODATA",
         )
-        try:
-            answer = self._resolve_delegation_record(
-                domain, "SOA", self.delegation_retry_attempts
-            )
-        except dns.resolver.NXDOMAIN:
-            result = DelegationResult(
-                domain=domain,
-                dns=DelegationDnsEvidence(ns_nodata=True),
-                soa=DelegationSoaEvidence(soa_nxdomain=True),
-            )
-        except dns.resolver.NoAnswer:
-            result = DelegationResult(
-                domain=domain,
-                dns=DelegationDnsEvidence(ns_nodata=True),
-                soa=DelegationSoaEvidence(soa_nodata=True),
-            )
-        except RetryableDNSLookupError as fallback_exc:
-            result = (
-                DelegationResult(
-                    domain=domain,
-                    dns=DelegationDnsEvidence(ns_nodata=True),
-                    soa=DelegationSoaEvidence(soa_timeout=True),
-                )
-                if fallback_exc.is_timeout
-                else DelegationResult(
-                    domain=domain,
-                    dns=DelegationDnsEvidence(ns_nodata=True),
-                    soa=DelegationSoaEvidence(soa_servfail=True),
-                )
-            )
-        except (dns.exception.DNSException, socket.gaierror):
-            result = DelegationResult(
-                domain=domain,
-                dns=DelegationDnsEvidence(ns_nodata=True),
-                soa=DelegationSoaEvidence(soa_servfail=True),
-            )
-        else:
-            result = (
-                DelegationResult(
-                    domain=domain,
-                    dns=DelegationDnsEvidence(ns_nodata=True),
-                    soa=DelegationSoaEvidence(
-                        soa_exists=True,
-                        soa_source="soa_query",
-                    ),
-                )
-                if self._soa_answer_exists_for_domain(answer, domain)
-                else DelegationResult(
-                    domain=domain,
-                    dns=DelegationDnsEvidence(ns_nodata=True),
-                    soa=DelegationSoaEvidence(soa_nodata=True),
-                )
-            )
-        logger.debug(
-            "DNS delegation NS NODATA SOA fallback completed domain=%s status=%s "
-            "soa_source=%s",
-            domain,
-            result.status,
-            result.soa_source or "soa_query",
+
+    def _delegation_servfail_with_soa_fallback(self, domain: str) -> DelegationResult:
+        """Resolve SOA after retry-exhausted NS SERVFAIL before returning review."""
+        return self._delegation_soa_query_fallback(
+            domain=domain,
+            dns_evidence=DelegationDnsEvidence(ns_servfail=True),
+            reason="NS SERVFAIL",
         )
-        return result
 
     def delegation_lookup(self, domain: str) -> DelegationResult:
-        """Run delegation check: NS first, SOA fallback only after NS NODATA."""
+        """Run delegation check: NS first, with SOA fallback for inconclusive NS."""
         try:
             answer = self._resolve_delegation_record(
                 domain, "NS", self.delegation_retry_attempts
@@ -430,12 +462,13 @@ class DelegationChecker(DNSQueryService):
         except dns.resolver.NoAnswer as exc:
             result = self._delegation_nodata_with_soa_fallback(domain, exc)
         except RetryableDNSLookupError as exc:
-            result = DelegationResult(
-                domain=domain,
-                dns=DelegationDnsEvidence(
-                    ns_timeout=exc.is_timeout,
-                    ns_servfail=not exc.is_timeout,
-                ),
+            result = (
+                DelegationResult(
+                    domain=domain,
+                    dns=DelegationDnsEvidence(ns_timeout=True),
+                )
+                if exc.is_timeout
+                else self._delegation_servfail_with_soa_fallback(domain)
             )
         except (dns.exception.DNSException, socket.gaierror):
             result = DelegationResult(

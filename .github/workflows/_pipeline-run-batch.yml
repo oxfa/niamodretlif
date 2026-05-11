@@ -307,7 +307,8 @@ jobs:
           # stage_concurrency controls worker-local async consumers. Delegation
           # and enabled host-resolution can adapt independently; disabled
           # host-resolution starts no host-resolution consumers. Delegation
-          # runs an NS query plus SOA fallback for NS NODATA before host fanout.
+          # runs an NS query plus SOA fallback for NS NODATA or retry-exhausted
+          # SERVFAIL before host fanout.
           python -m domain_pipeline.pipeline_run worker \
             --source-root . \
             --state-root . \
