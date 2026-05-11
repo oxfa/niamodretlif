@@ -15,12 +15,13 @@ from domain_pipeline.prepare.classifications import (
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
     PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
-from domain_pipeline.prepare.config.loader import (
-    load_config_without_runtime_credentials,
-)
+from domain_pipeline.prepare.config.loader import PipelineConfigLoader
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
 from domain_pipeline.prepare.delegation_conflicts import (
     conflicting_delegation_behavior_message,
+)
+from domain_pipeline.prepare.ip_location_credentials import (
+    IPLocationCredentialValidator,
 )
 from domain_pipeline.prepare.manual_inputs import ManualInputLoader, ManualInputSet
 from domain_pipeline.prepare.merger import PreparedEntryMerger
@@ -218,15 +219,20 @@ class PreparationPlanner:
         source_root: Path,
         entry_merger: PreparedEntryMerger | None = None,
         manual_loader: ManualInputLoader | None = None,
+        credential_validator: IPLocationCredentialValidator | None = None,
     ) -> None:
         self.source_root = source_root
         self.entry_merger = entry_merger or PreparedEntryMerger()
         self.manual_loader = manual_loader or ManualInputLoader(source_root=source_root)
+        self.credential_validator = (
+            credential_validator or IPLocationCredentialValidator()
+        )
 
     def prepare(self, *, config_path: Path) -> PreparedInputSet:
         """Load config and prepare worker entries plus terminal rows."""
         resolved_config_path = _resolve_from_root(self.source_root, config_path)
-        config = load_config_without_runtime_credentials(resolved_config_path)
+        config = PipelineConfigLoader().load(resolved_config_path)
+        self.credential_validator.validate_config(config)
         return self.prepare_config(config)
 
     def prepare_config(self, config: dict[str, Any]) -> PreparedInputSet:

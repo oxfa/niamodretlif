@@ -6,6 +6,12 @@ from domain_pipeline.worker.ip_location.constants import (
 )
 from domain_pipeline.worker.ip_location.policy import IPLocationConfigPolicy
 from domain_pipeline.worker.ip_location.providers import (
+    FatalIPLocationCredentialError,
+    IP_LOCATION_FAILURE_REASON_ACCESS_DENIED,
+    IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD,
+    IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN,
+    IP_LOCATION_FAILURE_REASON_RATE_LIMITED,
+    IP_LOCATION_FAILURE_REASON_REQUEST_FAILED,
     IP_LOCATION_STATUS_CACHE_HIT,
     IP_LOCATION_STATUS_INVALID_PAYLOAD,
     IP_LOCATION_STATUS_OK,
@@ -28,11 +34,17 @@ from domain_pipeline.worker.ip_location.result_policy import (
 __all__ = [
     "IP_LOCATION_PROVIDER_GEOJS",
     "IP_LOCATION_PROVIDER_IPINFO_LITE",
+    "IP_LOCATION_FAILURE_REASON_ACCESS_DENIED",
+    "IP_LOCATION_FAILURE_REASON_INVALID_PAYLOAD",
+    "IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN",
+    "IP_LOCATION_FAILURE_REASON_RATE_LIMITED",
+    "IP_LOCATION_FAILURE_REASON_REQUEST_FAILED",
     "IP_LOCATION_STATUS_CACHE_HIT",
     "IP_LOCATION_STATUS_INVALID_PAYLOAD",
     "IP_LOCATION_STATUS_OK",
     "IP_LOCATION_STATUS_RATE_LIMITED",
     "IP_LOCATION_STATUS_REQUEST_FAILED",
+    "FatalIPLocationCredentialError",
     "IPLocationConfigPolicy",
     "IPLocationJSProvider",
     "IPLocationProvider",

@@ -236,6 +236,7 @@ class RuntimeIpLocationService:
             ips=host_resolution_result.resolved_ips,
             checked_at=now,
         )
+        results: list[IPLocationResult] = []
         try:
             fetched_results = await self.fetch_missing_ips(
                 provider_name=provider_name,
@@ -263,7 +264,7 @@ class RuntimeIpLocationService:
             logger.warning(
                 "IpLocation lookup failed for %s: %s", host_resolution_result.host, exc
             )
-            return PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED, [], None
+            return PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED, results, None
         return (
             ip_location_policy_result_code(
                 policy, results, ip_location_config["policy"]

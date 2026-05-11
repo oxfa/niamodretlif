@@ -48,7 +48,7 @@ jobs:
       PIPELINE_RUN_MAX_PARALLEL_WORKERS: ${{ vars.PIPELINE_RUN_MAX_PARALLEL_WORKERS }}
       PIPELINE_PUBLISH_TARGET_BRANCH: ${{ vars.PIPELINE_PUBLISH_TARGET_BRANCH }}
       PIPELINE_MAX_RUNTIME_SECONDS: ${{ vars.PIPELINE_MAX_RUNTIME_SECONDS }}
-      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IP_LOCATION_IPINFO_TOKEN }}
+      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -153,7 +153,7 @@ jobs:
       matrix:
         worker_id: ${{ fromJSON(needs.prepare_run.outputs.worker_ids_json) }}
     env:
-      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IP_LOCATION_IPINFO_TOKEN }}
+      IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -317,6 +317,7 @@ jobs:
             --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
             | tee worker.json
           echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"
+          echo "error_reason=$(jq -r '.error_reason // empty' worker.json)" >> "$GITHUB_OUTPUT"
       - name: Append runner public network addresses to worker log
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         run: |
@@ -344,6 +345,7 @@ jobs:
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             | tee worker-handoff.json
+          echo "error_reason=$(jq -r '.error_reason // empty' worker-handoff.json)" >> "$GITHUB_OUTPUT"
       - name: Finalize successful worker statuses
         if: ${{ steps.init.outputs.participates == 'true' && steps.process.outputs.overall_conclusion == 'success' && steps.finalize_handoff.outcome == 'success' }}
         run: |
@@ -367,7 +369,7 @@ jobs:
             --output-commit-sha "" \
             --push-retry-count 0 \
             --fallback-conclusion failure \
-            --fallback-failure-reason "worker job failed before aggregate handoff was finalized"
+            --fallback-failure-reason "${{ steps.process.outputs.error_reason || (steps.process.outcome != 'success' && 'worker job failed before aggregate handoff was finalized') || steps.finalize_handoff.outputs.error_reason || 'worker handoff finalization failed' }}"
       - name: Stage worker artifact
         if: ${{ always() && steps.init.outputs.participates == 'true' }}
         run: |

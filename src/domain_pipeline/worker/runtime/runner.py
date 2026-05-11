@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     load_prepare_worker_manifest_for_worker,
 )
+from domain_pipeline.worker.ip_location.providers import FatalIPLocationCredentialError
 from domain_pipeline.worker.runtime.executor import run_prepared_pipeline_async
 from domain_pipeline.worker.status.lifecycle import (
     STATUS_FAILURE,
@@ -214,6 +215,8 @@ class WorkerBatchRunner:
                 max_runtime_seconds=request.max_runtime_seconds,
                 prepared_metadata=prepare_manifest.prepared_metadata.to_runtime_payload(),
             )
+        except FatalIPLocationCredentialError as exc:
+            raise WorkerRuntimeExecutionError(str(exc)) from exc
         except asyncio.TimeoutError as exc:
             max_runtime = request.max_runtime_seconds
             reason = "pipeline exceeded max runtime seconds"
