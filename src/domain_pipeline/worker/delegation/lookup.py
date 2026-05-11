@@ -49,32 +49,26 @@ def delegation_stage_dns_profile(dns_config: dict[str, Any]) -> dict[str, Any]:
 class DelegationDnsEvidence:
     """DNS evidence from the primary delegation NS lookup."""
 
-    ns_exists: bool = False
+    ns_records_exist: bool = False
     ns_nodata: bool = False
     ns_nxdomain: bool = False
-    ns_timeout: bool = False
-    ns_servfail: bool = False
+    ns_retry_exhausted: bool = False
+    ns_lookup_error: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
 class DelegationSoaEvidence:
-    """DNS evidence from SOA fallback after inconclusive NS authority checks."""
+    """DNS evidence from same-owner SOA checks after NS needs disambiguation."""
 
     soa_exists: bool = False
-    soa_nodata: bool = False
-    soa_nxdomain: bool = False
-    soa_timeout: bool = False
-    soa_servfail: bool = False
+    soa_absent: bool = False
+    soa_inconclusive: bool = False
     soa_source: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
 class DelegationResult:
-    """Delegation result with NS state and SOA fallback state.
-
-    ``soa_*`` fields are meaningful only with an inconclusive NS authority
-    result and distinguish plain NS-NODATA/SERVFAIL from SOA-positive roots.
-    """
+    """Delegation result with primary NS evidence and SOA fallback evidence."""
 
     domain: str
     dns: DelegationDnsEvidence = dataclasses.field(
@@ -88,9 +82,9 @@ class DelegationResult:
     from_cache: bool = False
 
     @property
-    def ns_exists(self) -> bool:
+    def ns_records_exist(self) -> bool:
         """Return whether NS records exist for the registrable domain."""
-        return self.dns.ns_exists
+        return self.dns.ns_records_exist
 
     @property
     def ns_nodata(self) -> bool:
@@ -103,14 +97,14 @@ class DelegationResult:
         return self.dns.ns_nxdomain
 
     @property
-    def ns_timeout(self) -> bool:
-        """Return whether the NS query timed out."""
-        return self.dns.ns_timeout
+    def ns_retry_exhausted(self) -> bool:
+        """Return whether the NS lookup exhausted its retry budget."""
+        return self.dns.ns_retry_exhausted
 
     @property
-    def ns_servfail(self) -> bool:
-        """Return whether the NS query produced SERVFAIL."""
-        return self.dns.ns_servfail
+    def ns_lookup_error(self) -> bool:
+        """Return whether the NS lookup failed outside retry-exhausted handling."""
+        return self.dns.ns_lookup_error
 
     @property
     def soa_exists(self) -> bool:
@@ -118,24 +112,14 @@ class DelegationResult:
         return self.soa.soa_exists
 
     @property
-    def soa_nodata(self) -> bool:
-        """Return whether SOA fallback produced NODATA."""
-        return self.soa.soa_nodata
+    def soa_absent(self) -> bool:
+        """Return whether same-owner SOA was proven absent."""
+        return self.soa.soa_absent
 
     @property
-    def soa_nxdomain(self) -> bool:
-        """Return whether SOA fallback produced NXDOMAIN."""
-        return self.soa.soa_nxdomain
-
-    @property
-    def soa_timeout(self) -> bool:
-        """Return whether SOA fallback timed out."""
-        return self.soa.soa_timeout
-
-    @property
-    def soa_servfail(self) -> bool:
-        """Return whether SOA fallback produced SERVFAIL."""
-        return self.soa.soa_servfail
+    def soa_inconclusive(self) -> bool:
+        """Return whether SOA lookup did not prove SOA exists or absent."""
+        return self.soa.soa_inconclusive
 
     @property
     def soa_source(self) -> str:
@@ -144,16 +128,17 @@ class DelegationResult:
 
     @property
     def status(self) -> str:
-        """Return the compact delegation status used in rows and logs."""
+        """Return the explicit delegation status used in rows and logs."""
         return _delegation_status(self)
 
     @property
     def actionable(self) -> bool:
         """Return whether the domain is delegated and currently actionable."""
         return self.status in {
-            "exists",
-            "ns_nodata_soa_exists",
-            "ns_servfail_soa_exists",
+            "ns_records_exist",
+            "ns_nodata",
+            "ns_nxdomain_soa_exists",
+            "ns_retry_exhausted_soa_exists",
         }
 
 
@@ -170,38 +155,42 @@ class DelegationCheckerRequest:
 
 _DelegationStatusPredicate = Callable[[DelegationResult], bool]
 _DELEGATION_STATUS_RULES: tuple[tuple[str, _DelegationStatusPredicate], ...] = (
-    ("exists", lambda result: result.dns.ns_exists and bool(result.nameservers)),
-    ("nxdomain", lambda result: result.dns.ns_nxdomain),
     (
-        "ns_nodata_soa_exists",
-        lambda result: result.dns.ns_nodata and result.soa.soa_exists,
+        "ns_records_exist",
+        lambda result: result.dns.ns_records_exist and bool(result.nameservers),
+    ),
+    ("ns_nodata", lambda result: result.dns.ns_nodata),
+    (
+        "ns_nxdomain_soa_exists",
+        lambda result: result.dns.ns_nxdomain and result.soa.soa_exists,
     ),
     (
-        "ns_nodata_soa_absent",
-        lambda result: result.dns.ns_nodata
-        and (result.soa.soa_nodata or result.soa.soa_nxdomain),
+        "ns_nxdomain_soa_absent",
+        lambda result: result.dns.ns_nxdomain and result.soa.soa_absent,
     ),
     (
-        "ns_nodata_soa_timeout",
-        lambda result: result.dns.ns_nodata and result.soa.soa_timeout,
+        "ns_nxdomain_soa_inconclusive",
+        lambda result: result.dns.ns_nxdomain,
     ),
     (
-        "ns_nodata_soa_servfail",
-        lambda result: result.dns.ns_nodata and result.soa.soa_servfail,
+        "ns_retry_exhausted_soa_exists",
+        lambda result: result.dns.ns_retry_exhausted and result.soa.soa_exists,
     ),
     (
-        "ns_servfail_soa_exists",
-        lambda result: result.dns.ns_servfail and result.soa.soa_exists,
+        "ns_retry_exhausted_soa_absent",
+        lambda result: result.dns.ns_retry_exhausted and result.soa.soa_absent,
     ),
-    ("nodata", lambda result: result.dns.ns_nodata),
-    ("no_nameservers", lambda result: result.no_nameservers),
-    ("timeout", lambda result: result.dns.ns_timeout),
-    ("servfail", lambda result: result.dns.ns_servfail),
+    (
+        "ns_retry_exhausted_soa_inconclusive",
+        lambda result: result.dns.ns_retry_exhausted,
+    ),
+    ("ns_empty_answer", lambda result: result.no_nameservers),
+    ("ns_lookup_error", lambda result: result.dns.ns_lookup_error),
 )
 
 
 def _delegation_status(result: DelegationResult) -> str:
-    """Return the first matching compact delegation status."""
+    """Return the first matching explicit delegation status."""
     for status, predicate in _DELEGATION_STATUS_RULES:
         if predicate(result):
             return status
@@ -284,7 +273,9 @@ class DelegationChecker(DNSQueryService):
         self, response: dns.message.Message, domain: str, record_type: str
     ) -> bool:
         """Return whether a response belongs to the expected DNS question."""
-        if response.rcode() != dns.rcode.NOERROR or not response.question:
+        if response.rcode() not in {dns.rcode.NOERROR, dns.rcode.NXDOMAIN}:
+            return False
+        if not response.question:
             return False
         question = response.question[0]
         return (
@@ -295,14 +286,14 @@ class DelegationChecker(DNSQueryService):
     def _response_has_same_owner_authority_soa(
         self, response: dns.message.Message | None, domain: str
     ) -> bool:
-        """Return whether the original NS NODATA response proves same-owner SOA."""
+        """Return whether an NS negative response proves same-owner SOA."""
         if response is None or not self._response_matches_question(
             response, domain, "NS"
         ):
             return False
         normalized_domain = self._normalize_dns_name(domain)
-        # RFC 2308 negative answers can carry zone SOA in authority. Only a
-        # same-owner SOA proves this registrable domain is SOA-only.
+        # Negative answers can carry zone SOA in authority. Only same-owner SOA
+        # proves this registrable domain has actionable delegation evidence.
         return any(
             rrset.rdtype == dns.rdatatype.SOA
             and self._normalize_dns_name(rrset.name) == normalized_domain
@@ -318,6 +309,21 @@ class DelegationChecker(DNSQueryService):
         except (KeyError, AttributeError):
             return None
         return response if isinstance(response, dns.message.Message) else None
+
+    def _ns_nxdomain_response(
+        self, exc: dns.resolver.NXDOMAIN, domain: str
+    ) -> dns.message.Message | None:
+        """Return the matching NXDOMAIN response when dnspython exposes one."""
+        try:
+            responses = exc.responses()
+        except (KeyError, AttributeError):
+            return None
+        for response in responses.values():
+            if isinstance(
+                response, dns.message.Message
+            ) and self._response_matches_question(response, domain, "NS"):
+                return response
+        return None
 
     def _soa_answer_exists_for_domain(self, answer: Any, domain: str) -> bool:
         """Return whether an explicit SOA answer proves SOA at the queried domain."""
@@ -354,37 +360,23 @@ class DelegationChecker(DNSQueryService):
             answer = self._resolve_delegation_record(
                 domain, "SOA", self.delegation_retry_attempts
             )
-        except dns.resolver.NXDOMAIN:
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
             result = DelegationResult(
                 domain=domain,
                 dns=dns_evidence,
-                soa=DelegationSoaEvidence(soa_nxdomain=True),
+                soa=DelegationSoaEvidence(soa_absent=True),
             )
-        except dns.resolver.NoAnswer:
+        except RetryableDNSLookupError:
             result = DelegationResult(
                 domain=domain,
                 dns=dns_evidence,
-                soa=DelegationSoaEvidence(soa_nodata=True),
-            )
-        except RetryableDNSLookupError as fallback_exc:
-            result = (
-                DelegationResult(
-                    domain=domain,
-                    dns=dns_evidence,
-                    soa=DelegationSoaEvidence(soa_timeout=True),
-                )
-                if fallback_exc.is_timeout
-                else DelegationResult(
-                    domain=domain,
-                    dns=dns_evidence,
-                    soa=DelegationSoaEvidence(soa_servfail=True),
-                )
+                soa=DelegationSoaEvidence(soa_inconclusive=True),
             )
         except (dns.exception.DNSException, socket.gaierror):
             result = DelegationResult(
                 domain=domain,
                 dns=dns_evidence,
-                soa=DelegationSoaEvidence(soa_servfail=True),
+                soa=DelegationSoaEvidence(soa_inconclusive=True),
             )
         else:
             result = (
@@ -400,7 +392,7 @@ class DelegationChecker(DNSQueryService):
                 else DelegationResult(
                     domain=domain,
                     dns=dns_evidence,
-                    soa=DelegationSoaEvidence(soa_nodata=True),
+                    soa=DelegationSoaEvidence(soa_absent=True),
                 )
             )
         logger.debug(
@@ -413,39 +405,50 @@ class DelegationChecker(DNSQueryService):
         )
         return result
 
-    def _delegation_nodata_with_soa_fallback(
+    def _delegation_ns_nodata_result(
         self, domain: str, exc: dns.resolver.NoAnswer
     ) -> DelegationResult:
-        """Resolve NS NODATA by reusing authority SOA or querying SOA directly."""
-        response = self._noanswer_response(exc)
+        """Return actionable NS NODATA without a host or SOA probe."""
+        del exc
+        return DelegationResult(
+            domain=domain,
+            dns=DelegationDnsEvidence(ns_nodata=True),
+        )
+
+    def _delegation_ns_nxdomain_with_soa_fallback(
+        self, domain: str, exc: dns.resolver.NXDOMAIN
+    ) -> DelegationResult:
+        """Resolve same-owner SOA before treating NS NXDOMAIN as unactionable."""
+        response = self._ns_nxdomain_response(exc, domain)
         if self._response_has_same_owner_authority_soa(response, domain):
             logger.debug(
-                "DNS delegation NS NODATA reused authority SOA domain=%s soa_source=%s",
+                "DNS delegation NS NXDOMAIN reused authority SOA "
+                "domain=%s soa_source=%s",
                 domain,
                 "ns_authority",
             )
             return DelegationResult(
                 domain=domain,
-                dns=DelegationDnsEvidence(ns_nodata=True),
+                dns=DelegationDnsEvidence(ns_nxdomain=True),
                 soa=DelegationSoaEvidence(
                     soa_exists=True,
                     soa_source="ns_authority",
                 ),
             )
-        # Ask SOA directly when NS authority did not prove it. This is a new
-        # query because DNS cache semantics are keyed by QNAME/QTYPE/QCLASS.
         return self._delegation_soa_query_fallback(
             domain=domain,
-            dns_evidence=DelegationDnsEvidence(ns_nodata=True),
-            reason="NS NODATA",
+            dns_evidence=DelegationDnsEvidence(ns_nxdomain=True),
+            reason="NS NXDOMAIN",
         )
 
-    def _delegation_servfail_with_soa_fallback(self, domain: str) -> DelegationResult:
-        """Resolve SOA after retry-exhausted NS SERVFAIL before returning review."""
+    def _delegation_ns_retry_exhausted_with_soa_fallback(
+        self, domain: str
+    ) -> DelegationResult:
+        """Resolve SOA after NS retry exhaustion before returning a terminal status."""
         return self._delegation_soa_query_fallback(
             domain=domain,
-            dns_evidence=DelegationDnsEvidence(ns_servfail=True),
-            reason="NS SERVFAIL",
+            dns_evidence=DelegationDnsEvidence(ns_retry_exhausted=True),
+            reason="NS retry exhausted",
         )
 
     def delegation_lookup(self, domain: str) -> DelegationResult:
@@ -454,26 +457,16 @@ class DelegationChecker(DNSQueryService):
             answer = self._resolve_delegation_record(
                 domain, "NS", self.delegation_retry_attempts
             )
-        except dns.resolver.NXDOMAIN:
-            result = DelegationResult(
-                domain=domain,
-                dns=DelegationDnsEvidence(ns_nxdomain=True),
-            )
+        except dns.resolver.NXDOMAIN as exc:
+            result = self._delegation_ns_nxdomain_with_soa_fallback(domain, exc)
         except dns.resolver.NoAnswer as exc:
-            result = self._delegation_nodata_with_soa_fallback(domain, exc)
-        except RetryableDNSLookupError as exc:
-            result = (
-                DelegationResult(
-                    domain=domain,
-                    dns=DelegationDnsEvidence(ns_timeout=True),
-                )
-                if exc.is_timeout
-                else self._delegation_servfail_with_soa_fallback(domain)
-            )
+            result = self._delegation_ns_nodata_result(domain, exc)
+        except RetryableDNSLookupError:
+            result = self._delegation_ns_retry_exhausted_with_soa_fallback(domain)
         except (dns.exception.DNSException, socket.gaierror):
             result = DelegationResult(
                 domain=domain,
-                dns=DelegationDnsEvidence(ns_servfail=True),
+                dns=DelegationDnsEvidence(ns_lookup_error=True),
             )
         else:
             result = self._delegation_result_from_answer(domain, answer)
@@ -487,6 +480,6 @@ class DelegationChecker(DNSQueryService):
             return DelegationResult(domain=domain, no_nameservers=True)
         return DelegationResult(
             domain=domain,
-            dns=DelegationDnsEvidence(ns_exists=True),
+            dns=DelegationDnsEvidence(ns_records_exist=True),
             nameservers=nameservers,
         )

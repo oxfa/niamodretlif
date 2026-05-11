@@ -49,6 +49,14 @@ from domain_pipeline.worker.runtime.transports import (
 
 logger = logging.getLogger(__name__)
 IP_LOCATION_EXPECTED_FAILURES = (requests.RequestException, ValueError)
+_NON_CACHEABLE_DELEGATION_STATUSES = frozenset(
+    {
+        "ns_nxdomain_soa_inconclusive",
+        "ns_retry_exhausted_soa_absent",
+        "ns_retry_exhausted_soa_inconclusive",
+        "ns_lookup_error",
+    }
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,12 +123,7 @@ class RuntimeDNSCacheLookupService:
                 registrable_domain,
                 executor=self.dns_executors.delegation,
             )
-        if result.status in {
-            "timeout",
-            "servfail",
-            "ns_nodata_soa_timeout",
-            "ns_nodata_soa_servfail",
-        }:
+        if result.status in _NON_CACHEABLE_DELEGATION_STATUSES:
             return result
         ttl_config = self.config["cache"]["classification_ttl_days"]
         ttl_days = (
