@@ -15358,6 +15358,7 @@ calgary-content.cresa.com
 calibration.ni.com
 calistaadama.com
 call-tracking.by
+call-tracking.co.uk
 callalelel.info
 calligraphyanatomy.com
 calligraphyscoldsparrow.com
@@ -18068,6 +18069,7 @@ compuserviceonline.com.br
 computers.panasonic.eu
 comscore.com
 comtelitalia.alcatel-lucent.com
+comunicacao.edpcomunicacao.com.br
 comunicacion.usj.es
 comunicaciones.davivienda.com.pa
 comunicaciones.daviviendacorredores.com
@@ -18549,6 +18551,7 @@ content.yole365.com
 content.youmiam.com
 content22.bmo.com
 content22.citi.eu
+content22.citibank.com.au
 content22.citibank.com.sg
 content22.citibankonline.com
 content22.online.citi.com
@@ -19191,6 +19194,7 @@ cpro2.baidu.cn
 cpro2.baidu.com
 cps.360buy.com
 cps.yaoqing.com
+cpsvwfrdhhe.com
 cpt.itv.com
 cpt.postnl.be
 cpt.postnl.nl
@@ -26276,6 +26280,7 @@ edococounter.de
 edolsbjawiinj.website
 edonwiqgwlvmc.online
 edprivatedqualize.org
+edpsmart.edpcomunicacao.com.br
 edqwztrptkdna.online
 edrakiber.com
 edrone.me
@@ -28288,6 +28293,7 @@ evenpatroller.com
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
+event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -28353,6 +28359,7 @@ events-ocu.zipify.com
 events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
+events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.attentivemobile.com
@@ -39479,6 +39486,7 @@ inhumyszolcov.space
 ini.litingxin.cn
 iniquegearbox.com
 inistrack.net
+init.phpwind.com
 init.phpwind.net
 initdvgmzzrli.space
 initiallybrigadebookstore.com
@@ -43589,6 +43597,7 @@ l.mydoki.app
 l.myvoleo.com
 l.navx.co
 l.netmums.com
+l.newnew.co
 l.nextplz.fr
 l.nflo.at
 l.nicematin.com
@@ -46415,6 +46424,7 @@ lp.demo9.demoamericas275.adobe.com
 lp.dmillersb.journeyusshared.adobe.com
 lp.dmillersbdev.journeyusshared.adobe.com
 lp.dynabook.com
+lp.edpcomunicacao.com.br
 lp.egghead.link
 lp.em.viking.com
 lp.email-kpn.cjm.adobe.com
@@ -48472,6 +48482,7 @@ marketing.echohealthinc.com
 marketing.echostarmobile.com
 marketing.ecosystemintegrity.com
 marketing.ecslearn.com
+marketing.edpcomunicacao.com.br
 marketing.efleets.com
 marketing.ehimrx.com
 marketing.ehy.com
@@ -54634,6 +54645,7 @@ newwiesdom.com.cn
 nex.163.com
 nex.corp.163.com
 nexac.com
+nexage.com
 nexahub.co.in
 nexeps.com
 nexium33bv.com
@@ -55619,6 +55631,7 @@ nsul.cn
 nsxrfh.icu
 nsxtob.cn
 nsy.hnzyfs.com
+nt.phpwind.com
 ntcfrzpzmeite.site
 ntdcfmssnmx.com
 ntegrodvtu.com
@@ -57431,6 +57444,7 @@ oppressiveindifferent.com
 oppuz.com
 oproi.com
 ops.sunpowercorp.com
+opstag.com
 opt-intelligence.com
 opt.delta.com
 optable.co
@@ -61969,6 +61983,7 @@ purposeswage.com
 pursuedcovering.com
 pursuingconjunction.com
 purtygoudy.com
+puscomosca.com
 puseqbbpfngaf.site
 puserving.com
 push-ad.com
@@ -64379,6 +64394,7 @@ rekuyy.com
 rel-link.californiapsychics.com
 rel-s.com
 relaamlrijdxq.site
+relacionamento.edpcomunicacao.com.br
 relap.io
 relap.mail.ru
 relappro.com
@@ -64590,6 +64606,7 @@ reporting-api.gannettinnovation.com
 reporting.autographapp.me
 reporting.cdndex.io
 reportlog.dftoutiao.com
+reports-api.sqreen.io
 reports-tsi.tangerine.io
 reports.hibu.com
 reports.sdiapi.com
@@ -66352,6 +66369,7 @@ s.orangeville.com
 s.ourwindsor.ca
 s.p.youku.com
 s.parrysound.com
+s.phpwind.com
 s.qd.qingting.fm
 s.qd.qingtingfm.com
 s.qtad.qingting.fm
@@ -70372,6 +70390,7 @@ smetrics.bissell.com
 smetrics.bittermens.com
 smetrics.bjs.com
 smetrics.bkstr.com
+smetrics.blair.com
 smetrics.blanchir-sp.net
 smetrics.blau.de
 smetrics.blockbuster.com
@@ -70578,6 +70597,7 @@ smetrics.citibank.ae
 smetrics.citibank.cn
 smetrics.citibank.co.th
 smetrics.citibank.co.uk
+smetrics.citibank.com.au
 smetrics.citibank.com.hk
 smetrics.citibank.com.my
 smetrics.citibank.com.ph
@@ -77647,6 +77667,7 @@ sync-transcend-cdn.com
 sync.audtd.com
 sync.mobojoy.baidu.com
 sync.shinobi.jp
+sync.tv
 sync2.audtd.com
 syncclickflow.com
 synccora.com
@@ -89892,6 +89913,7 @@ wiheedasrfts.com
 wijqnlrjczisx.space
 wijrejzkekuvy.site
 wikgojdk.bar
+wikia-beacon.com
 wikiquotations.com
 wikiwhatwhere.com
 wikvlbmtzzfmp.website
@@ -92905,6 +92927,7 @@ ylakmr.expressionscatalog.com
 ylbcwkazxnmjp.online
 ylblrqhpurxxo.website
 ylcajkhefghaf.online
+yldbt.com
 yldmgrimg.net
 yldr.io
 yldxtcgvchrck.site
