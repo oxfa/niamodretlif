@@ -62,7 +62,7 @@ class DelegationSoaEvidence:
 
     soa_exists: bool = False
     soa_absent: bool = False
-    soa_inconclusive: bool = False
+    soa_retry_exhausted: bool = False
     soa_source: str = ""
 
 
@@ -117,9 +117,9 @@ class DelegationResult:
         return self.soa.soa_absent
 
     @property
-    def soa_inconclusive(self) -> bool:
-        """Return whether SOA lookup did not prove SOA exists or absent."""
-        return self.soa.soa_inconclusive
+    def soa_retry_exhausted(self) -> bool:
+        """Return whether SOA lookup exhausted its retry budget."""
+        return self.soa.soa_retry_exhausted
 
     @property
     def soa_source(self) -> str:
@@ -169,8 +169,8 @@ _DELEGATION_STATUS_RULES: tuple[tuple[str, _DelegationStatusPredicate], ...] = (
         lambda result: result.dns.ns_nxdomain and result.soa.soa_absent,
     ),
     (
-        "ns_nxdomain_soa_inconclusive",
-        lambda result: result.dns.ns_nxdomain,
+        "ns_nxdomain_soa_retry_exhausted",
+        lambda result: result.dns.ns_nxdomain and result.soa.soa_retry_exhausted,
     ),
     (
         "ns_retry_exhausted_soa_exists",
@@ -181,8 +181,8 @@ _DELEGATION_STATUS_RULES: tuple[tuple[str, _DelegationStatusPredicate], ...] = (
         lambda result: result.dns.ns_retry_exhausted and result.soa.soa_absent,
     ),
     (
-        "ns_retry_exhausted_soa_inconclusive",
-        lambda result: result.dns.ns_retry_exhausted,
+        "ns_retry_exhausted_soa_retry_exhausted",
+        lambda result: result.dns.ns_retry_exhausted and result.soa.soa_retry_exhausted,
     ),
     ("ns_empty_answer", lambda result: result.no_nameservers),
     ("ns_lookup_error", lambda result: result.dns.ns_lookup_error),
@@ -349,7 +349,7 @@ class DelegationChecker(DNSQueryService):
         dns_evidence: DelegationDnsEvidence,
         reason: str,
     ) -> DelegationResult:
-        """Resolve direct SOA fallback after NS authority evidence was inconclusive."""
+        """Resolve direct SOA fallback after NS authority evidence needs disambiguation."""
         logger.debug(
             "DNS delegation %s starting SOA fallback domain=%s soa_source=%s",
             reason,
@@ -370,13 +370,7 @@ class DelegationChecker(DNSQueryService):
             result = DelegationResult(
                 domain=domain,
                 dns=dns_evidence,
-                soa=DelegationSoaEvidence(soa_inconclusive=True),
-            )
-        except (dns.exception.DNSException, socket.gaierror):
-            result = DelegationResult(
-                domain=domain,
-                dns=dns_evidence,
-                soa=DelegationSoaEvidence(soa_inconclusive=True),
+                soa=DelegationSoaEvidence(soa_retry_exhausted=True),
             )
         else:
             result = (
@@ -452,7 +446,7 @@ class DelegationChecker(DNSQueryService):
         )
 
     def delegation_lookup(self, domain: str) -> DelegationResult:
-        """Run delegation check: NS first, with SOA fallback for inconclusive NS."""
+        """Run delegation check: NS first, with SOA fallback for NXDOMAIN or retries."""
         try:
             answer = self._resolve_delegation_record(
                 domain, "NS", self.delegation_retry_attempts

@@ -104,7 +104,7 @@ def delegation_result_from_cache_record(record: Any) -> DelegationResult:
         soa=DelegationSoaEvidence(
             soa_exists=record.soa.soa_exists,
             soa_absent=record.soa.soa_absent,
-            soa_inconclusive=record.soa.soa_inconclusive,
+            soa_retry_exhausted=record.soa.soa_retry_exhausted,
             soa_source="cache" if record.soa.soa_exists else "",
         ),
         no_nameservers=record.no_nameservers,

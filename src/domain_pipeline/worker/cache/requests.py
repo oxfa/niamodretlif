@@ -80,7 +80,7 @@ def delegation_soa_evidence_from_mapping(row: Any) -> DelegationSoaEvidence:
     return DelegationSoaEvidence(
         soa_exists=bool(row["soa_exists"]),
         soa_absent=bool(row["soa_absent"]),
-        soa_inconclusive=bool(row["soa_inconclusive"]),
+        soa_retry_exhausted=bool(row["soa_retry_exhausted"]),
     )
 
 
