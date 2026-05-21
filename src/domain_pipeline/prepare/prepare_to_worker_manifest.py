@@ -116,11 +116,11 @@ class PreparedRuntimeMetadata(PrepareWorkerModel):
         return copy.deepcopy(self.model_dump())
 
 
-class WorkerRuntimeClassificationTTLSpec(PrepareWorkerModel):
-    """Delegation classification cache TTLs persisted in worker manifests."""
+class WorkerRuntimeDelegationTTLSpec(PrepareWorkerModel):
+    """Delegation cache TTLs persisted in worker manifests."""
 
-    delegation_actionable: int = 7
-    delegation_unactionable: int = 1
+    actionable: int = 7
+    unactionable: int = 1
 
 
 class WorkerRuntimeHostResolutionTTLSpec(PrepareWorkerModel):
@@ -136,8 +136,8 @@ class WorkerRuntimeCacheSpec(PrepareWorkerModel):
 
     cache_file: str
     baseline_cache_file: str = ""
-    classification_ttl_days: WorkerRuntimeClassificationTTLSpec = Field(
-        default_factory=WorkerRuntimeClassificationTTLSpec
+    delegation_ttl_days: WorkerRuntimeDelegationTTLSpec = Field(
+        default_factory=WorkerRuntimeDelegationTTLSpec
     )
     host_resolution_ttl_days: WorkerRuntimeHostResolutionTTLSpec = Field(
         default_factory=WorkerRuntimeHostResolutionTTLSpec

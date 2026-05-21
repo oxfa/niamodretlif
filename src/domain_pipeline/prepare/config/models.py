@@ -381,11 +381,11 @@ class InputConfig(StrictModel):
         return value.strip()
 
 
-class ClassificationTTLConfig(StrictModel):
-    """DNS actionability cache TTLs."""
+class DelegationTTLConfig(StrictModel):
+    """Delegation cache TTLs."""
 
-    delegation_actionable: int = 7
-    delegation_unactionable: int = 1
+    actionable: int = 7
+    unactionable: int = 1
 
 
 class HostResolutionTTLConfig(StrictModel):
@@ -406,8 +406,8 @@ class HostResolutionTTLConfig(StrictModel):
 class CacheConfig(StrictModel):
     """Global cache configuration."""
 
-    classification_ttl_days: ClassificationTTLConfig = Field(
-        default_factory=ClassificationTTLConfig
+    delegation_ttl_days: DelegationTTLConfig = Field(
+        default_factory=DelegationTTLConfig
     )
     host_resolution_ttl_days: HostResolutionTTLConfig = Field(
         default_factory=HostResolutionTTLConfig

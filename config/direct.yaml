@@ -134,14 +134,14 @@ runtime:
       scale_down_step: 1
 
 cache:
-  classification_ttl_days:
+  delegation_ttl_days:
     # Actionable delegation results use this TTL: NS records exist, NS NODATA,
     # NS NXDOMAIN with same-owner SOA, and NS retry-exhausted with same-owner SOA.
-    delegation_actionable: 7
+    actionable: 7
     # Stable unactionable delegation uses this TTL: NS NXDOMAIN with SOA absent
     # and successful NS answers with no nameserver targets. Review delegation
     # outcomes are not cached.
-    delegation_unactionable: 1
+    unactionable: 1
   host_resolution_ttl_days:
     resolved: 7
     nodata: 1

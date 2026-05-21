@@ -5,14 +5,14 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from domain_pipeline.routing.policy import route_for_pipeline_result_code
+from domain_pipeline.routing.decisions import TerminalDecisionPolicy
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 from domain_pipeline.worker.output.rows import (
     BaseRowDNSRequest,
     BaseRowIpLocationRequest,
     BaseRowRequest,
     BaseRowSourceRequest,
-    build_base_row,
+    TerminalRowBuilder,
 )
 from domain_pipeline.prepare.models import PreparedProvenance
 from domain_pipeline.worker.delegation.lookup import (
@@ -40,7 +40,7 @@ class CompletedResultRequest:
 
     source_context: WorkerSourceContext
     entry: ParsedDomainEntry
-    pipeline_result_code: str
+    decision_reason_code: str
     evidence: CompletedResultEvidence = dataclasses.field(
         default_factory=CompletedResultEvidence
     )
@@ -50,7 +50,8 @@ class CompletedResultRequest:
 
 def build_completed_result(request: CompletedResultRequest) -> CompletedHostResult:
     """Build a completed host result from a base output row."""
-    row = build_base_row(
+    decision = TerminalDecisionPolicy().from_reason_code(request.decision_reason_code)
+    row = TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=request.source_context,
@@ -66,7 +67,7 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedHostResu
                 ),
             ),
             entry=request.entry,
-            pipeline_result_code=request.pipeline_result_code,
+            decision=decision,
             dns=BaseRowDNSRequest(
                 delegation_result=request.evidence.delegation_result,
                 host_resolution_result=request.evidence.host_resolution_result,
@@ -82,8 +83,9 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedHostResu
     return CompletedHostResult(
         source_context=request.source_context,
         entry=request.entry,
-        pipeline_result_code=request.pipeline_result_code,
-        route=route_for_pipeline_result_code(request.pipeline_result_code),
+        final_result_code=decision.final_result_code,
+        decision_reason_code=decision.decision_reason_code,
+        route=decision.route,
         row=row,
         evidence=CompletedResultEvidence(
             delegation_result=request.evidence.delegation_result,

@@ -24,7 +24,7 @@ from domain_pipeline.prepare.assignment import (
 from domain_pipeline.prepare.models import PreparedHostEntry, PreparedInputSet
 from domain_pipeline.prepare.planner import PreparationPlanner
 from domain_pipeline.worker.output.manager import txt_output_value
-from domain_pipeline.worker.output.rows import build_review_output_row
+from domain_pipeline.worker.output.rows import ReviewRowProjector
 
 
 @dataclass
@@ -118,6 +118,7 @@ class PreparedBatchWriter:
             for row in preparation_terminal_rows
             if row.get("route") == "filtered"
         )
+        review_row_projector = ReviewRowProjector()
         return PreparedBatch(
             batch_id=batch_id,
             config_name=config_name,
@@ -133,7 +134,7 @@ class PreparedBatchWriter:
                 ],
                 preparation_filtered_output_values=preparation_filtered_output_values,
                 preparation_review_output_rows=[
-                    cast(dict[str, str], dict(build_review_output_row(row)))
+                    cast(dict[str, str], dict(review_row_projector.project(row)))
                     for row in preparation_review_rows
                 ],
                 preparation_terminal_rows=[

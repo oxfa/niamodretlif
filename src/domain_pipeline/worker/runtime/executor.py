@@ -11,8 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.classifications import (
-    PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+from domain_pipeline.prepare.reason_codes import (
+    DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
 )
 from domain_pipeline.worker.runtime.contracts import WorkerSourceContext
 from domain_pipeline.worker.cache.repository import CacheRepository
@@ -582,7 +582,7 @@ class PipelineExecutor:
                 CompletedResultRequest(
                     source_context=item.source_context,
                     entry=item.entry,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+                    decision_reason_code=DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
                     provenance={
                         "source_id_override": item.provenance.source.source_id_override,
                         "source_input_label_override": (

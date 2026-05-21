@@ -8,12 +8,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.classifications import (
-    PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
-    PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
-    PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
-    PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+from domain_pipeline.prepare.reason_codes import (
+    DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
+    DECISION_REASON_CODE_MANUAL_FILTER_OUT,
+    DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+    DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
+    DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
 )
 from domain_pipeline.prepare.config.loader import PipelineConfigLoader
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
@@ -35,12 +35,12 @@ from domain_pipeline.prepare.models import (
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
 from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
-from domain_pipeline.routing.policy import route_for_pipeline_result_code
+from domain_pipeline.routing.decisions import TerminalDecision, TerminalDecisionPolicy
 from domain_pipeline.worker.host_resolution.lookup import host_resolution_dns_profile
 from domain_pipeline.worker.output.rows import (
     BaseRowRequest,
     BaseRowSourceRequest,
-    build_base_row,
+    TerminalRowBuilder,
 )
 
 
@@ -92,7 +92,7 @@ class ManualRowRequest:
 
     job: SourceJob
     entry: ParsedDomainEntry
-    pipeline_result_code: str
+    decision_reason_code: str
     input_label: str
     source_ids: tuple[str, ...] | None = None
     source_input_labels: tuple[str, ...] | None = None
@@ -132,20 +132,21 @@ def _source_context_from_job(job: SourceJob) -> _PreparedSourceContext:
 
 
 def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
-    return build_base_row(
+    decision = TerminalDecisionPolicy().from_reason_code(request.decision_reason_code)
+    return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(request.job),
                 provenance=PreparedProvenance(
-                    source_id_override=request.pipeline_result_code,
+                    source_id_override=request.decision_reason_code,
                     source_input_label_override=request.input_label,
-                    source_ids=request.source_ids or (request.pipeline_result_code,),
+                    source_ids=request.source_ids or (request.decision_reason_code,),
                     source_input_labels=request.source_input_labels
                     or (request.input_label,),
                 ),
             ),
             entry=request.entry,
-            pipeline_result_code=request.pipeline_result_code,
+            decision=decision,
         )
     )
 
@@ -155,7 +156,10 @@ def _public_suffix_review_row(
     job: SourceJob,
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
-    return build_base_row(
+    decision = TerminalDecisionPolicy().from_reason_code(
+        DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX
+    )
+    return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(job),
@@ -169,7 +173,7 @@ def _public_suffix_review_row(
                 ),
             ),
             entry=prepared_entry.entry,
-            pipeline_result_code=PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX,
+            decision=decision,
         )
     )
 
@@ -179,7 +183,10 @@ def _manual_filter_pass_public_suffix_row(
     job: SourceJob,
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
-    return build_base_row(
+    decision = TerminalDecisionPolicy().from_reason_code(
+        DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
+    )
+    return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(job),
@@ -193,7 +200,7 @@ def _manual_filter_pass_public_suffix_row(
                 ),
             ),
             entry=prepared_entry.entry,
-            pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
+            decision=decision,
         )
     )
 
@@ -201,12 +208,12 @@ def _manual_filter_pass_public_suffix_row(
 def _preparation_terminal_row(
     *,
     row: dict[str, Any],
-    pipeline_result_code: str,
+    decision: TerminalDecision,
 ) -> dict[str, Any]:
-    """Return a prepare-owned terminal row with the canonical route policy."""
+    """Return a prepare-owned terminal row with the canonical decision policy."""
     return {
         **row,
-        "route": route_for_pipeline_result_code(pipeline_result_code),
+        "route": decision.route,
     }
 
 
@@ -335,7 +342,7 @@ class PreparationPlanner:
         for host in sorted(state.collections.manual_out_by_host):
             prepared_entry = state.collections.manual_out_by_host[host]
             source_ids = self.entry_merger.stable_unique_merge(
-                (PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,),
+                (DECISION_REASON_CODE_MANUAL_FILTER_OUT,),
                 prepared_entry.provenance.source_ids,
             )
             source_input_labels = self.entry_merger.stable_unique_merge(
@@ -346,17 +353,20 @@ class PreparationPlanner:
                 ManualRowRequest(
                     job=state.source_jobs_by_id[prepared_entry.position.source_id],
                     entry=prepared_entry.entry,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
+                    decision_reason_code=DECISION_REASON_CODE_MANUAL_FILTER_OUT,
                     input_label=str(state.manual_inputs.manual_filter_out_path),
                     source_ids=source_ids,
                     source_input_labels=source_input_labels,
                 )
             )
+            decision = TerminalDecisionPolicy().from_reason_code(
+                DECISION_REASON_CODE_MANUAL_FILTER_OUT
+            )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT,
+                    decision=decision,
                 )
             )
 
@@ -431,15 +441,21 @@ class PreparationPlanner:
                 or not prepared_entry.entry.registrable_domain
             ):
                 if prepared_entry.provenance.manual_filter_pass:
-                    pipeline_result_code = (
-                        PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
+                    decision_reason_code = (
+                        DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
+                    )
+                    decision = TerminalDecisionPolicy().from_reason_code(
+                        decision_reason_code
                     )
                     row = _manual_filter_pass_public_suffix_row(
                         job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
                     )
                 else:
-                    pipeline_result_code = PIPELINE_RESULT_CODE_INPUT_PUBLIC_SUFFIX
+                    decision_reason_code = DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX
+                    decision = TerminalDecisionPolicy().from_reason_code(
+                        decision_reason_code
+                    )
                     row = _public_suffix_review_row(
                         job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
@@ -448,7 +464,7 @@ class PreparationPlanner:
                 state.collections.terminal_rows.append(
                     _preparation_terminal_row(
                         row=row,
-                        pipeline_result_code=pipeline_result_code,
+                        decision=decision,
                     )
                 )
                 continue
@@ -465,15 +481,20 @@ class PreparationPlanner:
                 ManualRowRequest(
                     job=state.primary_job,
                     entry=entry,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+                    decision_reason_code=(
+                        DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES
+                    ),
                     input_label=str(state.manual_inputs.manual_filter_pass_path),
                 )
+            )
+            decision = TerminalDecisionPolicy().from_reason_code(
+                DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES
             )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
+                    decision=decision,
                 )
             )
 
@@ -487,15 +508,20 @@ class PreparationPlanner:
                 ManualRowRequest(
                     job=state.primary_job,
                     entry=entry,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+                    decision_reason_code=(
+                        DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES
+                    ),
                     input_label=str(state.manual_inputs.manual_filter_out_path),
                 )
+            )
+            decision = TerminalDecisionPolicy().from_reason_code(
+                DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES
             )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    pipeline_result_code=PIPELINE_RESULT_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
+                    decision=decision,
                 )
             )
 

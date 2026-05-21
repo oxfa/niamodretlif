@@ -13,10 +13,9 @@ from domain_pipeline.worker.output.manager import (
 )
 from domain_pipeline.worker.output.rows import (
     REVIEW_OUTPUT_COLUMNS,
+    ReviewRowProjector,
     ReviewOutputRow,
-    build_base_row,
-    build_review_output_row,
-    public_review_label,
+    TerminalRowBuilder,
     review_reason_for_row,
 )
 from domain_pipeline.worker.output.writer import (
@@ -31,14 +30,13 @@ __all__ = [
     "REVIEW_OUTPUT_COLUMNS",
     "ResultOutputWriter",
     "ReviewOutputRow",
+    "ReviewRowProjector",
+    "TerminalRowBuilder",
     "WriterResult",
     "audit_output_path_for_source",
-    "build_base_row",
-    "build_review_output_row",
     "csv_row_signature",
     "filtered_output_path_for_source",
     "output_paths_for_source",
-    "public_review_label",
     "review_basename_for_source",
     "review_output_path_for_source",
     "review_reason_for_row",

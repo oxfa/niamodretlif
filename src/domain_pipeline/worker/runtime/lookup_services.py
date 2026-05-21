@@ -30,10 +30,10 @@ from domain_pipeline.worker.ip_location.providers import (
     evaluate_ip_location_policy,
 )
 from domain_pipeline.worker.ip_location.result_policy import (
-    ip_location_policy_result_code,
+    ip_location_policy_reason_code,
 )
-from domain_pipeline.worker.ip_location.result_codes import (
-    PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED,
+from domain_pipeline.worker.ip_location.reason_codes import (
+    DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED,
 )
 from domain_pipeline.worker.runtime.busy_state import BusyReason, BusyStateRecorder
 from domain_pipeline.worker.runtime.results import (
@@ -125,11 +125,11 @@ class RuntimeDNSCacheLookupService:
             )
         if result.status in _NON_CACHEABLE_DELEGATION_STATUSES:
             return result
-        ttl_config = self.config["cache"]["classification_ttl_days"]
+        ttl_config = self.config["cache"]["delegation_ttl_days"]
         ttl_days = (
-            int(ttl_config["delegation_actionable"])
+            int(ttl_config["actionable"])
             if result.actionable
-            else int(ttl_config["delegation_unactionable"])
+            else int(ttl_config["unactionable"])
         )
         async with self.busy_state.track(BusyReason.CACHE_WRITE_QUEUE_PUT):
             await self.cache_resources.bundle.writers[0].enqueue(
@@ -267,9 +267,9 @@ class RuntimeIpLocationService:
             logger.warning(
                 "IpLocation lookup failed for %s: %s", host_resolution_result.host, exc
             )
-            return PIPELINE_RESULT_CODE_IP_LOCATION_LOOKUP_FAILED, results, None
+            return DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED, results, None
         return (
-            ip_location_policy_result_code(
+            ip_location_policy_reason_code(
                 policy, results, ip_location_config["policy"]
             ),
             results,

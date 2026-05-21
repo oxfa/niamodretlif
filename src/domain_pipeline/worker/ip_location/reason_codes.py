@@ -1,0 +1,18 @@
+"""IP-location decision reason-code constants."""
+
+from __future__ import annotations
+
+DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED = "ip_location_lookup_failed"
+DECISION_REASON_CODE_IP_LOCATION_POLICY_ACCEPTED = "ip_location_policy_accepted"
+DECISION_REASON_CODE_IP_LOCATION_POLICY_REJECTED = "ip_location_policy_rejected"
+DECISION_REASON_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE = (
+    "ip_location_region_name_unavailable"
+)
+
+IP_LOCATION_REVIEW_DECISION_REASON_CODES = frozenset(
+    {
+        DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED,
+        DECISION_REASON_CODE_IP_LOCATION_POLICY_REJECTED,
+        DECISION_REASON_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE,
+    }
+)

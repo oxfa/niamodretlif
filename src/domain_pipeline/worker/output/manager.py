@@ -8,11 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from domain_pipeline.paths.layout import DEBUG_ARTIFACTS_DIR
-from domain_pipeline.worker.output.review_labels import PUBLIC_REVIEW_LABELS
 from domain_pipeline.worker.output.rows import (
     REVIEW_OUTPUT_COLUMNS,
     ReviewOutputRow,
-    build_review_output_row,
+    ReviewRowProjector,
 )
 
 if TYPE_CHECKING:
@@ -73,24 +72,25 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
     if not review_rows:
         return
 
+    projector = ReviewRowProjector()
     projected_rows: list[ReviewOutputRow] = []
     for row in review_rows:
-        review_row = build_review_output_row(row)
-        input_review_label = str(row.get("classification", ""))
-        input_reason = str(row.get("classification_reason", ""))
+        review_row = projector.project(row)
+        input_review_label = str(row.get("review_reason_code", ""))
+        input_reason = str(row.get("review_reason", ""))
         if (
-            input_review_label in PUBLIC_REVIEW_LABELS
+            input_review_label
             and input_reason
-            and input_reason != review_row["classification_reason"]
+            and input_reason != review_row["review_reason"]
         ):
             log.debug(
                 "Review row rewrite changed existing reason for host=%s path=%s "
-                "classification=%s input_reason=%s output_reason=%s",
+                "review_reason_code=%s input_reason=%s output_reason=%s",
                 str(row.get("host", "")),
                 review_path,
                 input_review_label,
                 input_reason,
-                review_row["classification_reason"],
+                review_row["review_reason"],
             )
         projected_rows.append(review_row)
     write_projected_review_rows(review_path, projected_rows)

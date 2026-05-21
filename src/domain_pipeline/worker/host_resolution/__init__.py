@@ -11,8 +11,8 @@ from domain_pipeline.worker.host_resolution.lookup import (
     host_resolution_dns_profile,
 )
 from domain_pipeline.worker.host_resolution.result_policy import (
-    classify_host_resolution,
-    host_resolution_skipped_result_code,
+    host_resolution_reason_code,
+    host_resolution_skipped_reason_code,
 )
 
 __all__ = [
@@ -22,8 +22,8 @@ __all__ = [
     "HostResolutionChecker",
     "HostResolutionResult",
     "RetryableDNSLookupError",
-    "classify_host_resolution",
+    "host_resolution_reason_code",
     "effective_host_resolution_resolvers",
     "host_resolution_dns_profile",
-    "host_resolution_skipped_result_code",
+    "host_resolution_skipped_reason_code",
 ]
