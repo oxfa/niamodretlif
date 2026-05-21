@@ -5091,6 +5091,7 @@ ad.vryeye.com
 ad.walkgame.com
 ad.weibo.com
 ad.weixin.qq.com
+ad.where.com
 ad.winrar.com.cn
 ad.wretch.cc
 ad.wsod.com
@@ -6125,6 +6126,7 @@ ads-sg.tiktok.com
 ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.collectiveaudience.co
+ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -38002,6 +38004,7 @@ images.newsletter.larksuite.com
 images.newsletter.rewe-group.at
 images.notice.wageworks.com
 images.noticias.clarin.com
+images.notifications.aigdirect.com
 images.novedades.fibercorp.com.ar
 images.nwinsurance.pemco.com
 images.offers.princesscruises.co.uk
@@ -73384,6 +73387,7 @@ solutions.wellspring.com
 solutions.westrock.com
 solutions2.risk.lexisnexis.com
 solutionsadultes.com
+solutionshindsight.net
 solve.cranepi.com
 solvebots.com
 solvemilitaryconsulate.com
@@ -75469,6 +75473,7 @@ staticfile.net
 staticfile.org
 staticgalaksion.com
 statichf.shihuocdn.cn
+staticiv.com
 statics.3987.com
 statics.9669.com
 statics.woozooo.com
@@ -78303,6 +78308,7 @@ tag.contentanalytics.jp
 tag.cribnotes.jp
 tag.digops.sincro.io
 tag.eisa.mercari.com
+tag.elevaate.io
 tag.flagship.io
 tag.gendiscover.com
 tag.getamigo.io
@@ -82107,6 +82113,7 @@ track.solutions.ostechnology.co.jp
 track.solventum.com
 track.span-smt.jp
 track.spothero.com
+track.strife.com
 track.sunmedia.tv
 track.tappx.com
 track.td3x.com
@@ -83130,6 +83137,7 @@ tranquilplume.com
 tranquilveil.com
 tranquilveranda.com
 transact.blackboard.com
+transactionale.com
 transactionproducer.com
 transactionscookclotted.com
 transcend.io
@@ -83796,6 +83804,7 @@ truellovedating.com
 trueloveonlinee.com
 truenat.bid
 truendo.com
+truepush.com
 trueselfkeys.com
 truevaultcdn.com
 truffeleveche.com
@@ -90514,6 +90523,7 @@ wpauvu.obuvki.bg
 wpb.wgplayer.com
 wpbioervnvxdv.online
 wpbtyebtypph.com
+wpc.32df9.rhocdn.net
 wpcc.io
 wpcdn1.herokuapp.com
 wpcklpeseoivx.online
