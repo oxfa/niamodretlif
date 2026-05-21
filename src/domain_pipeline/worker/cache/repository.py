@@ -47,7 +47,7 @@ DELEGATION_COLUMNS = (
     "ns_lookup_error",
     "soa_exists",
     "soa_absent",
-    "soa_inconclusive",
+    "soa_retry_exhausted",
     "no_nameservers",
     "nameservers",
     "checked_at",
@@ -228,7 +228,7 @@ class CacheRepository:
                 ns_lookup_error INTEGER NOT NULL,
                 soa_exists INTEGER NOT NULL,
                 soa_absent INTEGER NOT NULL,
-                soa_inconclusive INTEGER NOT NULL,
+                soa_retry_exhausted INTEGER NOT NULL,
                 no_nameservers INTEGER NOT NULL,
                 nameservers TEXT NOT NULL,
                 checked_at TEXT NOT NULL,
@@ -316,7 +316,7 @@ class CacheRepository:
             INSERT OR REPLACE INTO {DELEGATION_TABLE} (
                 domain, resolver_key, ns_records_exist, ns_nodata, ns_nxdomain,
                 ns_retry_exhausted, ns_lookup_error, soa_exists, soa_absent,
-                soa_inconclusive, no_nameservers, nameservers, checked_at, expires_at
+                soa_retry_exhausted, no_nameservers, nameservers, checked_at, expires_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -329,7 +329,7 @@ class CacheRepository:
                 int(request.dns.ns_lookup_error),
                 int(request.soa.soa_exists),
                 int(request.soa.soa_absent),
-                int(request.soa.soa_inconclusive),
+                int(request.soa.soa_retry_exhausted),
                 int(request.no_nameservers),
                 json.dumps(request.nameservers, sort_keys=True),
                 request.timestamps.checked_at.isoformat(),
@@ -404,7 +404,7 @@ class CacheRepository:
                 INSERT OR REPLACE INTO {DELEGATION_TABLE} (
                     domain, resolver_key, ns_records_exist, ns_nodata, ns_nxdomain,
                     ns_retry_exhausted, ns_lookup_error, soa_exists, soa_absent,
-                    soa_inconclusive, no_nameservers, nameservers, checked_at,
+                    soa_retry_exhausted, no_nameservers, nameservers, checked_at,
                     expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,

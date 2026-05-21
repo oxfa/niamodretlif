@@ -56,7 +56,8 @@ class ProviderCredentialProbe:
             )
         except requests.RequestException as exc:
             logger.warning(
-                "%s credential validation probe was inconclusive for source %s: %s",
+                "%s credential validation probe did not prove credential validity "
+                "for source %s: %s",
                 self.provider_name,
                 request.source_id,
                 _safe_exception_summary(exc),
@@ -70,15 +71,13 @@ class ProviderCredentialProbe:
                 f"with HTTP {status_code}"
             )
         if status_code == 200:
-            self._log_inconclusive_success_payload(
+            self._log_unverified_success_payload(
                 response,
                 source_id=request.source_id,
             )
 
-    def _log_inconclusive_success_payload(
-        self, response: Any, *, source_id: str
-    ) -> None:
-        """Log inconclusive success payloads without making preparation fatal."""
+    def _log_unverified_success_payload(self, response: Any, *, source_id: str) -> None:
+        """Log success payloads that do not prove credential validity."""
         try:
             payload = response.json()
         except ValueError as exc:
@@ -93,7 +92,8 @@ class ProviderCredentialProbe:
             payload.get(self.expected_payload_field), str
         ):
             logger.warning(
-                "%s credential validation payload was inconclusive for source %s",
+                "%s credential validation payload did not prove credential validity "
+                "for source %s",
                 self.provider_name,
                 source_id,
             )

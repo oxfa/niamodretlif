@@ -20,9 +20,9 @@ from domain_pipeline.prepare.reason_codes import (
 )
 from domain_pipeline.worker.delegation.reason_codes import (
     DECISION_REASON_CODE_DELEGATION_NS_LOOKUP_ERROR,
-    DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_INCONCLUSIVE,
+    DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_RETRY_EXHAUSTED,
     DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_ABSENT,
-    DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_INCONCLUSIVE,
+    DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_RETRY_EXHAUSTED,
 )
 from domain_pipeline.worker.host_resolution.reason_codes import (
     DECISION_REASON_CODE_HOST_RESOLUTION_NODATA,
@@ -266,14 +266,14 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
             "manual_filter_out entry was not present in any configured source"
         ),
-        DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_INCONCLUSIVE: (
-            "delegation NS query returned NXDOMAIN and SOA lookup was inconclusive"
+        DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_RETRY_EXHAUSTED: (
+            "delegation NS query returned NXDOMAIN and SOA retry budget was exhausted"
         ),
         DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_ABSENT: (
             "delegation NS retry budget was exhausted and SOA was absent"
         ),
-        DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_INCONCLUSIVE: (
-            "delegation NS retry budget was exhausted and SOA lookup was inconclusive"
+        DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_RETRY_EXHAUSTED: (
+            "delegation NS retry budget was exhausted and SOA retry budget was exhausted"
         ),
         DECISION_REASON_CODE_DELEGATION_NS_LOOKUP_ERROR: (
             "delegation NS lookup failed before a definitive delegation result"

@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 IP_LOCATION_EXPECTED_FAILURES = (requests.RequestException, ValueError)
 _NON_CACHEABLE_DELEGATION_STATUSES = frozenset(
     {
-        "ns_nxdomain_soa_inconclusive",
+        "ns_nxdomain_soa_retry_exhausted",
         "ns_retry_exhausted_soa_absent",
-        "ns_retry_exhausted_soa_inconclusive",
+        "ns_retry_exhausted_soa_retry_exhausted",
         "ns_lookup_error",
     }
 )

@@ -176,9 +176,9 @@ defaults:
     # worker manifests are created when ipinfo_lite is enabled without a token.
     # When a token exists, prepare-batch sends one non-retried IPinfo validation
     # probe and fails only when IPinfo proves credential rejection with HTTP 401
-    # or 403. Rate limits, network failures, and inconclusive validation payloads
-    # do not fail prepare; worker lookup logic handles later provider availability
-    # and data-quality outcomes.
+    # or 403. Rate limits, network failures, and validation payloads that do not
+    # prove credential validity do not fail prepare; worker lookup logic handles
+    # later provider availability and data-quality outcomes.
     policy:
       enabled: false
       match_scope: all_ips
