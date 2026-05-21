@@ -125,6 +125,7 @@ sources:
     enabled: true
     input:
       type: url
-      location: https://is.gd/vQFXgT
+      # location: https://is.gd/vQFXgT
+      location: https://tinyurl.com/bdzx57hc
     ip_location:
       enabled: false
