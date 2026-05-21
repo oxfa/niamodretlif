@@ -2118,6 +2118,7 @@
 8iav2fuiy.com
 8j1f0af5.de
 8j7tu8vtxx.com
+8jfbt5va3r.com
 8jkx.com
 8jzw.com
 8k69vb6421.com
@@ -5091,7 +5092,6 @@ ad.vryeye.com
 ad.walkgame.com
 ad.weibo.com
 ad.weixin.qq.com
-ad.where.com
 ad.winrar.com.cn
 ad.wretch.cc
 ad.wsod.com
@@ -6199,8 +6199,6 @@ ads.talksport.com
 ads.tikpage.com
 ads.tiktok.com
 ads.travelaudience.com
-ads.tripod.lycos.co.uk
-ads.tripod.lycos.de
 ads.tripod.lycos.es
 ads.tripod.lycos.nl
 ads.ttv.com.tw
@@ -24824,7 +24822,6 @@ dripe.site
 drippingzone.com
 drive.carpoollogistics.com
 drive.seagate.com
-drive.waitrapp.com
 drivendecree.com
 driver.dctaxi.com
 driver.jugnoo.in
@@ -28295,7 +28292,6 @@ evenpatroller.com
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
-event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -28361,7 +28357,6 @@ events-ocu.zipify.com
 events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
-events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.attentivemobile.com
@@ -29463,7 +29458,6 @@ fds.api.moji.com
 fds.bmfwwz.top
 fdt.kraken.com
 fdxtbs.meeters.org
-fe.lea.lycos.co.uk
 fe4c0422j.com
 fe7qygqi2p2h.com
 fe8171c761.com
@@ -35651,7 +35645,6 @@ hit.interia.pl
 hit.mybestpro.com
 hit.salesfire.co.uk
 hit.skrz.cz
-hit.webcentre.lycos.co.uk
 hit100.ro
 hit2map.com
 hitbip.com
@@ -43311,6 +43304,7 @@ ktwllzdco.com
 ktwvbnfxd.com
 ktxmnweyvslpo.website
 ku2d3a7pa8mdi.com
+ku34bh9la09.com
 ku42hjr2e.com
 ku6.com
 ku63.com
@@ -52188,6 +52182,7 @@ mindershrimp.com
 mindfulgem.com
 mindlesscancel.pro
 mindlytix.com
+mindmanager.cn
 mindmapper.cc
 mindmeters.biz
 mindoccupy.com
@@ -57447,7 +57442,6 @@ oppressiveindifferent.com
 oppuz.com
 oproi.com
 ops.sunpowercorp.com
-opstag.com
 opt-intelligence.com
 opt.delta.com
 optable.co
@@ -59952,7 +59946,6 @@ pjgypcdpi.com
 pjh7.us.chantelle.com
 pjiixsjrzigen.site
 pjivecsgaqoip.website
-pjmlxcninwgezc.com
 pjmryh.zapatos.es
 pjogndc8ixoidna.360doc.cn
 pjoqdgncunzlk.online
@@ -61139,7 +61132,6 @@ previousplayground.com
 prewrapabulic.com
 prezna.com
 prf.vagnt.com
-prfct.co
 prfctmney.com
 prftrndivoqqt.online
 prfwhite.com
@@ -70393,7 +70385,6 @@ smetrics.bissell.com
 smetrics.bittermens.com
 smetrics.bjs.com
 smetrics.bkstr.com
-smetrics.blair.com
 smetrics.blanchir-sp.net
 smetrics.blau.de
 smetrics.blockbuster.com
@@ -72080,7 +72071,6 @@ smetrics.realpropertymgt.com
 smetrics.realsimple.com
 smetrics.realtor.com
 smetrics.recruit.co.jp
-smetrics.redbox.com
 smetrics.redbull.tv
 smetrics.redcapnow.com
 smetrics.redcross.org
@@ -73007,7 +72997,6 @@ sms.uphabit.com
 smsafelink.com
 smsapiens.com
 smsnejgixbwgs.space
-smsulx.kijijiautos.ca
 smtc.qantas.com
 smtc.qantas.com.au
 smtccv.loveholidays.com
@@ -75473,7 +75462,6 @@ staticfile.net
 staticfile.org
 staticgalaksion.com
 statichf.shihuocdn.cn
-staticiv.com
 statics.3987.com
 statics.9669.com
 statics.woozooo.com
@@ -77672,7 +77660,6 @@ sync-transcend-cdn.com
 sync.audtd.com
 sync.mobojoy.baidu.com
 sync.shinobi.jp
-sync.tv
 sync2.audtd.com
 syncclickflow.com
 synccora.com
@@ -78308,7 +78295,6 @@ tag.contentanalytics.jp
 tag.cribnotes.jp
 tag.digops.sincro.io
 tag.eisa.mercari.com
-tag.elevaate.io
 tag.flagship.io
 tag.gendiscover.com
 tag.getamigo.io
@@ -83137,7 +83123,6 @@ tranquilplume.com
 tranquilveil.com
 tranquilveranda.com
 transact.blackboard.com
-transactionale.com
 transactionproducer.com
 transactionscookclotted.com
 transcend.io
@@ -83804,7 +83789,6 @@ truellovedating.com
 trueloveonlinee.com
 truenat.bid
 truendo.com
-truepush.com
 trueselfkeys.com
 truevaultcdn.com
 truffeleveche.com
@@ -92796,6 +92780,7 @@ yieldlab.net
 yieldlift.com
 yieldlove-ad-serving.net
 yieldlove.com
+yieldmanager.com
 yieldmanager.net
 yieldmo.com
 yieldoptimizer.com
@@ -92937,7 +92922,6 @@ ylakmr.expressionscatalog.com
 ylbcwkazxnmjp.online
 ylblrqhpurxxo.website
 ylcajkhefghaf.online
-yldbt.com
 yldmgrimg.net
 yldr.io
 yldxtcgvchrck.site
@@ -94253,6 +94237,7 @@ zlaosdshglcjt.space
 zlavxbjuyekwo.site
 zlbkj.com
 zlbnjb.icu
+zlchyjwgxysknk.com
 zlciuiresrami.website
 zldqcc.dodenhof.de
 zldzndxprfyls.online
