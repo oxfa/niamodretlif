@@ -255,7 +255,10 @@ sources:
       # For file inputs, provide one concrete file path. The source reader opens
       # input.location directly and does not expand glob patterns.
       location: input/test.txt
-      # Valid values: auto, plain, hosts, adblock, dnsmasq
+      # Valid explicit values: auto, plain, hosts, adblock, dnsmasq.
+      # With auto, prepare also detects supported Surge RULE-SET domain
+      # declarations and Surge DOMAIN-SET lists. Surge formats are not valid
+      # explicit input.format values.
       format: auto
     fetch:
       request_timeout: 30.0
