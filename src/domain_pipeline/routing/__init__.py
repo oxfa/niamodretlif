@@ -1,8 +1,13 @@
 """Routing policy and route vocabulary for terminal pipeline results."""
 
-from domain_pipeline.routing.policy import (
-    PIPELINE_RESULT_CODE_ROUTE_MAP,
-    route_for_pipeline_result_code,
+from domain_pipeline.routing.decisions import (
+    DECISION_REASON_ROUTE_MAP,
+    FINAL_RESULT_CODE_DOMAIN_ACTIONABLE,
+    FINAL_RESULT_CODE_DOMAIN_UNACTIONABLE,
+    FINAL_RESULT_CODES,
+    TerminalDecision,
+    TerminalDecisionPolicy,
+    decision_for_reason_code,
 )
 from domain_pipeline.routing.types import (
     ROUTE_FILTERED,
@@ -12,10 +17,15 @@ from domain_pipeline.routing.types import (
 )
 
 __all__ = [
-    "PIPELINE_RESULT_CODE_ROUTE_MAP",
+    "DECISION_REASON_ROUTE_MAP",
+    "FINAL_RESULT_CODE_DOMAIN_ACTIONABLE",
+    "FINAL_RESULT_CODE_DOMAIN_UNACTIONABLE",
+    "FINAL_RESULT_CODES",
     "ROUTE_FILTERED",
     "ROUTE_REVIEW",
     "ROUTE_UNACTIONABLE",
     "ResultRoute",
-    "route_for_pipeline_result_code",
+    "TerminalDecision",
+    "TerminalDecisionPolicy",
+    "decision_for_reason_code",
 ]

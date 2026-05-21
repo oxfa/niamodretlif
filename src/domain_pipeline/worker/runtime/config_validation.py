@@ -28,7 +28,7 @@ CACHE_KEYS = frozenset(
     {
         "cache_file",
         "baseline_cache_file",
-        "classification_ttl_days",
+        "delegation_ttl_days",
         "host_resolution_ttl_days",
     }
 )

@@ -80,7 +80,7 @@ class IpLocationWorkItem:
     parsed: ParsedHostItem
     delegation_result: DelegationResult
     host_resolution_result: HostResolutionResult
-    pipeline_result_code: str
+    host_decision_reason_code: str
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,8 @@ class CompletedHostResult:
 
     source_context: WorkerSourceContext
     entry: ParsedDomainEntry
-    pipeline_result_code: str
+    final_result_code: str | None
+    decision_reason_code: str
     route: ResultRoute
     row: dict[str, Any]
     evidence: CompletedResultEvidence = field(default_factory=CompletedResultEvidence)

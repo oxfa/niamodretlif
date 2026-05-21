@@ -17,7 +17,7 @@ from domain_pipeline.worker.output.manager import (
     write_review_rows,
 )
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
-from domain_pipeline.worker.output.rows import build_review_output_row
+from domain_pipeline.worker.output.rows import ReviewRowProjector
 
 if TYPE_CHECKING:
     from domain_pipeline.worker.runtime.contracts import (
@@ -97,6 +97,7 @@ class ResultOutputWriter:
         self.counts: Counter = Counter()
         self._seen_paths: set[Path] = set()
         self._output_paths: list[Path] = []
+        self._review_row_projector = ReviewRowProjector()
 
     def _group_for_source(
         self, source_context: WorkerSourceContext
@@ -148,7 +149,7 @@ class ResultOutputWriter:
         group: OutputGroupBuffer,
         row: dict[str, Any],
     ) -> None:
-        review_signature = csv_row_signature(build_review_output_row(row))
+        review_signature = csv_row_signature(self._review_row_projector.project(row))
         if review_signature in group.seen.review_rows:
             raise DuplicateOutputInvariantError(
                 "review_row",
@@ -164,7 +165,9 @@ class ResultOutputWriter:
     def add(self, result: CompletedHostResult) -> None:
         """Record one completed terminal result."""
         group = self._group_for_source(result.source_context)
-        self.counts[result.pipeline_result_code] += 1
+        self.counts[f"reason_{result.decision_reason_code}"] += 1
+        if result.final_result_code is not None:
+            self.counts[f"final_{result.final_result_code}"] += 1
         self.counts[f"route_{result.route}"] += 1
         if result.route == "unactionable":
             host = result.row["host"]

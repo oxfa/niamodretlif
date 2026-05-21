@@ -28,7 +28,7 @@ from domain_pipeline.worker.ip_location.providers import (
     evaluate_ip_location_policy,
 )
 from domain_pipeline.worker.ip_location.result_policy import (
-    ip_location_policy_result_code,
+    ip_location_policy_reason_code,
 )
 
 __all__ = [
@@ -55,5 +55,5 @@ __all__ = [
     "RetryableIPLocationLookupError",
     "build_ip_location_provider",
     "evaluate_ip_location_policy",
-    "ip_location_policy_result_code",
+    "ip_location_policy_reason_code",
 ]

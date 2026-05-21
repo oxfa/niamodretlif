@@ -289,8 +289,8 @@ class WorkerAssignmentPlanner:
                     "baseline_cache_file": relative_path(
                         _workflow_paths().runtime_cache_path()
                     ),
-                    "classification_ttl_days": json.loads(
-                        json.dumps(config["cache"]["classification_ttl_days"])
+                    "delegation_ttl_days": json.loads(
+                        json.dumps(config["cache"]["delegation_ttl_days"])
                     ),
                     "host_resolution_ttl_days": json.loads(
                         json.dumps(config["cache"]["host_resolution_ttl_days"])

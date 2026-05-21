@@ -229,15 +229,15 @@ runtime:
       scale_down_step: 1
 
 cache:
-  classification_ttl_days:
+  delegation_ttl_days:
     # Cache retention, in days, for actionable registrable domains: NS records
     # exist, NS NODATA, NS NXDOMAIN with same-owner SOA, or NS retry-exhausted
     # with same-owner SOA.
-    delegation_actionable: 7
+    actionable: 7
     # Cache retention, in days, for stable unactionable delegation: NS NXDOMAIN
     # with SOA absent, or successful NS answers with no nameserver targets.
     # Review delegation outcomes are not cached.
-    delegation_unactionable: 1
+    unactionable: 1
   # Cache retention, in days, for stable exact-host host_resolution results.
   # CNAME aliases are followed before the final outcome is chosen. Transient
   # timeout/SERVFAIL host-resolution results are not cached after retry exhaustion.
