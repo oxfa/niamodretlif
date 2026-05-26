@@ -106,6 +106,7 @@ def write_projected_review_rows(
             review_handle,
             fieldnames=REVIEW_OUTPUT_COLUMNS,
             extrasaction="ignore",
+            quoting=csv.QUOTE_ALL,
         )
         writer.writeheader()
         for row in sorted(
