@@ -4986,6 +4986,7 @@ ad.api.moji.com
 ad.api.youshiad.cn
 ad.aucfan.com
 ad.aucview.com
+ad.auditude.com
 ad.autorace.jp
 ad.bayescom.com
 ad.beihai365.com
@@ -6174,7 +6175,6 @@ ads-sg.tiktok.com
 ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.collectiveaudience.co
-ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -6248,6 +6248,7 @@ ads.tikpage.com
 ads.tiktok.com
 ads.travelaudience.com
 ads.tripod.lycos.co.uk
+ads.tripod.lycos.de
 ads.tripod.lycos.es
 ads.tripod.lycos.nl
 ads.ttv.com.tw
@@ -8869,6 +8870,7 @@ analyzer.fc2.com
 analyzer2.fc2.com
 analyzeunsettled.com
 anamaembush.com
+anametrix.com
 anametrix.net
 anamuel-careslie.com
 anankesfigurer.com
@@ -11922,6 +11924,7 @@ b79e4u3hz7.com
 b7ec509038.com
 b7ijghyla1.com
 b7pgs2ifvq.com
+b7sw62.pingshu8.xyz
 b7tp47v2nb3x-a.akamaihd.net
 b82q168jgj.com
 b8b4ix7bj.com
@@ -20307,6 +20310,7 @@ cy2.vortex.data.microsoft.com.akadns.net
 cy98g9wuwn0n.angularjs.poc.glenigan.com
 cya2.net
 cyad.cc
+cyad1.cyworld.com
 cyad1.nate.com
 cyaijllypnzgl.online
 cyan92010.com
@@ -28524,6 +28528,7 @@ evenpatroller.com
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
+event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -28590,6 +28595,7 @@ events-ocu.zipify.com
 events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
+events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.attentivemobile.com
@@ -38548,6 +38554,7 @@ img.sheyuansu.com
 img.simply.bwin.com
 img.sparkasse-koelnbonn.de
 img.sxcol.cn
+img.taotaosou.cn
 img.tcdxt.com
 img.uu1001.cn
 img.uyangyong.cn
@@ -38562,6 +38569,7 @@ img.yingshidiguo.cn
 img.zsj18.com
 img.zuowen8.com
 img.zx590.com
+img01.taotaosou.cn
 img1.126.net
 img1.18183.com
 img1.g.pptv.com
@@ -63708,6 +63716,7 @@ qtrkqylpsmkat.online
 qtroibxoalnmq.site
 qttfwb.shaneco.com
 qttroiey.com
+qttwxclxus.com
 qtunfmawyv.com
 qtutulebptizh.website
 qtvbpiamyq.com
@@ -66608,6 +66617,8 @@ rum.condenastdigital.com
 rum.corewebvitals.io
 rum.cronitor.io
 rum.hlx.page
+rum.ingress.layer0.co
+rum.layer0.co
 rum.marquardmedia.hu
 rum.mauve.eu
 rum.optimizely.com
@@ -72726,6 +72737,7 @@ smetrics.realpropertymgt.com
 smetrics.realsimple.com
 smetrics.realtor.com
 smetrics.recruit.co.jp
+smetrics.redbox.com
 smetrics.redbull.tv
 smetrics.redcapnow.com
 smetrics.redcross.org
@@ -74585,6 +74597,7 @@ spectacular-temporary.com
 spectacularimmunity.com
 spectacularpercentage.com
 spectacularstamp.com
+spectate.com
 spectkuchean.com
 spectrum.gettyimages.com
 spectrumirriplaceableirriplaceable.com
@@ -75928,6 +75941,7 @@ stat.cnmo.com
 stat.cqwb.com.cn
 stat.cuadernosdepedagogia.com
 stat.cutv.com
+stat.cyworld.com
 stat.dauc.cz
 stat.dbschenker.com
 stat.dedecms.com
@@ -76505,6 +76519,7 @@ stats.incoming.co
 stats.increasinglyfunctional.com
 stats.indianpornempire.com
 stats.indyhall.org
+stats.inergizedigitalmedia.com
 stats.infoboard.de
 stats.infzm.com
 stats.innoq.com
@@ -78341,6 +78356,7 @@ sync-transcend-cdn.com
 sync.audtd.com
 sync.mobojoy.baidu.com
 sync.shinobi.jp
+sync.tv
 sync2.audtd.com
 syncclickflow.com
 synccora.com
@@ -84504,6 +84520,7 @@ truellovedating.com
 trueloveonlinee.com
 truenat.bid
 truendo.com
+truepush.com
 trueselfkeys.com
 truevaultcdn.com
 truffeleveche.com
@@ -85401,6 +85418,7 @@ ucwypnemwclwd.online
 uczzd.com
 uczzd.net
 ud.galaxus.de
+udata.mixmarket.biz
 udbaa.com
 udblog.huya.com
 udbouwafpgo.com
@@ -87244,6 +87262,7 @@ uwoyjvldkmqu.com
 uwppdmkzyykwk.site
 uwrr.cn
 uwsmamsebynub.site
+uwsolnysivq.com
 uwtewvalgil.com
 uwtybptzsqcvo.online
 uwvfubpjih.com
@@ -95448,6 +95467,7 @@ zugedrpjyzgim.space
 zugo.com
 zuhityfzxjhan.website
 zuidpnenuegax.site
+zuieggzsdlo.com
 zujtlj.icu
 zujz.cn
 zukore.com
