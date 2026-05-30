@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from domain_pipeline.routing.route_codes import (
+    RouteCode,
+    StageRouteTransition,
+)
 from domain_pipeline.routing.types import ResultRoute
 from domain_pipeline.prepare.models import PreparedProvenance
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
@@ -71,6 +75,7 @@ class HostResolutionWorkItem:
 
     parsed: ParsedHostItem
     delegation_result: DelegationResult
+    delegation_transition: StageRouteTransition
 
 
 @dataclass(frozen=True)
@@ -80,7 +85,7 @@ class IpLocationWorkItem:
     parsed: ParsedHostItem
     delegation_result: DelegationResult
     host_resolution_result: HostResolutionResult
-    host_decision_reason_code: str
+    host_resolution_transition: StageRouteTransition
 
 
 @dataclass(frozen=True)
@@ -89,8 +94,7 @@ class CompletedHostResult:
 
     source_context: WorkerSourceContext
     entry: ParsedDomainEntry
-    final_result_code: str | None
-    decision_reason_code: str
     route: ResultRoute
+    route_code: RouteCode
     row: dict[str, Any]
     evidence: CompletedResultEvidence = field(default_factory=CompletedResultEvidence)

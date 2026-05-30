@@ -165,9 +165,7 @@ class ResultOutputWriter:
     def add(self, result: CompletedHostResult) -> None:
         """Record one completed terminal result."""
         group = self._group_for_source(result.source_context)
-        self.counts[f"reason_{result.decision_reason_code}"] += 1
-        if result.final_result_code is not None:
-            self.counts[f"final_{result.final_result_code}"] += 1
+        self.counts[f"route_code_{result.route_code.value}"] += 1
         self.counts[f"route_{result.route}"] += 1
         if result.route == "unactionable":
             host = result.row["host"]

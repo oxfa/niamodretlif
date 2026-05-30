@@ -21,6 +21,7 @@ from domain_pipeline.worker.cache.requests import (
 )
 from domain_pipeline.worker.cache.repository import utc_now
 from domain_pipeline.worker.cache.service import CacheHitSource
+from domain_pipeline.routing import IpLocationRoutingPolicy, TerminalRouteTransition
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
 from domain_pipeline.worker.ip_location.providers import (
@@ -28,12 +29,6 @@ from domain_pipeline.worker.ip_location.providers import (
     IPLocationResult,
     build_ip_location_provider,
     evaluate_ip_location_policy,
-)
-from domain_pipeline.worker.ip_location.result_policy import (
-    ip_location_policy_reason_code,
-)
-from domain_pipeline.worker.ip_location.reason_codes import (
-    DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED,
 )
 from domain_pipeline.worker.runtime.busy_state import BusyReason, BusyStateRecorder
 from domain_pipeline.worker.runtime.results import (
@@ -230,7 +225,7 @@ class RuntimeIpLocationService:
         *,
         ip_location_config: dict[str, Any],
         host_resolution_result: HostResolutionResult,
-    ) -> tuple[str, list[IPLocationResult], Any | None]:
+    ) -> tuple[TerminalRouteTransition, list[IPLocationResult], Any | None]:
         """Run or cache-read the optional IP-location stage and evaluate its policy."""
         provider_name = str(ip_location_config.get("effective_provider", ""))
         now = utc_now()
@@ -267,10 +262,12 @@ class RuntimeIpLocationService:
             logger.warning(
                 "IpLocation lookup failed for %s: %s", host_resolution_result.host, exc
             )
-            return DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED, results, None
+            return IpLocationRoutingPolicy().lookup_failed(), results, None
         return (
-            ip_location_policy_reason_code(
-                policy, results, ip_location_config["policy"]
+            IpLocationRoutingPolicy().for_policy(
+                policy,
+                results,
+                ip_location_config["policy"],
             ),
             results,
             policy,
