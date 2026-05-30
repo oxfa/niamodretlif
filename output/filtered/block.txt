@@ -6244,6 +6244,7 @@ ads.tikpage.com
 ads.tiktok.com
 ads.travelaudience.com
 ads.tripod.lycos.co.uk
+ads.tripod.lycos.de
 ads.tripod.lycos.es
 ads.tripod.lycos.nl
 ads.ttv.com.tw
@@ -28236,6 +28237,7 @@ estadisticas.lanacion.com.ar
 estadisticasgratis.com
 estadonline.publiguias.cl
 estara.com
+estat.com
 estatueofthea.info
 esteemcountryside.com
 esteemed-ability.pro
@@ -28413,6 +28415,7 @@ eulerian.mathon.fr
 eulerian.monoprix.fr
 eulerian.net
 eulerian.netbooster.com
+eulerian.officiel-des-vacances.com
 eulerian.oxybul.com
 eulerian.sarenza.com
 eulerian.siandso.com
@@ -55063,6 +55066,7 @@ newwiesdom.com.cn
 nex.163.com
 nex.corp.163.com
 nexac.com
+nexage.com
 nexahub.co.in
 nexeps.com
 nexium33bv.com
@@ -63196,6 +63200,7 @@ qhygnhcpvmcokai.com
 qi.wndlkj.com
 qiaiiaqbzortj.space
 qianclick.baidu.com
+qianwei.wang
 qibjptkwyhudx.site
 qibtulkazdz.in
 qichexin.com
@@ -63908,6 +63913,7 @@ qxzfdeagblwys.space
 qyalpbwjsmvgz.online
 qyatej.bocage.fr
 qybratedbxyac.online
+qybrsqzj.com
 qyel.cn
 qygpcxfqqvfhr.online
 qygxrh.vandykes.com
@@ -65137,6 +65143,7 @@ reporting-api.gannettinnovation.com
 reporting.autographapp.me
 reporting.cdndex.io
 reportlog.dftoutiao.com
+reports-api.sqreen.io
 reports-tsi.tangerine.io
 reports.hibu.com
 reports.sdiapi.com
@@ -78887,6 +78894,7 @@ tag.contentanalytics.jp
 tag.cribnotes.jp
 tag.digops.sincro.io
 tag.eisa.mercari.com
+tag.elevaate.io
 tag.flagship.io
 tag.gendiscover.com
 tag.getamigo.io
@@ -83740,6 +83748,7 @@ tranquilplume.com
 tranquilveil.com
 tranquilveranda.com
 transact.blackboard.com
+transactionale.com
 transactionproducer.com
 transactionscookclotted.com
 transcend.io
@@ -87172,6 +87181,7 @@ uxjw.cn
 uxkpztjxinsne.site
 uxkurx.sportsmansguide.com
 uxncqfiilwfkw.site
+uxnkyrfxgxz.com
 uxosmajycfj.com
 uxpjzndoedoha.website
 uxplora.davivienda.com
@@ -93641,6 +93651,7 @@ ylakmr.expressionscatalog.com
 ylbcwkazxnmjp.online
 ylblrqhpurxxo.website
 ylcajkhefghaf.online
+yldbt.com
 yldmgrimg.net
 yldr.io
 yldxtcgvchrck.site
