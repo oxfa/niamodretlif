@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from domain_pipeline.routing.decisions import TerminalDecisionPolicy
+from domain_pipeline.routing.route_codes import TerminalRouteTransition
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 from domain_pipeline.worker.output.rows import (
     BaseRowDNSRequest,
@@ -40,7 +40,7 @@ class CompletedResultRequest:
 
     source_context: WorkerSourceContext
     entry: ParsedDomainEntry
-    decision_reason_code: str
+    route_transition: TerminalRouteTransition
     evidence: CompletedResultEvidence = dataclasses.field(
         default_factory=CompletedResultEvidence
     )
@@ -49,8 +49,8 @@ class CompletedResultRequest:
 
 
 def build_completed_result(request: CompletedResultRequest) -> CompletedHostResult:
-    """Build a completed host result from a base output row."""
-    decision = TerminalDecisionPolicy().from_reason_code(request.decision_reason_code)
+    """Build a completed host result from a terminal route transition."""
+    transition = request.route_transition
     row = TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
@@ -67,7 +67,7 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedHostResu
                 ),
             ),
             entry=request.entry,
-            decision=decision,
+            route_transition=transition,
             dns=BaseRowDNSRequest(
                 delegation_result=request.evidence.delegation_result,
                 host_resolution_result=request.evidence.host_resolution_result,
@@ -83,9 +83,8 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedHostResu
     return CompletedHostResult(
         source_context=request.source_context,
         entry=request.entry,
-        final_result_code=decision.final_result_code,
-        decision_reason_code=decision.decision_reason_code,
-        route=decision.route,
+        route=transition.route,
+        route_code=transition.route_code,
         row=row,
         evidence=CompletedResultEvidence(
             delegation_result=request.evidence.delegation_result,

@@ -8,13 +8,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.reason_codes import (
-    DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
-    DECISION_REASON_CODE_MANUAL_FILTER_OUT,
-    DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-    DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
-    DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
-)
 from domain_pipeline.prepare.config.loader import PipelineConfigLoader
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
 from domain_pipeline.prepare.delegation_conflicts import (
@@ -35,7 +28,11 @@ from domain_pipeline.prepare.models import (
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
 from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
-from domain_pipeline.routing.decisions import TerminalDecision, TerminalDecisionPolicy
+from domain_pipeline.routing import (
+    InputValidationRoutingPolicy,
+    ManualRoutingPolicy,
+    TerminalRouteTransition,
+)
 from domain_pipeline.worker.host_resolution.lookup import host_resolution_dns_profile
 from domain_pipeline.worker.output.rows import (
     BaseRowRequest,
@@ -92,7 +89,7 @@ class ManualRowRequest:
 
     job: SourceJob
     entry: ParsedDomainEntry
-    decision_reason_code: str
+    route_transition: TerminalRouteTransition
     input_label: str
     source_ids: tuple[str, ...] | None = None
     source_input_labels: tuple[str, ...] | None = None
@@ -132,21 +129,21 @@ def _source_context_from_job(job: SourceJob) -> _PreparedSourceContext:
 
 
 def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
-    decision = TerminalDecisionPolicy().from_reason_code(request.decision_reason_code)
+    route_code_value = request.route_transition.route_code.value
     return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(request.job),
                 provenance=PreparedProvenance(
-                    source_id_override=request.decision_reason_code,
+                    source_id_override=route_code_value,
                     source_input_label_override=request.input_label,
-                    source_ids=request.source_ids or (request.decision_reason_code,),
+                    source_ids=request.source_ids or (route_code_value,),
                     source_input_labels=request.source_input_labels
                     or (request.input_label,),
                 ),
             ),
             entry=request.entry,
-            decision=decision,
+            route_transition=request.route_transition,
         )
     )
 
@@ -156,9 +153,7 @@ def _public_suffix_review_row(
     job: SourceJob,
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
-    decision = TerminalDecisionPolicy().from_reason_code(
-        DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX
-    )
+    route_transition = InputValidationRoutingPolicy().public_suffix()
     return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
@@ -173,7 +168,7 @@ def _public_suffix_review_row(
                 ),
             ),
             entry=prepared_entry.entry,
-            decision=decision,
+            route_transition=route_transition,
         )
     )
 
@@ -183,9 +178,7 @@ def _manual_filter_pass_public_suffix_row(
     job: SourceJob,
     prepared_entry: PreparedHostEntry,
 ) -> dict[str, Any]:
-    decision = TerminalDecisionPolicy().from_reason_code(
-        DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
-    )
+    route_transition = ManualRoutingPolicy().filter_public_suffix_passed()
     return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
@@ -200,7 +193,7 @@ def _manual_filter_pass_public_suffix_row(
                 ),
             ),
             entry=prepared_entry.entry,
-            decision=decision,
+            route_transition=route_transition,
         )
     )
 
@@ -208,12 +201,12 @@ def _manual_filter_pass_public_suffix_row(
 def _preparation_terminal_row(
     *,
     row: dict[str, Any],
-    decision: TerminalDecision,
+    route_transition: TerminalRouteTransition,
 ) -> dict[str, Any]:
-    """Return a prepare-owned terminal row with the canonical decision policy."""
+    """Return a prepare-owned terminal row with the canonical route policy."""
     return {
         **row,
-        "route": decision.route,
+        "route": route_transition.route,
     }
 
 
@@ -341,8 +334,10 @@ class PreparationPlanner:
     def _append_manual_out_rows(self, state: PreparationState) -> None:
         for host in sorted(state.collections.manual_out_by_host):
             prepared_entry = state.collections.manual_out_by_host[host]
+            route_transition = ManualRoutingPolicy().filter_out()
+            route_code_value = route_transition.route_code.value
             source_ids = self.entry_merger.stable_unique_merge(
-                (DECISION_REASON_CODE_MANUAL_FILTER_OUT,),
+                (route_code_value,),
                 prepared_entry.provenance.source_ids,
             )
             source_input_labels = self.entry_merger.stable_unique_merge(
@@ -353,20 +348,17 @@ class PreparationPlanner:
                 ManualRowRequest(
                     job=state.source_jobs_by_id[prepared_entry.position.source_id],
                     entry=prepared_entry.entry,
-                    decision_reason_code=DECISION_REASON_CODE_MANUAL_FILTER_OUT,
+                    route_transition=route_transition,
                     input_label=str(state.manual_inputs.manual_filter_out_path),
                     source_ids=source_ids,
                     source_input_labels=source_input_labels,
                 )
             )
-            decision = TerminalDecisionPolicy().from_reason_code(
-                DECISION_REASON_CODE_MANUAL_FILTER_OUT
-            )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    decision=decision,
+                    route_transition=route_transition,
                 )
             )
 
@@ -441,21 +433,15 @@ class PreparationPlanner:
                 or not prepared_entry.entry.registrable_domain
             ):
                 if prepared_entry.provenance.manual_filter_pass:
-                    decision_reason_code = (
-                        DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX
-                    )
-                    decision = TerminalDecisionPolicy().from_reason_code(
-                        decision_reason_code
+                    route_transition = (
+                        ManualRoutingPolicy().filter_public_suffix_passed()
                     )
                     row = _manual_filter_pass_public_suffix_row(
                         job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
                     )
                 else:
-                    decision_reason_code = DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX
-                    decision = TerminalDecisionPolicy().from_reason_code(
-                        decision_reason_code
-                    )
+                    route_transition = InputValidationRoutingPolicy().public_suffix()
                     row = _public_suffix_review_row(
                         job=state.source_jobs_by_id[prepared_entry.position.source_id],
                         prepared_entry=prepared_entry,
@@ -464,7 +450,7 @@ class PreparationPlanner:
                 state.collections.terminal_rows.append(
                     _preparation_terminal_row(
                         row=row,
-                        decision=decision,
+                        route_transition=route_transition,
                     )
                 )
                 continue
@@ -477,24 +463,20 @@ class PreparationPlanner:
         ):
             if host in state.collections.matched_hosts:
                 continue
+            route_transition = ManualRoutingPolicy().filter_pass_not_in_sources()
             row = _manual_review_row(
                 ManualRowRequest(
                     job=state.primary_job,
                     entry=entry,
-                    decision_reason_code=(
-                        DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES
-                    ),
+                    route_transition=route_transition,
                     input_label=str(state.manual_inputs.manual_filter_pass_path),
                 )
-            )
-            decision = TerminalDecisionPolicy().from_reason_code(
-                DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES
             )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    decision=decision,
+                    route_transition=route_transition,
                 )
             )
 
@@ -504,24 +486,20 @@ class PreparationPlanner:
         ):
             if host in state.collections.manual_out_by_host:
                 continue
+            route_transition = ManualRoutingPolicy().filter_out_not_in_sources()
             row = _manual_review_row(
                 ManualRowRequest(
                     job=state.primary_job,
                     entry=entry,
-                    decision_reason_code=(
-                        DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES
-                    ),
+                    route_transition=route_transition,
                     input_label=str(state.manual_inputs.manual_filter_out_path),
                 )
-            )
-            decision = TerminalDecisionPolicy().from_reason_code(
-                DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES
             )
             state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,
-                    decision=decision,
+                    route_transition=route_transition,
                 )
             )
 

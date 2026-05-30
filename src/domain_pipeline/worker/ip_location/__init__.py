@@ -27,9 +27,6 @@ from domain_pipeline.worker.ip_location.providers import (
     build_ip_location_provider,
     evaluate_ip_location_policy,
 )
-from domain_pipeline.worker.ip_location.result_policy import (
-    ip_location_policy_reason_code,
-)
 
 __all__ = [
     "IP_LOCATION_PROVIDER_GEOJS",
@@ -55,5 +52,4 @@ __all__ = [
     "RetryableIPLocationLookupError",
     "build_ip_location_provider",
     "evaluate_ip_location_policy",
-    "ip_location_policy_reason_code",
 ]

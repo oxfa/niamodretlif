@@ -7,35 +7,10 @@ import json
 import dataclasses
 from typing import Any, Protocol, TypedDict
 
-from domain_pipeline.routing.decisions import (
-    TerminalDecision,
-    TerminalDecisionPolicy,
-)
-from domain_pipeline.prepare.reason_codes import (
-    DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
-    DECISION_REASON_CODE_MANUAL_FILTER_OUT,
-    DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES,
-    DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX,
-    DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES,
-)
-from domain_pipeline.worker.delegation.reason_codes import (
-    DECISION_REASON_CODE_DELEGATION_NS_LOOKUP_ERROR,
-    DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_RETRY_EXHAUSTED,
-    DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_ABSENT,
-    DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_RETRY_EXHAUSTED,
-)
-from domain_pipeline.worker.host_resolution.reason_codes import (
-    DECISION_REASON_CODE_HOST_RESOLUTION_NODATA,
-    DECISION_REASON_CODE_HOST_RESOLUTION_NXDOMAIN,
-    DECISION_REASON_CODE_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES,
-    DECISION_REASON_CODE_HOST_RESOLUTION_SERVFAIL,
-    DECISION_REASON_CODE_HOST_RESOLUTION_TIMEOUT,
-    HOST_RESOLUTION_REVIEW_DECISION_REASON_CODES,
-)
-from domain_pipeline.worker.ip_location.reason_codes import (
-    DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED,
-    DECISION_REASON_CODE_IP_LOCATION_POLICY_REJECTED,
-    DECISION_REASON_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE,
+from domain_pipeline.routing.policies import ROUTE_REASON_TEXT
+from domain_pipeline.routing.route_codes import (
+    RouteCode,
+    TerminalRouteTransition,
 )
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 from domain_pipeline.prepare.models import PreparedProvenance
@@ -53,8 +28,7 @@ REVIEW_OUTPUT_COLUMNS = (
     "input_name",
     "host",
     "registrable_domain",
-    "final_result_code",
-    "review_reason_code",
+    "route_code",
     "review_reason",
     "delegation_status",
     "delegation_reason",
@@ -110,8 +84,7 @@ class ReviewOutputRow(TypedDict):
     input_name: str
     host: str
     registrable_domain: str
-    final_result_code: str
-    review_reason_code: str
+    route_code: str
     review_reason: str
     delegation_status: str
     delegation_reason: str
@@ -180,7 +153,7 @@ class BaseRowRequest:
 
     source: BaseRowSourceRequest
     entry: ParsedDomainEntry
-    decision: TerminalDecision | None = None
+    route_transition: TerminalRouteTransition | None = None
     dns: BaseRowDNSRequest = dataclasses.field(default_factory=BaseRowDNSRequest)
     ip_location: BaseRowIpLocationRequest = dataclasses.field(
         default_factory=BaseRowIpLocationRequest
@@ -234,76 +207,33 @@ def _ip_location_reason_for_row(
 
 def review_reason_for_row(row: dict[str, Any]) -> str:
     """Return a user-facing reason for why one row landed in review output."""
-    decision_reason_code = str(row.get("decision_reason_code", ""))
+    route_code = str(row.get("route_code", ""))
     host_resolution_reason = str(row.get("host_resolution_reason", ""))
     host_resolution_status = str(row.get("host_resolution_status", ""))
     if (
-        decision_reason_code in HOST_RESOLUTION_REVIEW_DECISION_REASON_CODES
+        route_code
+        in {
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_NXDOMAIN.value,
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_NODATA.value,
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_TIMEOUT.value,
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_SERVFAIL.value,
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_RESOLVED_WITHOUT_IP_ADDRESSES.value,
+        }
         and host_resolution_reason
         and host_resolution_reason != host_resolution_status
     ):
         return host_resolution_reason
-    if decision_reason_code == DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED:
+    if route_code == RouteCode.IP_LOCATION_TO_REVIEW_LOOKUP_FAILED.value:
         ip_location_reason = str(row.get("ip_location_reason", ""))
         specific_reason = _IP_LOCATION_LOOKUP_FAILURE_REVIEW_REASON.get(
             ip_location_reason
         )
         if specific_reason is not None:
             return specific_reason
-    reason_by_decision_reason_code = {
-        DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX: (
-            "input is a public suffix rather than a registrable host"
-        ),
-        DECISION_REASON_CODE_MANUAL_FILTER_PASS_NOT_IN_SOURCES: (
-            "manual_filter_pass entry was not present in any configured source"
-        ),
-        DECISION_REASON_CODE_MANUAL_FILTER_PASS_PUBLIC_SUFFIX: (
-            "public suffix input was explicitly allowed by manual_filter_pass"
-        ),
-        DECISION_REASON_CODE_MANUAL_FILTER_OUT: (
-            "host was explicitly sent to review by manual_filter_out"
-        ),
-        DECISION_REASON_CODE_MANUAL_FILTER_OUT_NOT_IN_SOURCES: (
-            "manual_filter_out entry was not present in any configured source"
-        ),
-        DECISION_REASON_CODE_DELEGATION_NS_NXDOMAIN_SOA_RETRY_EXHAUSTED: (
-            "delegation NS query returned NXDOMAIN and SOA retry budget was exhausted"
-        ),
-        DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_ABSENT: (
-            "delegation NS retry budget was exhausted and SOA was absent"
-        ),
-        DECISION_REASON_CODE_DELEGATION_NS_RETRY_EXHAUSTED_SOA_RETRY_EXHAUSTED: (
-            "delegation NS retry budget was exhausted and SOA retry budget was exhausted"
-        ),
-        DECISION_REASON_CODE_DELEGATION_NS_LOOKUP_ERROR: (
-            "delegation NS lookup failed before a definitive delegation result"
-        ),
-        DECISION_REASON_CODE_HOST_RESOLUTION_NXDOMAIN: (
-            "host resolution returned NXDOMAIN"
-        ),
-        DECISION_REASON_CODE_HOST_RESOLUTION_NODATA: "host resolution returned NODATA",
-        DECISION_REASON_CODE_HOST_RESOLUTION_TIMEOUT: (
-            "host resolution timed out after retries"
-        ),
-        DECISION_REASON_CODE_HOST_RESOLUTION_SERVFAIL: (
-            "host resolution returned SERVFAIL after retries"
-        ),
-        DECISION_REASON_CODE_HOST_RESOLUTION_RESOLVED_WITHOUT_IP_ADDRESSES: (
-            "host resolution produced no usable IP addresses"
-        ),
-        DECISION_REASON_CODE_IP_LOCATION_LOOKUP_FAILED: (
-            "ip_location lookup did not produce usable data"
-        ),
-        DECISION_REASON_CODE_IP_LOCATION_REGION_NAME_UNAVAILABLE: (
-            "ip location policy required a region name unavailable from the provider"
-        ),
-        DECISION_REASON_CODE_IP_LOCATION_POLICY_REJECTED: (
-            "ip location policy rejected the resolved IP set"
-        ),
-    }
-    return reason_by_decision_reason_code.get(
-        decision_reason_code, decision_reason_code
-    )
+    try:
+        return ROUTE_REASON_TEXT[RouteCode(route_code)]
+    except ValueError:
+        return route_code
 
 
 def _json_list(values: list[str] | tuple[str, ...]) -> str:
@@ -311,7 +241,7 @@ def _json_list(values: list[str] | tuple[str, ...]) -> str:
 
 
 class TerminalRowBuilder:
-    """Build raw terminal rows from a terminal decision and stage evidence."""
+    """Build raw terminal rows from a terminal route transition and stage evidence."""
 
     def build(self, request: BaseRowRequest) -> dict[str, Any]:
         """Build the raw/terminal row shared by runtime and preparation."""
@@ -326,9 +256,9 @@ def _build_terminal_row(request: BaseRowRequest) -> dict[str, Any]:
     """Build the raw/terminal row shared by runtime and preparation."""
     source_context = request.source.source_context
     entry = request.entry
-    if request.decision is None:
-        raise ValueError("base row requires a terminal decision")
-    decision = request.decision
+    if request.route_transition is None:
+        raise ValueError("base row requires a terminal route transition")
+    transition = request.route_transition
     delegation_result = request.dns.delegation_result
     host_resolution_result = request.dns.host_resolution_result
     ip_location_results = request.ip_location.results
@@ -353,11 +283,9 @@ def _build_terminal_row(request: BaseRowRequest) -> dict[str, Any]:
         "input_kind": entry.semantics.input_kind,
         "apex_scope": entry.semantics.apex_scope,
         "source_format": entry.semantics.source_format,
-        "final_result_code": decision.final_result_code,
-        "decision_reason_code": decision.decision_reason_code,
-        "decision_reason": TerminalDecisionPolicy().reason_text(
-            decision.decision_reason_code
-        ),
+        "route": transition.route,
+        "route_code": transition.route_code.value,
+        "route_reason": transition.route_reason,
         "delegation_status": (
             delegation_result.status if delegation_result is not None else "skipped"
         ),
@@ -438,15 +366,11 @@ class ReviewRowProjector:
 
     def project(self, row: dict[str, Any]) -> ReviewOutputRow:
         """Project one raw terminal row into the public review CSV schema."""
-        final_result_code = row.get("final_result_code")
         projected = {
             "input_name": str(row.get("input_name", "")),
             "host": str(row.get("host", "")),
             "registrable_domain": str(row.get("registrable_domain", "")),
-            "final_result_code": (
-                "" if final_result_code is None else str(final_result_code)
-            ),
-            "review_reason_code": str(row.get("decision_reason_code", "")),
+            "route_code": str(row.get("route_code", "")),
             "review_reason": review_reason_for_row(row),
             "delegation_status": str(row.get("delegation_status", "")),
             "delegation_reason": str(row.get("delegation_reason", "")),

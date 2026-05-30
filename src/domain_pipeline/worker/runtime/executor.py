@@ -11,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.reason_codes import (
-    DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
+from domain_pipeline.routing import (
+    InputValidationRoutingPolicy,
+    TerminalRouteTransition,
 )
 from domain_pipeline.worker.runtime.contracts import WorkerSourceContext
 from domain_pipeline.worker.cache.repository import CacheRepository
@@ -511,7 +512,7 @@ class PipelineExecutor:
         self,
         source_context: WorkerSourceContext,
         host_resolution_result: HostResolutionResult,
-    ) -> tuple[str, list[IPLocationResult], Any | None]:
+    ) -> tuple[TerminalRouteTransition, list[IPLocationResult], Any | None]:
         """Run or cache-read the optional IP-location stage and evaluate its policy."""
         return await self._lookup_services.ip_location.lookup_ip_location(
             ip_location_config=source_context.config["ip_location"],
@@ -582,7 +583,7 @@ class PipelineExecutor:
                 CompletedResultRequest(
                     source_context=item.source_context,
                     entry=item.entry,
-                    decision_reason_code=DECISION_REASON_CODE_INPUT_PUBLIC_SUFFIX,
+                    route_transition=InputValidationRoutingPolicy().public_suffix(),
                     provenance={
                         "source_id_override": item.provenance.source.source_id_override,
                         "source_input_label_override": (

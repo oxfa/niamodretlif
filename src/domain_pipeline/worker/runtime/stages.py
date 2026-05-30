@@ -5,20 +5,16 @@ from __future__ import annotations
 from typing import Any
 import dataclasses
 
-from domain_pipeline.prepare.reason_codes import (
-    DECISION_REASON_CODE_MANUAL_ADD_ACTIONABLE,
-    DECISION_REASON_CODE_MANUAL_FILTER_PASSED,
+from domain_pipeline.routing import (
+    DelegationRoutingPolicy,
+    HostResolutionRoutingPolicy,
+    ManualRoutingPolicy,
+    TerminalRouteTransition,
 )
 from domain_pipeline.worker.delegation.lookup import DelegationResult
-from domain_pipeline.worker.delegation.result_policy import delegation_reason_code
 from domain_pipeline.worker.host_resolution.lookup import (
     HostResolutionResult,
 )
-from domain_pipeline.worker.host_resolution.result_policy import (
-    host_resolution_reason_code,
-    host_resolution_skipped_reason_code,
-)
-from domain_pipeline.routing.decisions import TerminalDecisionPolicy
 from domain_pipeline.worker.runtime.contracts import (
     CompletedResultEvidence,
     DelegationRootWorkItem,
@@ -33,14 +29,14 @@ from domain_pipeline.worker.runtime.results import CompletedResultRequest
 
 def _completed_request(
     parsed: ParsedHostItem,
-    decision_reason_code: str,
+    route_transition: TerminalRouteTransition,
     evidence: CompletedResultEvidence | None = None,
 ) -> CompletedResultRequest:
     """Return a completed-result request preserving parsed source provenance."""
     return CompletedResultRequest(
         source_context=parsed.source_context,
         entry=parsed.entry,
-        decision_reason_code=decision_reason_code,
+        route_transition=route_transition,
         evidence=evidence or CompletedResultEvidence(),
         provenance={
             "source_id_override": parsed.provenance.source.source_id_override,
@@ -96,13 +92,13 @@ class DelegationStage:
         delegation_result: DelegationResult,
     ) -> None:
         """Route one delegation result to terminal output or host resolution."""
-        delegation_stage_reason_code = delegation_reason_code(delegation_result)
-        if not delegation_result.actionable:
+        delegation_transition = DelegationRoutingPolicy().for_result(delegation_result)
+        if isinstance(delegation_transition, TerminalRouteTransition):
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    delegation_stage_reason_code,
+                    delegation_transition,
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
@@ -112,7 +108,7 @@ class DelegationStage:
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    DECISION_REASON_CODE_MANUAL_FILTER_PASSED,
+                    ManualRoutingPolicy().filter_passed(),
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
@@ -122,7 +118,7 @@ class DelegationStage:
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    DECISION_REASON_CODE_MANUAL_ADD_ACTIONABLE,
+                    ManualRoutingPolicy().manual_add_actionable(),
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
@@ -133,7 +129,7 @@ class DelegationStage:
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    host_resolution_skipped_reason_code(),
+                    HostResolutionRoutingPolicy().skipped(),
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
@@ -141,7 +137,9 @@ class DelegationStage:
         async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
             await queue_bundle.delegation_to_host_resolution.put(
                 HostResolutionWorkItem(
-                    parsed=parsed, delegation_result=delegation_result
+                    parsed=parsed,
+                    delegation_result=delegation_result,
+                    delegation_transition=delegation_transition,
                 )
             )
 
@@ -175,31 +173,19 @@ class HostResolutionStage:
         host_resolution_result: HostResolutionResult,
     ) -> None:
         """Route one host-resolution result to terminal output or ip_location."""
-        host_reason_code = host_resolution_reason_code(host_resolution_result)
-        if (
-            TerminalDecisionPolicy().from_reason_code(host_reason_code).route
-            == "review"
-        ):
-            await self.runtime.put_completed(
-                queue_bundle,
-                _completed_request(
-                    work_item.parsed,
-                    host_reason_code,
-                    CompletedResultEvidence(
-                        delegation_result=work_item.delegation_result,
-                        host_resolution_result=host_resolution_result,
-                    ),
-                ),
-            )
-            return
-        if not bool(
+        ip_location_enabled = bool(
             work_item.parsed.source_context.config["ip_location"].get("enabled", False)
-        ):
+        )
+        transition = HostResolutionRoutingPolicy().for_result(
+            host_resolution_result,
+            ip_location_enabled=ip_location_enabled,
+        )
+        if isinstance(transition, TerminalRouteTransition):
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
                     work_item.parsed,
-                    host_reason_code,
+                    transition,
                     CompletedResultEvidence(
                         delegation_result=work_item.delegation_result,
                         host_resolution_result=host_resolution_result,
@@ -213,7 +199,7 @@ class HostResolutionStage:
                     parsed=work_item.parsed,
                     delegation_result=work_item.delegation_result,
                     host_resolution_result=host_resolution_result,
-                    host_decision_reason_code=host_reason_code,
+                    host_resolution_transition=transition,
                 )
             )
 
@@ -233,7 +219,7 @@ class IpLocationStage:
                 if work_item is None:
                     return
                 async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
-                    ip_location_reason_code, ip_location_results, ip_location_policy = (
+                    ip_location_transition, ip_location_results, ip_location_policy = (
                         await self.runtime.lookup_ip_location(
                             work_item.parsed.source_context,
                             work_item.host_resolution_result,
@@ -243,7 +229,7 @@ class IpLocationStage:
                         queue_bundle,
                         IpLocationRouteResult(
                             work_item=work_item,
-                            decision_reason_code=ip_location_reason_code,
+                            route_transition=ip_location_transition,
                             ip_location_results=ip_location_results,
                             ip_location_policy=ip_location_policy,
                         ),
@@ -261,7 +247,7 @@ class IpLocationStage:
             queue_bundle,
             _completed_request(
                 route_result.work_item.parsed,
-                route_result.decision_reason_code,
+                route_result.route_transition,
                 CompletedResultEvidence(
                     delegation_result=route_result.work_item.delegation_result,
                     host_resolution_result=(
@@ -279,7 +265,7 @@ class IpLocationRouteResult:
     """IP-location route outcome consumed by the terminal emitter."""
 
     work_item: IpLocationWorkItem
-    decision_reason_code: str
+    route_transition: TerminalRouteTransition
     ip_location_results: list[Any]
     ip_location_policy: Any | None
 

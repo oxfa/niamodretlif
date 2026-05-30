@@ -76,19 +76,19 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
     projected_rows: list[ReviewOutputRow] = []
     for row in review_rows:
         review_row = projector.project(row)
-        input_review_label = str(row.get("review_reason_code", ""))
-        input_reason = str(row.get("review_reason", ""))
+        input_route_code = str(row.get("route_code", ""))
+        input_reason = str(row.get("review_reason", "") or row.get("route_reason", ""))
         if (
-            input_review_label
+            input_route_code
             and input_reason
             and input_reason != review_row["review_reason"]
         ):
             log.debug(
                 "Review row rewrite changed existing reason for host=%s path=%s "
-                "review_reason_code=%s input_reason=%s output_reason=%s",
+                "route_code=%s input_reason=%s output_reason=%s",
                 str(row.get("host", "")),
                 review_path,
-                input_review_label,
+                input_route_code,
                 input_reason,
                 review_row["review_reason"],
             )
