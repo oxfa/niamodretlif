@@ -6469,6 +6469,7 @@ ads-sg.tiktok.com
 ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.collectiveaudience.co
+ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -25811,6 +25812,7 @@ dsh7ky7308k4b.cloudfront.net
 dshbju.com
 dshbxx.com
 dshcej.aosom.co.uk
+dshdly.com
 dshdzj.com
 dshfbd.com
 dshhkl.com
@@ -25932,7 +25934,6 @@ dswckxxivdrjj.website
 dswegk.com
 dswepngsrbhza.space
 dswfhx.com
-dswgyl.com
 dswhem.com
 dswlpq.com
 dswmrn.com
@@ -77409,7 +77410,6 @@ sstats.deloitte.com
 sstats.deluxe.com
 sstats.dice.com
 sstats.dignityhealth.org
-sstats.directgeneral.com
 sstats.drugstore.com
 sstats.ds-pharma.com
 sstats.ds-pharma.jp
