@@ -24285,3 +24285,6 @@ crl.globalsign.net
 crl.kaspersky.com
 geo.kaspersky.com
 upd.kaspersky.com
+f.c2r.ts.cdn.office.net
+shell.cdn.office.net
+statics.teams.cdn.office.net
