@@ -174,7 +174,7 @@ jobs:
       # separately; visible candidates do not prove restore eligibility.
       - name: Restore baseline cache
         id: restore_worker_baseline_cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             .workflow_state/runtime/cache/check-cache.sqlite3
@@ -481,7 +481,7 @@ jobs:
       # eligibility.
       - name: Restore aggregate baseline cache
         id: restore_aggregate_baseline_cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             .workflow_state/runtime/cache/check-cache.sqlite3
@@ -747,7 +747,7 @@ jobs:
           echo "aggregate baseline cache save bundle_summary=${{ steps.inspect_aggregate_cache_bundle.outputs.bundle_summary }}" | tee -a "${CACHE_LOG_PATH}"
       - name: Save aggregate baseline cache
         if: ${{ (steps.aggregate_state.outputs.state == 'aggregated' || steps.aggregate_state.outputs.state == 'failed') && steps.inspect_aggregate_cache_bundle.outputs.should_save == 'true' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: |
             .workflow_state/runtime/cache/check-cache.sqlite3
