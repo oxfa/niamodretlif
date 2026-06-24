@@ -573,7 +573,6 @@ saisaiwa.com
 satcomiot.com
 sbycjy.com
 scdngc.net
-scqstv.com
 scyf.xyz
 sdawhuagong.com
 sdffqaz.com
@@ -792,6 +791,8 @@ zxb12315.com
 zyan456.com
 zzlcjj.xyz
 # f
+# tencent.co.id
+# wechatpay.com.my
 acer.com
 adobe.com
 akadns99.net
@@ -802,7 +803,6 @@ amd.com
 analog.com
 bing.com
 bing.net
-live.com
 bingj.com
 blurdev.com
 cdnetworks.com
@@ -815,9 +815,11 @@ htc.com
 htcvive.com
 izatcloud.net
 kaspersky.com
+live.com
 microsoft.com
 mintel.com
 nike.com
+office.net
 playstation.net
 qualcomm.com
 razerapi.com
@@ -827,13 +829,11 @@ samsung.com
 samsungapps.com
 sc.com
 st.com
-# tencent.co.id
+standardchartered.com
 tutorabc.com
 ubnt.com
 vive.com
 viveport.com
 volvocars.com
-# wechatpay.com.my
 windowssearch.com
 windowsupdate.com
-standardchartered.com
