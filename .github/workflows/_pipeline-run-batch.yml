@@ -50,7 +50,7 @@ jobs:
       PIPELINE_MAX_RUNTIME_SECONDS: ${{ vars.PIPELINE_MAX_RUNTIME_SECONDS }}
       IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up Python
@@ -155,7 +155,7 @@ jobs:
     env:
       IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up Python
@@ -448,7 +448,7 @@ jobs:
       AGGREGATE_LOG_PATH: .debug_artifacts/runtime/logs/${{ inputs.config_name }}--aggregate.log
       CACHE_LOG_PATH: .debug_artifacts/runtime/logs/${{ inputs.config_name }}--cache.log
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set privileged remote when configured
