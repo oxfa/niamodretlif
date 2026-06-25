@@ -20549,7 +20549,6 @@ de-tencentclb.work
 de0.cc
 de1000.com
 de123.net
-de1919.com
 deadnine.com
 deafchina.com
 deahu.com
@@ -25057,6 +25056,7 @@ fatvg.com
 favang.com
 favdeb.com
 favopen.com
+favoreducation.com
 favorites.ren
 faw-vw.com
 faw.com
@@ -67698,7 +67698,6 @@ szczkjgs.com
 szdaily.com
 szdcjd.com
 szddns.net
-szdesigncenter.org
 szdesigner.org
 szdesy.com
 szdf.com
@@ -86999,7 +86998,6 @@ zjwandi.com
 zjwanma.com
 zjwater.com
 zjwater.org
-zjwcjm.com
 zjwcqp.com
 zjwebapp.com
 zjwentou.com
