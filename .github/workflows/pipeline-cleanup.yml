@@ -2,8 +2,10 @@ name: Pipeline Cleanup
 run-name: pipeline cleanup / ${{ github.run_id }}
 
 on:
-  schedule:
-    - cron: "0 23 * * *"
+  workflow_run:
+    workflows: ["Pipeline Block"]
+    types:
+      - completed
   workflow_dispatch:
 
 concurrency:
