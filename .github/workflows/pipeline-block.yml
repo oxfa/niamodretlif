@@ -2,8 +2,10 @@ name: Pipeline Block
 run-name: pipeline block / ${{ github.run_id }}
 
 on:
-  schedule:
-    - cron: "0 22 * * *"
+  workflow_run:
+    workflows: ["Pipeline Direct"]
+    types:
+      - completed
   workflow_dispatch:
 
 concurrency:
