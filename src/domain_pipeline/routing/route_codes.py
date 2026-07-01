@@ -18,8 +18,8 @@ class PipelineStage(StrEnum):
     """Pipeline stage that owns the routing decision."""
 
     INPUT_VALIDATION = "input_validation"
-    MANUAL_FILTER = "manual_filter"
-    MANUAL_ADD = "manual_add"
+    MANUALLY_SELECTED_FOR_FILTERED = "manually_selected_for_filtered"
+    MANUALLY_ADDED = "manually_added"
     DELEGATION = "delegation"
     HOST_RESOLUTION = "host_resolution"
     IP_LOCATION = "ip_location"
@@ -42,19 +42,17 @@ class RouteCode(StrEnum):
         "input_validation_to_review_public_suffix"
     )
 
-    MANUAL_FILTER_TO_FILTERED_PASSED = "manual_filter_to_filtered_passed"
-    MANUAL_FILTER_TO_FILTERED_PUBLIC_SUFFIX_PASSED = (
-        "manual_filter_to_filtered_public_suffix_passed"
+    MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED = (
+        "manually_selected_for_filtered_to_filtered"
     )
-    MANUAL_FILTER_TO_REVIEW_PASS_NOT_IN_SOURCES = (
-        "manual_filter_to_review_pass_not_in_sources"
+    MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED_PUBLIC_SUFFIX = (
+        "manually_selected_for_filtered_to_filtered_public_suffix"
     )
-    MANUAL_FILTER_TO_REVIEW_OUT = "manual_filter_to_review_out"
-    MANUAL_FILTER_TO_REVIEW_OUT_NOT_IN_SOURCES = (
-        "manual_filter_to_review_out_not_in_sources"
+    MANUALLY_SELECTED_FOR_FILTERED_TO_REVIEW_NOT_IN_SOURCES = (
+        "manually_selected_for_filtered_to_review_not_in_sources"
     )
 
-    MANUAL_ADD_TO_FILTERED_ACTIONABLE = "manual_add_to_filtered_actionable"
+    MANUALLY_ADDED_TO_FILTERED_ACTIONABLE = "manually_added_to_filtered_actionable"
 
     DELEGATION_TO_HOST_RESOLUTION_NS_RECORDS_EXIST = (
         "delegation_to_host_resolution_ns_records_exist"

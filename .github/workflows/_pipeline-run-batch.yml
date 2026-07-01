@@ -267,8 +267,8 @@ jobs:
         run: |
           set -eo pipefail
           # Preparation may produce zero participating worker manifests when every
-          # host becomes a preparation-owned terminal row, such as via
-          # input/manual_filter_out/<config>.txt or public-suffix inputs.
+          # host is removed by manually_excluded_from_sources or becomes a
+          # preparation-owned terminal row, such as public-suffix inputs.
           python -m domain_pipeline.pipeline_run initialize-worker-statuses \
             --source-root . \
             --state-root . \

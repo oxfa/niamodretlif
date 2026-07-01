@@ -14,19 +14,19 @@ permissions:
   contents: write
   actions: read
 
-# Optional per-config manual files:
-# - input/manual_filter_pass/direct.txt
-# - input/manual_filter_out/direct.txt
-# - input/manual_add/direct.txt
-# manual_filter_pass and manual_add require actionable delegation before
-# routing to filtered: NS records exist, NS NODATA, NS NXDOMAIN with
-# same-owner SOA, or NS retry-exhausted with same-owner SOA. Source-matched
-# public suffix manual_filter_pass entries route to filtered during prepare
-# because there is no registrable domain to query. Unmatched manual_filter_pass
-# entries route to review without DNS lookup; unmatched manual_add entries
-# require all enabled sources to share dns_query/delegation/output behavior.
-# manual_filter_out is exact-host-only, bypasses delegation, host resolution,
-# and IP-location, and routes to review.
+# Optional per-config operator files:
+# - input/manually_selected_for_filtered/direct.txt
+# - input/manually_excluded_from_sources/direct.txt
+# - input/manually_added/direct.txt
+# manually_selected_for_filtered and manually_added require actionable
+# delegation before routing to filtered: NS records exist, NS NODATA, NS
+# NXDOMAIN with same-owner SOA, or NS retry-exhausted with same-owner SOA.
+# Source-matched public suffix selections route to filtered during prepare
+# because there is no registrable domain to query. Unmatched selected entries
+# route to review without DNS lookup; unmatched manually_added entries require
+# all enabled sources to share dns_query/delegation/output behavior.
+# manually_excluded_from_sources removes matching source domains before worker
+# manifests and emits no output rows; non-matches are silent no-ops.
 jobs:
   batch:
     uses: ./.github/workflows/_pipeline-run-batch.yml

@@ -101,7 +101,7 @@ class PreparedBatchWriter:
             for source_entries in assignment_artifacts.worker_source_entries.values()
             for entries in source_entries.values()
             for entry in entries
-            if entry.provenance.manual_filter_pass
+            if entry.provenance.manually_selected_for_filtered
         }
         preparation_review_rows = [
             row
@@ -156,7 +156,11 @@ class PreparedBatchWriter:
         batch_id: str,
     ) -> _WorkerAssignmentArtifacts:
         total_work_units = len(planning_inputs.root_plans)
-        if total_work_units < 1 and not prepared_inputs.preparation_terminal_rows:
+        if (
+            total_work_units < 1
+            and not prepared_inputs.preparation_terminal_rows
+            and prepared_inputs.parsed_source_entry_count < 1
+        ):
             raise ValueError("config produced no input lines to process")
         participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
         if total_work_units > 0 and not participating_worker_ids:

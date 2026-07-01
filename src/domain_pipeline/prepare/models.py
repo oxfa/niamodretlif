@@ -9,7 +9,8 @@ from typing import Any
 from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
 
-MANUAL_ADD_SOURCE_ID = "manual_add"
+MANUALLY_SELECTED_FOR_FILTERED_SOURCE_ID = "manually_selected_for_filtered"
+MANUALLY_ADDED_SOURCE_ID = "manually_added"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -26,8 +27,8 @@ class PreparedSourcePosition:
 class PreparedProvenance:
     """Preparation provenance that affects routing and emitted source fields."""
 
-    manual_filter_pass: bool = False
-    manual_add: bool = False
+    manually_selected_for_filtered: bool = False
+    manually_added: bool = False
     source_id_override: str | None = None
     source_input_label_override: str | None = None
     source_ids: tuple[str, ...] = ()
@@ -62,6 +63,7 @@ class PreparedInputSet:
 
     config: dict[str, Any]
     source_jobs_by_id: dict[str, SourceJob]
+    parsed_source_entry_count: int
     entries_by_source: dict[str, list[PreparedHostEntry]]
     root_plans: dict[str, PreparedRootPlan]
     preparation_review_rows: list[dict[str, Any]]

@@ -145,8 +145,10 @@ class RuntimeItemLoader:
                     sequence=index,
                     total=total,
                     source=PreparedProvenance(
-                        manual_filter_pass=bool(provenance["manual_filter_pass"]),
-                        manual_add=bool(provenance["manual_add"]),
+                        manually_selected_for_filtered=bool(
+                            provenance["manually_selected_for_filtered"]
+                        ),
+                        manually_added=bool(provenance["manually_added"]),
                         source_id_override=provenance["source_id_override"],
                         source_input_label_override=provenance[
                             "source_input_label_override"

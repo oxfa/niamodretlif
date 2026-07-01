@@ -5,28 +5,28 @@ version: 2
 # sources, but emitted artifacts are grouped by the config filename instead of
 # by each source id.
 #
-# Optional manual filter files:
-# - input/manual_filter_pass/<config-stem>.txt
-# - input/manual_filter_out/<config-stem>.txt
-# - input/manual_add/<config-stem>.txt
-# manual_filter_pass and manual_add entries require an actionable delegation
-# result for the registrable domain. Source-matched public suffix
-# manual_filter_pass entries route to filtered during prepare because there is
-# no registrable domain to query. Delegation is actionable when NS records
-# exist, NS returns NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS
-# retry budget is exhausted with same-owner SOA. NS NODATA does not require SOA
-# fallback. If delegation is actionable,
-# manual_filter_pass and manual_add skip host-resolution and IP-location and
-# route to filtered. manual_add takes precedence over matching source entries
-# for the same host. If delegation is not actionable, they route to
-# unactionable or review using the normal delegation result. Unmatched
-# manual_add entries require all enabled sources to share dns_query,
-# delegation, and output behavior. Unmatched manual_filter_pass entries route
-# to review without delegation or host-resolution lookup because they are
-# operator reconciliation rows. manual_filter_out is exact-host-only, takes
-# precedence over matching source entries, bypasses delegation, host resolution,
-# and IP-location entirely, and routes to review. Other public suffix inputs are
-# prepare-owned terminal rows because there is no registrable domain to query.
+# Optional operator input files:
+# - input/manually_selected_for_filtered/<config-stem>.txt
+# - input/manually_excluded_from_sources/<config-stem>.txt
+# - input/manually_added/<config-stem>.txt
+# manually_selected_for_filtered and manually_added entries require an
+# actionable delegation result for the registrable domain. Source-matched
+# public suffix selections route to filtered during prepare because there is no
+# registrable domain to query. Delegation is actionable when NS records exist,
+# NS returns NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS retry
+# budget is exhausted with same-owner SOA. NS NODATA does not require SOA
+# fallback. If delegation is actionable, selected and added entries skip
+# host-resolution and IP-location and route to filtered. manually_added takes
+# precedence over matching source entries for the same host. If delegation is
+# not actionable, they route to unactionable or review using the normal
+# delegation result. Unmatched manually_added entries require all enabled
+# sources to share dns_query, delegation, and output behavior. Unmatched
+# selected entries route to review without delegation or host-resolution lookup
+# because they are operator reconciliation rows.
+# manually_excluded_from_sources is exact-host-only source subtraction: matched
+# source domains are removed before worker manifests, and non-matches are
+# silent no-ops. Other public suffix inputs are prepare-owned terminal rows
+# because there is no registrable domain to query.
 #
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.
@@ -34,8 +34,8 @@ version: 2
 # - unactionable: rows whose registrable domain has no actionable delegation.
 # Duplicate host collapse is keyed by final host and compares dns_query,
 # delegation, host_resolution, ip_location, and output behavior across enabled
-# sources. For manual_add-matched hosts, only dns_query/delegation/output
-# behavior must match because manual_add bypasses host-resolution and
+# sources. For manually_added matched hosts, only dns_query/delegation/output
+# behavior must match because manually_added bypasses host-resolution and
 # IP-location after delegation passes.
 defaults:
   fetch:
