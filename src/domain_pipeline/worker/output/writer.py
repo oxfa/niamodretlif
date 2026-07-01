@@ -64,7 +64,7 @@ class OutputGroupRows:
 class OutputGroupSeen:
     """Duplicate-detection state for one output-path group."""
 
-    host_outputs: dict[str, set[str]]
+    text_outputs: dict[str, set[str]]
     audit_rows: set[str]
     review_rows: set[str]
 
@@ -130,7 +130,7 @@ class ResultOutputWriter:
                     review=[],
                 ),
                 seen=OutputGroupSeen(
-                    host_outputs={"filtered": set(), "unactionable": set()},
+                    text_outputs={"filtered": set(), "unactionable": set()},
                     audit_rows=set(),
                     review_rows=set(),
                 ),
@@ -168,25 +168,17 @@ class ResultOutputWriter:
         self.counts[f"route_code_{result.route_code.value}"] += 1
         self.counts[f"route_{result.route}"] += 1
         if result.route == "unactionable":
-            host = result.row["host"]
-            if host in group.seen.host_outputs["unactionable"]:
-                raise DuplicateOutputInvariantError(
-                    "unactionable_host",
-                    str(host),
-                    context={"source": group.source_context.source_id},
-                )
-            group.seen.host_outputs["unactionable"].add(host)
-            group.rows.unactionable.append(result.row)
+            output_value = txt_output_value(result.row)
+            if output_value not in group.seen.text_outputs["unactionable"]:
+                group.seen.text_outputs["unactionable"].add(output_value)
+                self.counts["emitted_unactionable_txt_values"] += 1
+                group.rows.unactionable.append(result.row)
         elif result.route == "filtered":
-            host = result.row["host"]
-            if host in group.seen.host_outputs["filtered"]:
-                raise DuplicateOutputInvariantError(
-                    "filtered_host",
-                    str(host),
-                    context={"source": group.source_context.source_id},
-                )
-            group.seen.host_outputs["filtered"].add(host)
-            group.rows.filtered.append(result.row)
+            output_value = txt_output_value(result.row)
+            if output_value not in group.seen.text_outputs["filtered"]:
+                group.seen.text_outputs["filtered"].add(output_value)
+                self.counts["emitted_filtered_txt_values"] += 1
+                group.rows.filtered.append(result.row)
         elif result.route == "review":
             self._queue_review_row(group=group, row=result.row)
 

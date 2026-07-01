@@ -56,8 +56,8 @@ class PreparedHostEntryMetadata(PrepareWorkerModel):
     input_kind: str
     apex_scope: str
     source_format: str
-    manual_filter_pass: bool
-    manual_add: bool
+    manually_selected_for_filtered: bool
+    manually_added: bool
     source_id_override: str | None = None
     source_input_label_override: str | None = None
     source_ids: list[str]

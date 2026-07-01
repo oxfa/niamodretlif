@@ -7,6 +7,18 @@ import dataclasses
 from domain_pipeline.prepare.models import PreparedHostEntry
 
 
+def prepared_entry_merge_key(entry: PreparedHostEntry) -> str:
+    """Return the duplicate-collapse key for one prepared entry."""
+    semantics = entry.entry.semantics
+    return "\0".join(
+        (
+            entry.entry.host,
+            semantics.input_kind,
+            semantics.apex_scope,
+        )
+    )
+
+
 class PreparedEntryMerger:
     """Merge same-host prepared entries while preserving source provenance."""
 
@@ -29,11 +41,13 @@ class PreparedEntryMerger:
         """Merge same-host prepared entries while preserving earliest ordering."""
         provenance = dataclasses.replace(
             current.provenance,
-            manual_filter_pass=(
-                current.provenance.manual_filter_pass
-                or incoming.provenance.manual_filter_pass
+            manually_selected_for_filtered=(
+                current.provenance.manually_selected_for_filtered
+                or incoming.provenance.manually_selected_for_filtered
             ),
-            manual_add=current.provenance.manual_add or incoming.provenance.manual_add,
+            manually_added=(
+                current.provenance.manually_added or incoming.provenance.manually_added
+            ),
             source_ids=self.stable_unique_merge(
                 current.provenance.source_ids, incoming.provenance.source_ids
             ),
@@ -52,10 +66,10 @@ class PreparedEntryMerger:
         entries_by_host: dict[str, PreparedHostEntry],
         incoming: PreparedHostEntry,
     ) -> None:
-        """Insert or merge one prepared entry by final output host."""
-        host = incoming.entry.host
-        current = entries_by_host.get(host)
+        """Insert or merge one prepared entry by host and input semantics."""
+        key = prepared_entry_merge_key(incoming)
+        current = entries_by_host.get(key)
         if current is None:
-            entries_by_host[host] = incoming
+            entries_by_host[key] = incoming
             return
-        entries_by_host[host] = self.merge_entries(current, incoming)
+        entries_by_host[key] = self.merge_entries(current, incoming)

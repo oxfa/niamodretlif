@@ -25,22 +25,16 @@ ROUTE_REASON_TEXT: Mapping[RouteCode, str] = MappingProxyType(
         RouteCode.INPUT_VALIDATION_TO_REVIEW_PUBLIC_SUFFIX: (
             "input is a public suffix rather than a registrable host"
         ),
-        RouteCode.MANUAL_FILTER_TO_FILTERED_PASSED: (
-            "host was explicitly allowed by manual_filter_pass"
+        RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED: (
+            "host was explicitly selected for filtered output"
         ),
-        RouteCode.MANUAL_FILTER_TO_FILTERED_PUBLIC_SUFFIX_PASSED: (
-            "public suffix input was explicitly allowed by manual_filter_pass"
+        RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED_PUBLIC_SUFFIX: (
+            "public suffix input was explicitly selected for filtered output"
         ),
-        RouteCode.MANUAL_FILTER_TO_REVIEW_PASS_NOT_IN_SOURCES: (
-            "manual_filter_pass entry was not present in any configured source"
+        RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_REVIEW_NOT_IN_SOURCES: (
+            "manually selected entry was not present in any configured source"
         ),
-        RouteCode.MANUAL_FILTER_TO_REVIEW_OUT: (
-            "host was explicitly sent to review by manual_filter_out"
-        ),
-        RouteCode.MANUAL_FILTER_TO_REVIEW_OUT_NOT_IN_SOURCES: (
-            "manual_filter_out entry was not present in any configured source"
-        ),
-        RouteCode.MANUAL_ADD_TO_FILTERED_ACTIONABLE: (
+        RouteCode.MANUALLY_ADDED_TO_FILTERED_ACTIONABLE: (
             "host was explicitly added as actionable"
         ),
         RouteCode.DELEGATION_TO_HOST_RESOLUTION_NS_RECORDS_EXIST: (
@@ -209,54 +203,45 @@ class ManualRoutingPolicy:
 
     def source_stages(self) -> tuple[PipelineStage, ...]:
         """Return stages owned by this policy."""
-        return (PipelineStage.MANUAL_FILTER, PipelineStage.MANUAL_ADD)
+        return (
+            PipelineStage.MANUALLY_SELECTED_FOR_FILTERED,
+            PipelineStage.MANUALLY_ADDED,
+        )
 
-    def filter_passed(self) -> TerminalRouteTransition:
-        """Route a manual-filter pass entry to filtered output."""
+    def selected_for_filtered(self) -> TerminalRouteTransition:
+        """Route a manually selected entry to filtered output."""
         return _terminal(
-            source_stage=PipelineStage.MANUAL_FILTER,
+            source_stage=PipelineStage.MANUALLY_SELECTED_FOR_FILTERED,
             destination=RouteDestination.FILTERED,
-            route_code=RouteCode.MANUAL_FILTER_TO_FILTERED_PASSED,
+            route_code=RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED,
         )
 
-    def filter_public_suffix_passed(self) -> TerminalRouteTransition:
-        """Route a manual-filter public suffix pass to filtered output."""
+    def selected_public_suffix_for_filtered(self) -> TerminalRouteTransition:
+        """Route a manually selected public suffix to filtered output."""
         return _terminal(
-            source_stage=PipelineStage.MANUAL_FILTER,
+            source_stage=PipelineStage.MANUALLY_SELECTED_FOR_FILTERED,
             destination=RouteDestination.FILTERED,
-            route_code=RouteCode.MANUAL_FILTER_TO_FILTERED_PUBLIC_SUFFIX_PASSED,
+            route_code=(
+                RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_FILTERED_PUBLIC_SUFFIX
+            ),
         )
 
-    def filter_pass_not_in_sources(self) -> TerminalRouteTransition:
-        """Route a missing manual-filter pass source entry to review."""
+    def selected_for_filtered_not_in_sources(self) -> TerminalRouteTransition:
+        """Route a missing manually selected source entry to review."""
         return _terminal(
-            source_stage=PipelineStage.MANUAL_FILTER,
+            source_stage=PipelineStage.MANUALLY_SELECTED_FOR_FILTERED,
             destination=RouteDestination.REVIEW,
-            route_code=RouteCode.MANUAL_FILTER_TO_REVIEW_PASS_NOT_IN_SOURCES,
+            route_code=(
+                RouteCode.MANUALLY_SELECTED_FOR_FILTERED_TO_REVIEW_NOT_IN_SOURCES
+            ),
         )
 
-    def filter_out(self) -> TerminalRouteTransition:
-        """Route a manual-filter out entry to review."""
+    def manually_added_actionable(self) -> TerminalRouteTransition:
+        """Route a manually added entry to filtered output."""
         return _terminal(
-            source_stage=PipelineStage.MANUAL_FILTER,
-            destination=RouteDestination.REVIEW,
-            route_code=RouteCode.MANUAL_FILTER_TO_REVIEW_OUT,
-        )
-
-    def filter_out_not_in_sources(self) -> TerminalRouteTransition:
-        """Route a missing manual-filter out source entry to review."""
-        return _terminal(
-            source_stage=PipelineStage.MANUAL_FILTER,
-            destination=RouteDestination.REVIEW,
-            route_code=RouteCode.MANUAL_FILTER_TO_REVIEW_OUT_NOT_IN_SOURCES,
-        )
-
-    def manual_add_actionable(self) -> TerminalRouteTransition:
-        """Route a manual-add entry to filtered output."""
-        return _terminal(
-            source_stage=PipelineStage.MANUAL_ADD,
+            source_stage=PipelineStage.MANUALLY_ADDED,
             destination=RouteDestination.FILTERED,
-            route_code=RouteCode.MANUAL_ADD_TO_FILTERED_ACTIONABLE,
+            route_code=RouteCode.MANUALLY_ADDED_TO_FILTERED_ACTIONABLE,
         )
 
 

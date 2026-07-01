@@ -10,18 +10,18 @@ from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomai
 
 @dataclass(frozen=True)
 class ManualInputSet:
-    """Prepared manual add/pass/out entries and their source paths."""
+    """Prepared operator input entries and their source paths."""
 
-    manual_filter_pass_path: Path
-    manual_filter_out_path: Path
-    manual_add_path: Path
-    manual_filter_pass_entries: dict[str, ParsedDomainEntry]
-    manual_filter_out_entries: dict[str, ParsedDomainEntry]
-    manual_add_entries: dict[str, ParsedDomainEntry]
+    manually_selected_for_filtered_path: Path
+    manually_excluded_from_sources_path: Path
+    manually_added_path: Path
+    manually_selected_for_filtered_entries: dict[str, ParsedDomainEntry]
+    manually_excluded_from_sources_entries: dict[str, ParsedDomainEntry]
+    manually_added_entries: dict[str, ParsedDomainEntry]
 
 
 class ManualInputLoader:
-    """Load manual add, filter-pass, and filter-out input files."""
+    """Load supported operator input files."""
 
     def __init__(self, *, source_root: Path) -> None:
         self.source_root = source_root
@@ -44,27 +44,46 @@ class ManualInputLoader:
 
     def load(self, config_name: str) -> ManualInputSet:
         """Load and validate all manual inputs for one config."""
-        manual_filter_pass_path = self.path("manual_filter_pass", config_name)
-        manual_filter_out_path = self.path("manual_filter_out", config_name)
-        manual_add_path = self.path("manual_add", config_name)
-        manual_filter_pass_entries = self.load_file(manual_filter_pass_path)
-        manual_filter_out_entries = self.load_file(manual_filter_out_path)
-        manual_add_entries = self.load_file(manual_add_path)
-        if set(manual_add_entries) & set(manual_filter_pass_entries):
+        manually_selected_for_filtered_path = self.path(
+            "manually_selected_for_filtered", config_name
+        )
+        manually_excluded_from_sources_path = self.path(
+            "manually_excluded_from_sources", config_name
+        )
+        manually_added_path = self.path("manually_added", config_name)
+        manually_selected_for_filtered_entries = self.load_file(
+            manually_selected_for_filtered_path
+        )
+        manually_excluded_from_sources_entries = self.load_file(
+            manually_excluded_from_sources_path
+        )
+        manually_added_entries = self.load_file(manually_added_path)
+        if set(manually_added_entries) & set(manually_selected_for_filtered_entries):
             raise ValueError(
-                f"{manual_add_path} conflicts with manual filter-pass file "
-                f"{manual_filter_pass_path}"
+                f"{manually_added_path} conflicts with manually selected file "
+                f"{manually_selected_for_filtered_path}"
             )
-        if set(manual_add_entries) & set(manual_filter_out_entries):
+        if set(manually_added_entries) & set(manually_excluded_from_sources_entries):
             raise ValueError(
-                f"{manual_add_path} conflicts with manual filter-out file "
-                f"{manual_filter_out_path}"
+                f"{manually_added_path} conflicts with manually excluded file "
+                f"{manually_excluded_from_sources_path}"
+            )
+        if set(manually_selected_for_filtered_entries) & set(
+            manually_excluded_from_sources_entries
+        ):
+            raise ValueError(
+                f"{manually_selected_for_filtered_path} conflicts with manually "
+                f"excluded file {manually_excluded_from_sources_path}"
             )
         return ManualInputSet(
-            manual_filter_pass_path=manual_filter_pass_path,
-            manual_filter_out_path=manual_filter_out_path,
-            manual_add_path=manual_add_path,
-            manual_filter_pass_entries=manual_filter_pass_entries,
-            manual_filter_out_entries=manual_filter_out_entries,
-            manual_add_entries=manual_add_entries,
+            manually_selected_for_filtered_path=manually_selected_for_filtered_path,
+            manually_excluded_from_sources_path=manually_excluded_from_sources_path,
+            manually_added_path=manually_added_path,
+            manually_selected_for_filtered_entries=(
+                manually_selected_for_filtered_entries
+            ),
+            manually_excluded_from_sources_entries=(
+                manually_excluded_from_sources_entries
+            ),
+            manually_added_entries=manually_added_entries,
         )

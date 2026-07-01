@@ -89,6 +89,14 @@ def prepare_worker_manifest_relative_path(*, batch_id: str, worker_id: str) -> P
     )
 
 
+def _validate_publish_output_directory(output_directory: Path) -> None:
+    """Reject configured publish output directories outside the publish worktree."""
+    if output_directory.is_absolute() or ".." in output_directory.parts:
+        raise ValueError(
+            "output.directory must be a relative path inside the publish worktree"
+        )
+
+
 def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutputSpec:
     """Return manifest-persisted aggregate paths derived during preparation."""
     enabled_sources = [
@@ -97,6 +105,7 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
     if not enabled_sources:
         raise ValueError("config must include at least one enabled source")
     output_directory = Path(str(enabled_sources[0]["output"]["directory"]))
+    _validate_publish_output_directory(output_directory)
     config_name = str(config["config_name"])
     aggregate_paths = _path_layout().aggregate_paths(
         config_name=config_name,
@@ -121,8 +130,10 @@ def prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
         "input_kind": entry.entry.semantics.input_kind,
         "apex_scope": entry.entry.semantics.apex_scope,
         "source_format": entry.entry.semantics.source_format,
-        "manual_filter_pass": entry.provenance.manual_filter_pass,
-        "manual_add": entry.provenance.manual_add,
+        "manually_selected_for_filtered": (
+            entry.provenance.manually_selected_for_filtered
+        ),
+        "manually_added": entry.provenance.manually_added,
         "source_id_override": entry.provenance.source_id_override,
         "source_input_label_override": entry.provenance.source_input_label_override,
         "source_ids": list(entry.provenance.source_ids),

@@ -103,22 +103,22 @@ class DelegationStage:
                 ),
             )
             return
-        if parsed.provenance.source.manual_filter_pass:
+        if parsed.provenance.source.manually_selected_for_filtered:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    ManualRoutingPolicy().filter_passed(),
+                    ManualRoutingPolicy().selected_for_filtered(),
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
             return
-        if parsed.provenance.source.manual_add:
+        if parsed.provenance.source.manually_added:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    ManualRoutingPolicy().manual_add_actionable(),
+                    ManualRoutingPolicy().manually_added_actionable(),
                     CompletedResultEvidence(delegation_result=delegation_result),
                 ),
             )
