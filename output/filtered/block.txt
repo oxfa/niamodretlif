@@ -6350,6 +6350,7 @@ ads-sg.tiktok.com
 ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.collectiveaudience.co
+ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -6424,6 +6425,7 @@ ads.tikpage.com
 ads.tiktok.com
 ads.travelaudience.com
 ads.tripod.lycos.co.uk
+ads.tripod.lycos.de
 ads.tripod.lycos.es
 ads.tripod.lycos.nl
 ads.ttv.com.tw
@@ -15630,6 +15632,7 @@ cb.l.qq.com
 cb07whvmx.com
 cb3a316b81.com
 cba-fed-igh.com
+cbayvxac.com
 cbc.pnc.com
 cbce918a9d.com
 cbckftoaakcye.website
@@ -36901,6 +36904,7 @@ images.e.skandia.pl
 images.e.tcichemicals.com
 images.e.transunion.com
 images.e.tycois.com
+images.e.westuc.com
 images.e.xtelligentmedia.com
 images.e2.aig.com
 images.e3.aig.com
@@ -37172,6 +37176,7 @@ images.newsletter.larksuite.com
 images.newsletter.rewe-group.at
 images.notice.wageworks.com
 images.noticias.clarin.com
+images.notifications.aigdirect.com
 images.novedades.fibercorp.com.ar
 images.nwinsurance.pemco.com
 images.offers.princesscruises.co.uk
@@ -37468,6 +37473,7 @@ imjll5rwuq.com
 imjprkvybgfdw.space
 imjsfy.allbeauty.com
 imjtv.cc
+imjxso.bristol.nl
 imkirh.com
 immaculatehighlight.com
 immanalytics.com
@@ -41233,6 +41239,7 @@ jxbpanpbplamf.top
 jxbwzfgggttme.site
 jxcuocswkavpi.site
 jxcuywnprilwi.space
+jxdgcaekgisb.com
 jxdown.com
 jxdptu.jouete-online.com
 jxdyk65ay.com
@@ -49018,6 +49025,7 @@ meet-romance-girls.com
 meet-romanceconnects.com
 meet-womans-meets.com
 meet.intercall.com
+meet.westuc.com
 meet3monk.com
 meetflirtmatch.com
 meeting.nuance.com
@@ -53364,6 +53372,7 @@ newwiesdom.com.cn
 nex.163.com
 nex.corp.163.com
 nexac.com
+nexage.com
 nexahub.co.in
 nexeps.com
 nexium33bv.com
@@ -56002,6 +56011,7 @@ oppressiveindifferent.com
 oppuz.com
 oproi.com
 ops.sunpowercorp.com
+opstag.com
 opt-intelligence.com
 opt.delta.com
 optable.co
@@ -71444,6 +71454,7 @@ solutions110.net
 solutions2.risk.lexisnexis.com
 solutions2forge.net
 solutionsadultes.com
+solutionshindsight.net
 solutionsin103.net
 solve.cranepi.com
 solvebots.com
@@ -71969,6 +71980,7 @@ spectaclesclottedrobber.com
 spectacularimmunity.com
 spectacularpercentage.com
 spectacularstamp.com
+spectate.com
 spectkuchean.com
 spectrum.gettyimages.com
 spectrumirriplaceableirriplaceable.com
@@ -72825,6 +72837,7 @@ sstats.deloitte.com
 sstats.deluxe.com
 sstats.dice.com
 sstats.dignityhealth.org
+sstats.directgeneral.com
 sstats.drugstore.com
 sstats.ds-pharma.com
 sstats.ds-pharma.jp
@@ -73490,6 +73503,7 @@ staticfile.net
 staticfile.org
 staticgalaksion.com
 statichf.shihuocdn.cn
+staticiv.com
 statics.3987.com
 statics.9669.com
 statics.woozooo.com
@@ -82562,6 +82576,7 @@ udsf.cn
 udsgty.alkosto.com
 udtnjdhtdb.com
 udurcyzcjpotp.site
+uduwdbhmot.com
 udwlki.icu
 udxi.cn
 udxsuy.helline.fr
@@ -90267,6 +90282,7 @@ ylakmr.expressionscatalog.com
 ylbcwkazxnmjp.online
 ylblrqhpurxxo.website
 ylcajkhefghaf.online
+yldbt.com
 yldmgrimg.net
 yldr.io
 yldxtcgvchrck.site
