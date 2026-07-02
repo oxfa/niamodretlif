@@ -32,20 +32,14 @@ def _completed_request(
     route_transition: TerminalRouteTransition,
     evidence: CompletedResultEvidence | None = None,
 ) -> CompletedResultRequest:
-    """Return a completed-result request preserving parsed source provenance."""
+    """Return a completed-result request preserving parsed source context."""
     return CompletedResultRequest(
         source_context=parsed.source_context,
         entry=parsed.entry,
         route_transition=route_transition,
         evidence=evidence or CompletedResultEvidence(),
-        provenance={
-            "source_id_override": parsed.provenance.source.source_id_override,
-            "source_input_label_override": (
-                parsed.provenance.source.source_input_label_override
-            ),
-            "source_ids": parsed.provenance.source.source_ids,
-            "source_input_labels": parsed.provenance.source.source_input_labels,
-        },
+        source_id=parsed.output_source.source_id,
+        source_input_label=parsed.output_source.input_label,
     )
 
 
@@ -103,7 +97,7 @@ class DelegationStage:
                 ),
             )
             return
-        if parsed.provenance.source.manually_selected_for_filtered:
+        if parsed.manual_routing.manually_selected_for_filtered:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
@@ -113,7 +107,7 @@ class DelegationStage:
                 ),
             )
             return
-        if parsed.provenance.source.manually_added:
+        if parsed.manual_routing.manually_added:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(

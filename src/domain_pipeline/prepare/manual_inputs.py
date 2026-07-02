@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
 
 
 @dataclass(frozen=True)
@@ -15,9 +15,9 @@ class ManualInputSet:
     manually_selected_for_filtered_path: Path
     manually_excluded_from_sources_path: Path
     manually_added_path: Path
-    manually_selected_for_filtered_entries: dict[str, ParsedDomainEntry]
-    manually_excluded_from_sources_entries: dict[str, ParsedDomainEntry]
-    manually_added_entries: dict[str, ParsedDomainEntry]
+    manually_selected_for_filtered_entries: dict[str, DomainEntry]
+    manually_excluded_from_sources_entries: dict[str, DomainEntry]
+    manually_added_entries: dict[str, DomainEntry]
 
 
 class ManualInputLoader:
@@ -30,12 +30,12 @@ class ManualInputLoader:
         """Return one config-scoped manual input path."""
         return self.source_root / "input" / directory / f"{config_name}.txt"
 
-    def load_file(self, path: Path) -> dict[str, ParsedDomainEntry]:
+    def load_file(self, path: Path) -> dict[str, DomainEntry]:
         """Load manual entries from one optional file."""
         if not path.is_file():
             return {}
         parser = DomainListParser()
-        entries: dict[str, ParsedDomainEntry] = {}
+        entries: dict[str, DomainEntry] = {}
         for entry in parser.process_entries(
             path.read_text(encoding="utf-8").splitlines(keepends=True)
         ):

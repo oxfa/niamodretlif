@@ -47,45 +47,38 @@ class WorkerOutputSpec(PrepareWorkerModel):
         }
 
 
-class PreparedHostEntryMetadata(PrepareWorkerModel):
+class PreparedHostManifestEntry(PrepareWorkerModel):
     """Worker-local prepared host entry owned by one delegation root."""
 
     host: str
-    input_name: str
+    runtime_source_id: str
     source_id: str
-    input_kind: str
-    apex_scope: str
-    source_format: str
+    source_input_label: str
     manually_selected_for_filtered: bool
     manually_added: bool
-    source_id_override: str | None = None
-    source_input_label_override: str | None = None
-    source_ids: list[str]
-    source_input_labels: list[str]
 
     @model_validator(mode="after")
-    def _validate_host_entry_metadata(self) -> "PreparedHostEntryMetadata":
+    def _validate_host_entry_metadata(self) -> "PreparedHostManifestEntry":
         if not self.host:
             raise ValueError("prepared host entry host is required")
-        if not self.input_name:
-            raise ValueError("prepared host entry input_name is required")
+        if not self.runtime_source_id:
+            raise ValueError("prepared host entry runtime_source_id is required")
         if not self.source_id:
             raise ValueError("prepared host entry source_id is required")
+        if not self.source_input_label:
+            raise ValueError("prepared host entry source_input_label is required")
         return self
 
 
 class PreparedDelegationRootMetadata(PrepareWorkerModel):
     """Worker-local root metadata with root-owned prepared host entries."""
 
-    public_suffix: str
     delegation_config_source_id: str
     delegation_behavior_fingerprint: str
-    host_entries: list[PreparedHostEntryMetadata]
+    host_entries: list[PreparedHostManifestEntry]
 
     @model_validator(mode="after")
     def _validate_root_metadata(self) -> "PreparedDelegationRootMetadata":
-        if not self.public_suffix:
-            raise ValueError("delegation root public_suffix is required")
         if not self.delegation_config_source_id:
             raise ValueError("delegation root delegation_config_source_id is required")
         if not self.delegation_behavior_fingerprint:

@@ -21,14 +21,13 @@ from domain_pipeline.prepare.merger import PreparedEntryMerger, prepared_entry_m
 from domain_pipeline.prepare.models import (
     MANUALLY_ADDED_SOURCE_ID,
     MANUALLY_SELECTED_FOR_FILTERED_SOURCE_ID,
-    PreparedHostEntry,
     PreparedInputSet,
-    PreparedProvenance,
+    PreparedManualRouting,
+    PreparedOutputRows,
     PreparedRootPlan,
-    PreparedSourcePosition,
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
-from domain_pipeline.prepare.sources.parser import DomainListParser, ParsedDomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
 from domain_pipeline.routing import (
     InputValidationRoutingPolicy,
     ManualRoutingPolicy,
@@ -54,7 +53,9 @@ class _PreparedSourceContext:
 class PreparationCollections:
     """Mutable collections built while preparing one config."""
 
-    entries_by_host: dict[str, PreparedHostEntry] = dataclasses.field(
+    entries_by_host: dict[str, DomainEntry] = dataclasses.field(default_factory=dict)
+    source_id_by_host: dict[str, str] = dataclasses.field(default_factory=dict)
+    manual_routing_by_host: dict[str, PreparedManualRouting] = dataclasses.field(
         default_factory=dict
     )
     review_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -87,12 +88,10 @@ class ManualRowRequest:
     """Inputs needed to project one prepare-owned manual review row."""
 
     job: SourceJob
-    entry: ParsedDomainEntry
+    entry: DomainEntry
     route_transition: TerminalRouteTransition
     source_id: str
     input_label: str
-    source_ids: tuple[str, ...] | None = None
-    source_input_labels: tuple[str, ...] | None = None
 
 
 @dataclasses.dataclass
@@ -120,7 +119,7 @@ def _resolve_from_root(source_root: Path, path: Path) -> Path:
 
 
 def _source_relative_label(source_root: Path, path: Path) -> str:
-    """Return a stable source-root-relative label for published provenance."""
+    """Return a stable source-root-relative label for emitted source context."""
     try:
         return path.relative_to(source_root).as_posix()
     except ValueError:
@@ -141,13 +140,8 @@ def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(request.job),
-                provenance=PreparedProvenance(
-                    source_id_override=request.source_id,
-                    source_input_label_override=request.input_label,
-                    source_ids=request.source_ids or (request.source_id,),
-                    source_input_labels=request.source_input_labels
-                    or (request.input_label,),
-                ),
+                source_id=request.source_id,
+                source_input_label=request.input_label,
             ),
             entry=request.entry,
             route_transition=request.route_transition,
@@ -158,23 +152,18 @@ def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
 def _public_suffix_review_row(
     *,
     job: SourceJob,
-    prepared_entry: PreparedHostEntry,
+    entry: DomainEntry,
+    manual_routing: PreparedManualRouting,
 ) -> dict[str, Any]:
     route_transition = InputValidationRoutingPolicy().public_suffix()
     return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(job),
-                provenance=PreparedProvenance(
-                    source_id_override=prepared_entry.provenance.source_id_override,
-                    source_input_label_override=(
-                        prepared_entry.provenance.source_input_label_override
-                    ),
-                    source_ids=prepared_entry.provenance.source_ids,
-                    source_input_labels=prepared_entry.provenance.source_input_labels,
-                ),
+                source_id=manual_routing.output_source_id,
+                source_input_label=manual_routing.output_source_input_label,
             ),
-            entry=prepared_entry.entry,
+            entry=entry,
             route_transition=route_transition,
         )
     )
@@ -183,23 +172,18 @@ def _public_suffix_review_row(
 def _manually_selected_public_suffix_row(
     *,
     job: SourceJob,
-    prepared_entry: PreparedHostEntry,
+    entry: DomainEntry,
+    manual_routing: PreparedManualRouting,
 ) -> dict[str, Any]:
     route_transition = ManualRoutingPolicy().selected_public_suffix_for_filtered()
     return TerminalRowBuilder().build(
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=_source_context_from_job(job),
-                provenance=PreparedProvenance(
-                    source_id_override=prepared_entry.provenance.source_id_override,
-                    source_input_label_override=(
-                        prepared_entry.provenance.source_input_label_override
-                    ),
-                    source_ids=prepared_entry.provenance.source_ids,
-                    source_input_labels=prepared_entry.provenance.source_input_labels,
-                ),
+                source_id=manual_routing.output_source_id,
+                source_input_label=manual_routing.output_source_input_label,
             ),
-            entry=prepared_entry.entry,
+            entry=entry,
             route_transition=route_transition,
         )
     )
@@ -272,51 +256,45 @@ class PreparationPlanner:
             source_jobs_by_id=state.source_jobs_by_id,
             parsed_source_entry_count=state.collections.parsed_source_entry_count,
             entries_by_source=dict(entries_by_source),
+            manual_routing_by_host=dict(state.collections.manual_routing_by_host),
             root_plans=root_plans,
-            preparation_review_rows=state.collections.review_rows,
-            preparation_terminal_rows=state.collections.terminal_rows,
+            preparation_outputs=PreparedOutputRows(
+                review_rows=state.collections.review_rows,
+                terminal_rows=state.collections.terminal_rows,
+            ),
         )
 
     def _collect_configured_source_entries(self, state: PreparationState) -> None:
         routing = ManualRoutingState(manual_inputs=state.manual_inputs)
-        for source_index, job in enumerate(state.jobs):
-            source_format = job.config.get("input", {}).get("format", "auto")
-            forced_format = None if source_format == "auto" else source_format
-            for record in state.parser.process_entry_records(
+        excluded_hosts = set(state.manual_inputs.manually_excluded_from_sources_entries)
+        for job in state.jobs:
+            configured_format = job.config.get("input", {}).get("format", "auto")
+            forced_format = None if configured_format == "auto" else configured_format
+            for entry in state.parser.process_entries(
                 job.lines,
                 source_name=job.input_label,
                 forced_format=forced_format,
             ):
-                host = record.entry.host
+                host = entry.host
                 state.collections.parsed_source_entry_count += 1
                 state.collections.matched_hosts.add(host)
-                if self._is_manually_excluded_source_entry(state, record.entry):
+                if host in excluded_hosts:
                     continue
                 self._validate_host_behavior_fingerprint(
                     HostBehaviorRequest(host=host, job=job, routing=routing)
                 )
-                prepared_entry = PreparedHostEntry(
-                    entry=record.entry,
-                    position=PreparedSourcePosition(
-                        source_id=job.source_id,
-                        source_index=source_index,
-                        line_index=record.line_index,
-                        raw_line=record.raw_line,
-                    ),
-                    provenance=PreparedProvenance(
-                        manually_selected_for_filtered=(
-                            host
-                            in (
-                                state.manual_inputs.manually_selected_for_filtered_entries
-                            )
-                        ),
-                        source_ids=(job.source_id,),
-                        source_input_labels=(job.input_label,),
-                    ),
+                manual_routing = PreparedManualRouting(
+                    manually_selected_for_filtered=(
+                        host
+                        in state.manual_inputs.manually_selected_for_filtered_entries
+                    )
                 )
                 self.entry_merger.merge_entry_by_host(
-                    state.collections.entries_by_host, prepared_entry
+                    state.collections.entries_by_host, entry
                 )
+                state.collections.source_id_by_host.setdefault(host, job.source_id)
+                if manual_routing.manually_selected_for_filtered:
+                    state.collections.manual_routing_by_host[host] = manual_routing
 
     def _validate_host_behavior_fingerprint(self, request: HostBehaviorRequest) -> None:
         if request.host in request.routing.manual_inputs.manually_added_entries:
@@ -351,25 +329,14 @@ class PreparationPlanner:
             state.manual_inputs.manually_added_path,
         )
         for host, entry in sorted(state.manual_inputs.manually_added_entries.items()):
-            incoming = PreparedHostEntry(
-                entry=entry,
-                position=PreparedSourcePosition(
-                    source_id=state.primary_job.source_id,
-                    source_index=0,
-                    line_index=10_000_000,
-                    raw_line=host,
-                ),
-                provenance=PreparedProvenance(
-                    manually_added=True,
-                    source_id_override=MANUALLY_ADDED_SOURCE_ID,
-                    source_input_label_override=manually_added_label,
-                    source_ids=(MANUALLY_ADDED_SOURCE_ID,),
-                    source_input_labels=(manually_added_label,),
-                ),
+            manual_routing = PreparedManualRouting(
+                manually_added=True,
+                output_source_id=MANUALLY_ADDED_SOURCE_ID,
+                output_source_input_label=manually_added_label,
             )
             current_keys = self._matching_prepared_entry_keys(
                 state.collections.entries_by_host,
-                incoming,
+                entry,
             )
             if not current_keys:
                 if len(manually_added_config_fingerprints) > 1:
@@ -379,55 +346,30 @@ class PreparationPlanner:
                         f"unmatched host {host!r}; unmatched manually_added requires "
                         "all enabled sources to share dns_query/delegation/output behavior"
                     )
-                state.collections.entries_by_host[
-                    prepared_entry_merge_key(incoming)
-                ] = incoming
+                state.collections.entries_by_host[prepared_entry_merge_key(entry)] = (
+                    entry
+                )
+                state.collections.source_id_by_host[host] = state.primary_job.source_id
+                state.collections.manual_routing_by_host[host] = manual_routing
             else:
                 for current_key in current_keys:
-                    current = state.collections.entries_by_host[current_key]
-                    provenance = dataclasses.replace(
-                        current.provenance,
-                        manually_added=True,
-                        source_id_override=MANUALLY_ADDED_SOURCE_ID,
-                        source_input_label_override=manually_added_label,
-                        source_ids=self.entry_merger.stable_unique_merge(
-                            current.provenance.source_ids, (MANUALLY_ADDED_SOURCE_ID,)
-                        ),
-                        source_input_labels=self.entry_merger.stable_unique_merge(
-                            current.provenance.source_input_labels,
-                            (manually_added_label,),
-                        ),
+                    current_routing = state.collections.manual_routing_by_host.get(
+                        current_key, PreparedManualRouting()
                     )
-                    state.collections.entries_by_host[current_key] = (
+                    state.collections.manual_routing_by_host[current_key] = (
                         dataclasses.replace(
-                            current,
-                            provenance=provenance,
+                            current_routing,
+                            manually_added=True,
+                            output_source_id=MANUALLY_ADDED_SOURCE_ID,
+                            output_source_input_label=manually_added_label,
                         )
                     )
             state.collections.matched_hosts.add(host)
 
-    def _is_manually_excluded_source_entry(
-        self,
-        state: PreparationState,
-        entry: ParsedDomainEntry,
-    ) -> bool:
-        """Return whether a source entry is removed by exact-host operator input."""
-        excluded_entry = state.manual_inputs.manually_excluded_from_sources_entries.get(
-            entry.host
-        )
-        if excluded_entry is None:
-            return False
-        return (
-            excluded_entry.semantics.input_kind == "exact_host"
-            and excluded_entry.semantics.apex_scope == "exact_only"
-            and entry.semantics.input_kind == "exact_host"
-            and entry.semantics.apex_scope == "exact_only"
-        )
-
     def _matching_prepared_entry_keys(
         self,
-        entries_by_key: dict[str, PreparedHostEntry],
-        incoming: PreparedHostEntry,
+        entries_by_key: dict[str, DomainEntry],
+        incoming: DomainEntry,
     ) -> list[str]:
         """Return prepared-entry keys that should receive a manual override."""
         return [
@@ -436,45 +378,47 @@ class PreparationPlanner:
                 (
                     (key, entry)
                     for key, entry in entries_by_key.items()
-                    if entry.entry.host == incoming.entry.host
+                    if entry.host == incoming.host
                 ),
-                key=lambda item: (
-                    item[1].position.source_index,
-                    item[1].position.line_index,
-                    item[0],
-                ),
+                key=lambda item: item[0],
             )
         ]
 
     def _partition_worker_entries(
         self, state: PreparationState
-    ) -> dict[str, list[PreparedHostEntry]]:
-        entries_by_source: dict[str, list[PreparedHostEntry]] = defaultdict(list)
-        for prepared_entry in sorted(
+    ) -> dict[str, list[DomainEntry]]:
+        entries_by_source: dict[str, list[DomainEntry]] = defaultdict(list)
+        for entry in sorted(
             state.collections.entries_by_host.values(),
             key=lambda current: (
-                current.position.source_index,
-                current.position.line_index,
-                current.entry.host,
+                state.jobs.index(
+                    state.source_jobs_by_id[
+                        state.collections.source_id_by_host[current.host]
+                    ]
+                ),
+                current.host,
             ),
         ):
-            if (
-                prepared_entry.entry.semantics.is_public_suffix_input
-                or not prepared_entry.entry.registrable_domain
-            ):
-                if prepared_entry.provenance.manually_selected_for_filtered:
+            source_id = state.collections.source_id_by_host[entry.host]
+            manual_routing = state.collections.manual_routing_by_host.get(
+                entry.host, PreparedManualRouting()
+            )
+            if entry.registrable_domain is None:
+                if manual_routing.manually_selected_for_filtered:
                     route_transition = (
                         ManualRoutingPolicy().selected_public_suffix_for_filtered()
                     )
                     row = _manually_selected_public_suffix_row(
-                        job=state.source_jobs_by_id[prepared_entry.position.source_id],
-                        prepared_entry=prepared_entry,
+                        job=state.source_jobs_by_id[source_id],
+                        entry=entry,
+                        manual_routing=manual_routing,
                     )
                 else:
                     route_transition = InputValidationRoutingPolicy().public_suffix()
                     row = _public_suffix_review_row(
-                        job=state.source_jobs_by_id[prepared_entry.position.source_id],
-                        prepared_entry=prepared_entry,
+                        job=state.source_jobs_by_id[source_id],
+                        entry=entry,
+                        manual_routing=manual_routing,
                     )
                     state.collections.review_rows.append(row)
                 state.collections.terminal_rows.append(
@@ -484,7 +428,7 @@ class PreparationPlanner:
                     )
                 )
                 continue
-            entries_by_source[prepared_entry.position.source_id].append(prepared_entry)
+            entries_by_source[source_id].append(entry)
         return entries_by_source
 
     def _append_missing_manually_selected_rows(self, state: PreparationState) -> None:
@@ -519,30 +463,33 @@ class PreparationPlanner:
     def _root_plans(
         self,
         *,
-        entries_by_source: dict[str, list[PreparedHostEntry]],
+        entries_by_source: dict[str, list[DomainEntry]],
         source_jobs_by_id: dict[str, SourceJob],
     ) -> dict[str, PreparedRootPlan]:
-        root_entries: dict[str, list[PreparedHostEntry]] = defaultdict(list)
-        for entries in entries_by_source.values():
+        root_entries: dict[str, list[tuple[str, DomainEntry]]] = defaultdict(list)
+        source_order_by_id = {
+            source_id: source_index
+            for source_index, source_id in enumerate(source_jobs_by_id)
+        }
+        for source_id, entries in entries_by_source.items():
             for entry in entries:
-                if entry.entry.registrable_domain:
-                    root_entries[entry.entry.registrable_domain].append(entry)
+                if entry.registrable_domain:
+                    root_entries[entry.registrable_domain].append((source_id, entry))
 
         root_plans: dict[str, PreparedRootPlan] = {}
         for registrable_domain, entries in sorted(root_entries.items()):
             ordered_entries = sorted(
                 entries,
                 key=lambda entry: (
-                    entry.position.source_index,
-                    entry.position.line_index,
-                    entry.entry.host,
+                    source_order_by_id[entry[0]],
+                    entry[1].host,
                 ),
             )
             fingerprints_by_source = {
-                entry.position.source_id: delegation_behavior_fingerprint(
-                    source_jobs_by_id[entry.position.source_id].config
+                source_id: delegation_behavior_fingerprint(
+                    source_jobs_by_id[source_id].config
                 )
-                for entry in ordered_entries
+                for source_id, _entry in ordered_entries
             }
             fingerprints = set(fingerprints_by_source.values())
             if len(fingerprints) > 1:
@@ -551,7 +498,7 @@ class PreparationPlanner:
                         registrable_domain, fingerprints_by_source
                     )
                 )
-            delegation_config_source_id = ordered_entries[0].position.source_id
+            delegation_config_source_id = ordered_entries[0][0]
             root_plans[registrable_domain] = PreparedRootPlan(
                 registrable_domain=registrable_domain,
                 entry_count=len(ordered_entries),

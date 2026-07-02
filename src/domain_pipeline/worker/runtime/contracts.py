@@ -10,23 +10,13 @@ from domain_pipeline.routing.route_codes import (
     StageRouteTransition,
 )
 from domain_pipeline.routing.types import ResultRoute
-from domain_pipeline.prepare.models import PreparedProvenance
-from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
 from domain_pipeline.worker.ip_location.providers import (
     LocationPolicyDecision,
     IPLocationResult,
 )
-
-
-@dataclass(frozen=True)
-class RuntimeProvenance:
-    """Runtime ordering and source-field overrides for one parsed host item."""
-
-    sequence: int
-    total: int
-    source: PreparedProvenance = field(default_factory=PreparedProvenance)
 
 
 @dataclass(frozen=True)
@@ -40,12 +30,38 @@ class WorkerSourceContext:
 
 
 @dataclass(frozen=True)
+class RuntimeItemPosition:
+    """Runtime ordering for one parsed host item."""
+
+    sequence: int
+    total: int
+
+
+@dataclass(frozen=True)
+class RuntimeOutputSource:
+    """Single source identity emitted for one parsed host item."""
+
+    source_id: str
+    input_label: str
+
+
+@dataclass(frozen=True)
+class RuntimeManualRouting:
+    """Manual-input route flags for one parsed host item."""
+
+    manually_selected_for_filtered: bool = False
+    manually_added: bool = False
+
+
+@dataclass(frozen=True)
 class ParsedHostItem:
-    """Normalized parsed host with runtime context and output provenance overrides."""
+    """Normalized parsed host with runtime context and explicit manual routing."""
 
     source_context: WorkerSourceContext
-    entry: ParsedDomainEntry
-    provenance: RuntimeProvenance
+    entry: DomainEntry
+    position: RuntimeItemPosition
+    output_source: RuntimeOutputSource
+    manual_routing: RuntimeManualRouting = field(default_factory=RuntimeManualRouting)
 
 
 @dataclass(frozen=True)
@@ -93,7 +109,7 @@ class CompletedHostResult:
     """Terminal result emitted to the writer boundary."""
 
     source_context: WorkerSourceContext
-    entry: ParsedDomainEntry
+    entry: DomainEntry
     route: ResultRoute
     route_code: RouteCode
     row: dict[str, Any]

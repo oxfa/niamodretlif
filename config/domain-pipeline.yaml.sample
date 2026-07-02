@@ -23,10 +23,11 @@ version: 2
 # sources to share dns_query, delegation, and output behavior. Unmatched
 # selected entries route to review without delegation or host-resolution lookup
 # because they are operator reconciliation rows.
-# manually_excluded_from_sources is exact-host-only source subtraction: matched
-# source domains are removed before worker manifests, and non-matches are
-# silent no-ops. Other public suffix inputs are prepare-owned terminal rows
-# because there is no registrable domain to query.
+# manually_excluded_from_sources is target-based source subtraction: source
+# entries whose parsed normalized target matches an operator entry are removed
+# before worker manifests, and non-matches are silent no-ops. Other public
+# suffix inputs are prepare-owned terminal rows because there is no registrable
+# domain to query.
 #
 # Runtime rows use three terminal routes:
 # - filtered: positive output rows.

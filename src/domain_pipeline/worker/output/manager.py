@@ -111,19 +111,13 @@ def write_projected_review_rows(
         writer.writeheader()
         for row in sorted(
             review_rows,
-            key=lambda current: (
-                str(current.get("input_name") or current.get("host", "")),
-                str(current.get("host", "")),
-            ),
+            key=lambda current: (str(current.get("host", "")),),
         ):
             writer.writerow(cast(Any, row))
 
 
 def txt_output_value(row: dict[str, Any]) -> str:
     """Return the public TXT value for one output row."""
-    input_name = str(row.get("input_name", "")).strip()
-    if input_name:
-        return input_name
     return str(row["host"])
 
 
