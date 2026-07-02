@@ -18761,6 +18761,7 @@ counter.powweb.com
 counter.pr-cy.ru
 counter.proxycrawl.com
 counter.reddigital.ru
+counter.scribblelive.com
 counter.sibnet.ru
 counter.sina.com.cn
 counter.smotrim.ru
@@ -24397,6 +24398,7 @@ drinrwafhyvmh.website
 dripe.site
 drive.carpoollogistics.com
 drive.seagate.com
+drive.waitrapp.com
 drivendecree.com
 driver.dctaxi.com
 driver.jugnoo.in
@@ -38629,6 +38631,7 @@ ini.litingxin.cn
 inini.kesug.com
 inistrack.net
 init.phpwind.com
+init.phpwind.net
 initdvgmzzrli.space
 initiallybrigadebookstore.com
 injbwbtfrzbmy.website
@@ -50334,6 +50337,7 @@ metrics.schooloutfitters.com
 metrics.sciencemag.org
 metrics.scopus.com
 metrics.scottrade.com
+metrics.scribblelive.com
 metrics.sdcvisit.com
 metrics.seabourn.com
 metrics.seawheeze.com
