@@ -6,15 +6,13 @@ from collections import defaultdict
 from typing import Any
 
 from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
-from domain_pipeline.prepare.models import PreparedProvenance
-from domain_pipeline.prepare.sources.parser import (
-    ParsedDomainEntry,
-    ParsedInputSemantics,
-)
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.runtime.contracts import (
     DelegationRootWorkItem,
     ParsedHostItem,
-    RuntimeProvenance,
+    RuntimeItemPosition,
+    RuntimeManualRouting,
+    RuntimeOutputSource,
     WorkerSourceContext,
 )
 
@@ -22,20 +20,11 @@ from domain_pipeline.worker.runtime.contracts import (
 def _entry_from_payload(
     *,
     registrable_domain: str,
-    public_suffix: str,
     payload: dict[str, Any],
-) -> ParsedDomainEntry:
-    return ParsedDomainEntry(
+) -> DomainEntry:
+    return DomainEntry(
         host=str(payload["host"]),
         registrable_domain=registrable_domain,
-        semantics=ParsedInputSemantics(
-            input_name=str(payload["input_name"]),
-            public_suffix=public_suffix,
-            is_public_suffix_input=False,
-            input_kind=str(payload["input_kind"]),
-            apex_scope=str(payload["apex_scope"]),
-            source_format=str(payload["source_format"]),
-        ),
     )
 
 
@@ -89,22 +78,21 @@ class RuntimeItemLoader:
 
     def _prepared_item_payloads(
         self,
-    ) -> list[tuple[WorkerSourceContext, ParsedDomainEntry, dict[str, Any]]]:
+    ) -> list[tuple[WorkerSourceContext, DomainEntry, dict[str, Any]]]:
         """Flatten root-owned prepared host entries into worker-local item payloads."""
         source_contexts = {
             source_context.source_id: source_context
             for source_context in self.source_contexts()
         }
-        item_payloads: list[
-            tuple[WorkerSourceContext, ParsedDomainEntry, dict[str, Any]]
-        ] = []
+        item_payloads: list[tuple[WorkerSourceContext, DomainEntry, dict[str, Any]]] = (
+            []
+        )
         for registrable_domain, root_payload in self._prepared_roots().items():
             if not isinstance(root_payload, dict):
                 raise ValueError(
                     "prepared metadata delegation root "
                     f"{registrable_domain!r} must be an object"
                 )
-            public_suffix = str(root_payload["public_suffix"])
             entries = root_payload.get("host_entries")
             if not isinstance(entries, list) or not entries:
                 raise ValueError(
@@ -117,7 +105,7 @@ class RuntimeItemLoader:
                         "prepared metadata delegation root "
                         f"{registrable_domain!r} host entry must be an object"
                     )
-                source_id = str(item["source_id"])
+                source_id = str(item["runtime_source_id"])
                 source_context = source_contexts.get(source_id)
                 if source_context is None:
                     raise ValueError(
@@ -127,7 +115,6 @@ class RuntimeItemLoader:
                     )
                 entry = _entry_from_payload(
                     registrable_domain=str(registrable_domain),
-                    public_suffix=public_suffix,
                     payload=item,
                 )
                 item_payloads.append((source_context, entry, item))
@@ -141,24 +128,21 @@ class RuntimeItemLoader:
             ParsedHostItem(
                 source_context=source_context,
                 entry=entry,
-                provenance=RuntimeProvenance(
-                    sequence=index,
-                    total=total,
-                    source=PreparedProvenance(
-                        manually_selected_for_filtered=bool(
-                            provenance["manually_selected_for_filtered"]
-                        ),
-                        manually_added=bool(provenance["manually_added"]),
-                        source_id_override=provenance["source_id_override"],
-                        source_input_label_override=provenance[
-                            "source_input_label_override"
-                        ],
-                        source_ids=tuple(provenance["source_ids"]),
-                        source_input_labels=tuple(provenance["source_input_labels"]),
+                position=RuntimeItemPosition(sequence=index, total=total),
+                output_source=RuntimeOutputSource(
+                    source_id=str(manifest_entry["source_id"]),
+                    input_label=str(manifest_entry["source_input_label"]),
+                ),
+                manual_routing=RuntimeManualRouting(
+                    manually_selected_for_filtered=bool(
+                        manifest_entry["manually_selected_for_filtered"]
                     ),
+                    manually_added=bool(manifest_entry["manually_added"]),
                 ),
             )
-            for index, (source_context, entry, provenance) in enumerate(item_payloads)
+            for index, (source_context, entry, manifest_entry) in enumerate(
+                item_payloads
+            )
         ]
 
     def delegation_work_items(
@@ -173,10 +157,7 @@ class RuntimeItemLoader:
         items_by_root: dict[str, list[ParsedHostItem]] = defaultdict(list)
         terminal_items: list[ParsedHostItem] = []
         for item in items:
-            if (
-                item.entry.semantics.is_public_suffix_input
-                or not item.entry.registrable_domain
-            ):
+            if item.entry.registrable_domain is None:
                 terminal_items.append(item)
                 continue
             items_by_root[item.entry.registrable_domain].append(item)
@@ -185,10 +166,10 @@ class RuntimeItemLoader:
         work_items: list[DelegationRootWorkItem] = []
         for registrable_domain, root_items in sorted(
             items_by_root.items(),
-            key=lambda current: (current[1][0].provenance.sequence, current[0]),
+            key=lambda current: (current[1][0].position.sequence, current[0]),
         ):
             ordered_items = tuple(
-                sorted(root_items, key=lambda item: item.provenance.sequence)
+                sorted(root_items, key=lambda item: item.position.sequence)
             )
             delegation_config_source_id, fingerprint = self._delegation_root_metadata(
                 registrable_domain=registrable_domain,

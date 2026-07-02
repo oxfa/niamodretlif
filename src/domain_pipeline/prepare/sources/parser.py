@@ -1,9 +1,9 @@
 """Domain list parsing and normalization.
 
 This module provides ``DomainListParser``, the prepare-stage parser for the
-source-to-worker pipeline. It inspects each input source,
-determines which predefined file format it uses, and then parses the file with
-the corresponding extractor before worker runtime checks begin.
+source-to-worker pipeline. It inspects each input source, determines which
+predefined file format it uses, and then extracts normalized hosts before
+worker runtime checks begin.
 
 Supported input formats:
 
@@ -36,8 +36,8 @@ Processing steps applied to each file:
 5. Encode IDN labels to Punycode (IDNA).
 6. Validate structural syntax (RFC 1035 label limits).
 7. Extract the DNS delegation target (ICANN eTLD+1) via ``publicsuffix2``.
-8. Deduplicate normalized entries by host, input kind, and apex scope while
-   preserving their registrable domain.
+8. Deduplicate normalized entries by host while preserving their registrable
+   domain.
 
 Files that are mixed-format or unrecognized are skipped.
 
@@ -76,40 +76,12 @@ def _icann_public_suffix_list() -> publicsuffix2.PublicSuffixList:
     return publicsuffix2.PublicSuffixList(icann_lines)
 
 
-# The parsed record intentionally keeps a stable, explicit shape for runtime
-# output and test assertions.
-
-
 @dataclasses.dataclass(frozen=True)
-class ParsedInputSemantics:
-    """Input-origin semantics attached to a normalized parsed domain entry."""
-
-    input_name: str = ""
-    public_suffix: str = ""
-    is_public_suffix_input: bool = False
-    input_kind: str = "exact_host"
-    apex_scope: str = "exact_only"
-    source_format: str = "plain"
-
-
-@dataclasses.dataclass(frozen=True)
-class ParsedDomainEntry:
+class DomainEntry:
     """A normalized host entry paired with its registrable domain."""
 
     host: str
-    registrable_domain: str
-    semantics: ParsedInputSemantics = dataclasses.field(
-        default_factory=ParsedInputSemantics
-    )
-
-
-@dataclasses.dataclass(frozen=True)
-class ParsedDomainEntryRecord:
-    """One parsed entry paired with its surviving source-line provenance."""
-
-    entry: ParsedDomainEntry
-    raw_line: str
-    line_index: int
+    registrable_domain: str | None
 
 
 class InputFileFormat(str, Enum):
@@ -127,11 +99,9 @@ class InputFileFormat(str, Enum):
 
 @dataclasses.dataclass(frozen=True)
 class ParsedFormatLine:
-    """Format-specific input token and source semantics for one cleaned line."""
+    """Format-specific host token for one cleaned line."""
 
-    input_name: str
-    input_kind: str
-    apex_scope: str
+    host: str
 
 
 class DomainSyntax:
@@ -178,13 +148,13 @@ class SourceFormatHandler:
         raise NotImplementedError
 
     @staticmethod
-    def _split_rule_name(name: str) -> tuple[str, str]:
-        """Return the semantic apex scope and normalized rule target token."""
+    def _rule_host(name: str) -> str:
+        """Return the host token carried by a rule-like entry."""
         if name.startswith("*."):
-            return "exclude_apex", name[2:]
+            return name[2:]
         if name.startswith("."):
-            return "exclude_apex", name[1:]
-        return "include_apex", name
+            return name[1:]
+        return name
 
 
 class DnsmasqFormatHandler(SourceFormatHandler):
@@ -202,9 +172,8 @@ class DnsmasqFormatHandler(SourceFormatHandler):
         """Extract dnsmasq rule target and suffix semantics."""
         _ = syntax
         match = self.line_regex.match(line)
-        input_name = line if match is None else match.group(1)
-        apex_scope, input_name = self._split_rule_name(input_name)
-        return ParsedFormatLine(input_name, "suffix_rule", apex_scope)
+        host = line if match is None else match.group(1)
+        return ParsedFormatLine(self._rule_host(host))
 
 
 class AdblockFormatHandler(SourceFormatHandler):
@@ -221,9 +190,8 @@ class AdblockFormatHandler(SourceFormatHandler):
     def parse_line(self, line: str, syntax: DomainSyntax) -> ParsedFormatLine:
         """Extract AdBlock rule target and suffix semantics."""
         _ = syntax
-        input_name = line.lstrip("@|").rstrip("^")
-        apex_scope, input_name = self._split_rule_name(input_name)
-        return ParsedFormatLine(input_name, "suffix_rule", apex_scope)
+        host = line.lstrip("@|").rstrip("^")
+        return ParsedFormatLine(self._rule_host(host))
 
 
 class HostsFormatHandler(SourceFormatHandler):
@@ -241,8 +209,8 @@ class HostsFormatHandler(SourceFormatHandler):
         """Extract the hostname token from a hosts-file line."""
         _ = syntax
         parts = line.split()
-        input_name = parts[1] if len(parts) >= 2 else line
-        return ParsedFormatLine(input_name, "exact_host", "exact_only")
+        host = parts[1] if len(parts) >= 2 else line
+        return ParsedFormatLine(host)
 
     @staticmethod
     def _is_valid_hosts_address(value: str) -> bool:
@@ -266,7 +234,7 @@ class PlainFormatHandler(SourceFormatHandler):
     def parse_line(self, line: str, syntax: DomainSyntax) -> ParsedFormatLine:
         """Return exact-host semantics for a plain domain line."""
         _ = syntax
-        return ParsedFormatLine(line, "exact_host", "exact_only")
+        return ParsedFormatLine(line)
 
 
 class SurgeRuleSetFormatHandler(SourceFormatHandler):
@@ -288,10 +256,8 @@ class SurgeRuleSetFormatHandler(SourceFormatHandler):
     def parse_line(self, line: str, syntax: DomainSyntax) -> ParsedFormatLine:
         """Extract supported Surge RULE-SET domain semantics."""
         _ = syntax
-        rule_type, value = self._parts(line) or ("", "")
-        if rule_type == "DOMAIN-SUFFIX":
-            return ParsedFormatLine(value, "suffix_rule", "include_apex")
-        return ParsedFormatLine(value, "exact_host", "exact_only")
+        _, value = self._parts(line) or ("", "")
+        return ParsedFormatLine(value)
 
     @staticmethod
     def _parts(line: str) -> tuple[str, str] | None:
@@ -319,8 +285,8 @@ class SurgeDomainSetFormatHandler(SourceFormatHandler):
         """Extract exact-host or include-apex suffix semantics."""
         _ = syntax
         if line.startswith("."):
-            return ParsedFormatLine(line[1:], "suffix_rule", "include_apex")
-        return ParsedFormatLine(line, "exact_host", "exact_only")
+            return ParsedFormatLine(line[1:])
+        return ParsedFormatLine(line)
 
 
 class DomainListParser:
@@ -360,18 +326,18 @@ class DomainListParser:
         """
         return self.syntax.is_valid_syntax(domain)
 
-    def _strip_comments_and_cosmetics(self, raw_line: str) -> str:
+    def _strip_comments_and_cosmetics(self, source_line: str) -> str:
         """Remove comments and cosmetic AdBlock filters.
 
         Args:
-            raw_line: A raw list entry.
+            source_line: A source list entry.
 
         Returns:
             String with comments stripped, or empty if it's cosmetic.
         """
-        line = raw_line.split("#", 1)[0].split("!", 1)[0].strip()
+        line = source_line.split("#", 1)[0].split("!", 1)[0].strip()
         # Drop cosmetic adblock rules (##, #@#) and empty lines
-        if not line or "##" in raw_line or "#@#" in raw_line:
+        if not line or "##" in source_line or "#@#" in source_line:
             return ""
         return line
 
@@ -387,8 +353,8 @@ class DomainListParser:
         """
         cleaned_lines = [
             line
-            for raw_line in lines
-            if (line := self._strip_comments_and_cosmetics(raw_line))
+            for source_line in lines
+            if (line := self._strip_comments_and_cosmetics(source_line))
         ]
         if not cleaned_lines:
             return InputFileFormat.UNKNOWN
@@ -434,20 +400,20 @@ class DomainListParser:
             return {InputFileFormat.SURGE_DOMAIN_SET}
         return set()
 
-    def _entry_semantics(
+    def _host_token(
         self,
-        raw_line: str,
+        source_line: str,
         input_format: InputFileFormat,
-    ) -> tuple[str, str, str]:
-        """Return the extracted input token, input kind, and apex scope."""
-        line = self._strip_comments_and_cosmetics(raw_line)
+    ) -> str:
+        """Return the extracted host token for one source line."""
+        line = self._strip_comments_and_cosmetics(source_line)
         if not line:
-            return "", "exact_host", "exact_only"
+            return ""
         handler = self._handlers_by_format.get(input_format)
         if handler is None:
-            return "", "exact_host", "exact_only"
+            return ""
         parsed = handler.parse_line(line, self.syntax)
-        return parsed.input_name, parsed.input_kind, parsed.apex_scope
+        return parsed.host
 
     def normalize(self, host: str) -> str:
         """Normalize a pre-extracted host.
@@ -467,33 +433,16 @@ class DomainListParser:
         source_name: str = "<input>",
         stats: Optional[MutableMapping[str, int]] = None,
         forced_format: InputFileFormat | str | None = None,
-    ) -> Iterator[ParsedDomainEntry]:
+    ) -> Iterator[DomainEntry]:
         """Process lines into unique normalized host entries.
 
         Args:
-            lines: Iterable of raw input lines.
+            lines: Iterable of source input lines.
             stats: Optional mutable mapping populated with detected-format counters.
 
         Yields:
             Unique normalized hosts with their registrable domain.
         """
-        for record in self.process_entry_records(
-            lines,
-            source_name=source_name,
-            stats=stats,
-            forced_format=forced_format,
-        ):
-            yield record.entry
-
-    def process_entry_records(
-        self,
-        lines: Iterable[str],
-        *,
-        source_name: str = "<input>",
-        stats: Optional[MutableMapping[str, int]] = None,
-        forced_format: InputFileFormat | str | None = None,
-    ) -> Iterator[ParsedDomainEntryRecord]:
-        """Process lines into unique normalized entries with source provenance."""
         lines = list(lines)
         file_format = self._resolve_file_format(lines, forced_format)
         if stats is not None:
@@ -510,22 +459,16 @@ class DomainListParser:
 
         log.info("Detected %s input format for %s", file_format.value, source_name)
 
-        seen_entries: Set[tuple[str, str, str]] = set()
-        for line_index, raw_line in enumerate(lines):
-            parsed_record = self._parse_record(raw_line, line_index, file_format)
-            if parsed_record is None:
+        seen_hosts: Set[str] = set()
+        for source_line in lines:
+            entry = self._parse_entry(source_line, file_format)
+            if entry is None:
                 continue
-            entry_key, record = parsed_record
-            if entry_key in seen_entries:
-                log.debug(
-                    "Skipped (duplicate entry): %s kind=%s apex=%s",
-                    entry_key[0],
-                    entry_key[1],
-                    entry_key[2],
-                )
+            if entry.host in seen_hosts:
+                log.debug("Skipped (duplicate host): %s", entry.host)
                 continue
-            seen_entries.add(entry_key)
-            yield record
+            seen_hosts.add(entry.host)
+            yield entry
 
     def _resolve_file_format(
         self,
@@ -539,19 +482,16 @@ class DomainListParser:
             return forced_format
         return InputFileFormat(str(forced_format))
 
-    def _parse_record(
+    def _parse_entry(
         self,
-        raw_line: str,
-        line_index: int,
+        source_line: str,
         file_format: InputFileFormat,
-    ) -> tuple[tuple[str, str, str], ParsedDomainEntryRecord] | None:
-        """Return a deduplication key and parsed record for one raw source line."""
-        input_name, input_kind, apex_scope = self._entry_semantics(
-            raw_line, file_format
-        )
-        normalized = self.normalize(input_name)
+    ) -> DomainEntry | None:
+        """Return one parsed entry for a source line."""
+        host = self._host_token(source_line, file_format)
+        normalized = self.normalize(host)
         if not normalized:
-            log.debug("Skipped (empty after normalization): %r", raw_line.strip())
+            log.debug("Skipped (empty after normalization): %r", source_line.strip())
             return None
         if not self.is_valid_syntax(normalized):
             log.debug("Skipped (invalid syntax): %r", normalized)
@@ -561,22 +501,9 @@ class DomainListParser:
         if public_suffix_parts is None:
             return None
         public_suffix, root = public_suffix_parts
-        entry_key = (normalized, input_kind, apex_scope)
-        return entry_key, ParsedDomainEntryRecord(
-            entry=ParsedDomainEntry(
-                host=normalized,
-                registrable_domain="" if normalized == public_suffix else root,
-                semantics=ParsedInputSemantics(
-                    input_name=input_name,
-                    public_suffix=public_suffix,
-                    is_public_suffix_input=normalized == public_suffix,
-                    input_kind=input_kind,
-                    apex_scope=apex_scope,
-                    source_format=file_format.value,
-                ),
-            ),
-            raw_line=raw_line,
-            line_index=line_index,
+        return DomainEntry(
+            host=normalized,
+            registrable_domain=None if normalized == public_suffix else root,
         )
 
     def _public_suffix_parts(self, normalized: str) -> tuple[str, str] | None:

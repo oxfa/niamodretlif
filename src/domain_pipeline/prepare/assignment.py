@@ -15,17 +15,18 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     PrepareWorkerManifest,
     PreparedDelegationRootMetadata,
-    PreparedHostEntryMetadata,
+    PreparedHostManifestEntry,
     PreparedRuntimeMetadata,
     WorkerOutputSpec,
     WorkerRuntimeSpec,
 )
 from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
 from domain_pipeline.prepare.models import (
-    PreparedHostEntry,
     PreparedInputSet,
+    PreparedManualRouting,
     PreparedRootPlan,
 )
+from domain_pipeline.prepare.sources.parser import DomainEntry
 
 PIPELINE_RUN_FORMAT_VERSION = 2
 logger = logging.getLogger(__name__)
@@ -54,9 +55,10 @@ class PreparedBatchPlanningInputs:
     """All batch-planning inputs collected before worker assignment starts."""
 
     source_jobs_by_id: dict[str, Any]
-    eligible_root_entries: dict[str, list[PreparedHostEntry]]
-    public_suffix_entries: list[PreparedHostEntry]
+    eligible_root_entries: dict[str, list[tuple[str, DomainEntry]]]
+    public_suffix_entries: list[tuple[str, DomainEntry]]
     root_plans: dict[str, PreparedRootPlan]
+    manual_routing_by_host: dict[str, PreparedManualRouting]
 
 
 @dataclass(frozen=True)
@@ -66,8 +68,10 @@ class WorkerManifestBuildRequest:
     config: dict[str, Any]
     batch_id: str
     worker_ids: list[str]
-    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]]
+    worker_source_entries: dict[str, dict[str, list[DomainEntry]]]
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]]
+    source_jobs_by_id: dict[str, Any]
+    manual_routing_by_host: dict[str, PreparedManualRouting]
 
 
 def relative_path(path: Path) -> str:
@@ -121,23 +125,26 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
     )
 
 
-def prepared_entry_payload(entry: PreparedHostEntry) -> dict[str, Any]:
+def prepared_entry_payload(
+    *,
+    source_id: str,
+    entry: DomainEntry,
+    source_jobs_by_id: dict[str, Any],
+    manual_routing: PreparedManualRouting,
+) -> dict[str, Any]:
     """Serialize one root-owned prepared host entry for worker runtime."""
+    source_job = source_jobs_by_id[source_id]
     return {
-        "host": entry.entry.host,
-        "input_name": entry.entry.semantics.input_name,
-        "source_id": entry.position.source_id,
-        "input_kind": entry.entry.semantics.input_kind,
-        "apex_scope": entry.entry.semantics.apex_scope,
-        "source_format": entry.entry.semantics.source_format,
-        "manually_selected_for_filtered": (
-            entry.provenance.manually_selected_for_filtered
+        "host": entry.host,
+        "runtime_source_id": source_id,
+        "source_id": manual_routing.output_source_id or source_id,
+        "source_input_label": (
+            manual_routing.output_source_input_label or source_job.input_label
         ),
-        "manually_added": entry.provenance.manually_added,
-        "source_id_override": entry.provenance.source_id_override,
-        "source_input_label_override": entry.provenance.source_input_label_override,
-        "source_ids": list(entry.provenance.source_ids),
-        "source_input_labels": list(entry.provenance.source_input_labels),
+        "manually_selected_for_filtered": (
+            manual_routing.manually_selected_for_filtered
+        ),
+        "manually_added": manual_routing.manually_added,
     }
 
 
@@ -156,6 +163,7 @@ class WorkerAssignmentPlanner:
             eligible_root_entries=eligible_root_entries,
             public_suffix_entries=public_suffix_entries,
             root_plans=prepared_inputs.root_plans,
+            manual_routing_by_host=prepared_inputs.manual_routing_by_host,
         )
 
     def assign(
@@ -164,12 +172,12 @@ class WorkerAssignmentPlanner:
         planning_inputs: PreparedBatchPlanningInputs,
         worker_ids: list[str],
     ) -> tuple[
-        dict[str, dict[str, list[PreparedHostEntry]]],
+        dict[str, dict[str, list[DomainEntry]]],
         dict[str, dict[str, PreparedRootPlan]],
         Counter,
     ]:
         """Assign prepared entries across workers while keeping each root atomic."""
-        worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]] = {
+        worker_source_entries: dict[str, dict[str, list[DomainEntry]]] = {
             worker_id: defaultdict(list) for worker_id in worker_ids
         }
         worker_root_plans: dict[str, dict[str, PreparedRootPlan]] = {
@@ -183,12 +191,10 @@ class WorkerAssignmentPlanner:
         }
 
         def assign_root(worker_id: str, registrable_domain: str) -> None:
-            for prepared_entry in self._ordered_entries_for_root(
+            for source_id, entry in self._ordered_entries_for_root(
                 planning_inputs, registrable_domain
             ):
-                worker_source_entries[worker_id][
-                    prepared_entry.position.source_id
-                ].append(prepared_entry)
+                worker_source_entries[worker_id][source_id].append(entry)
             worker_root_plans[worker_id][registrable_domain] = (
                 planning_inputs.root_plans[registrable_domain]
             )
@@ -232,8 +238,10 @@ class WorkerAssignmentPlanner:
         for worker_id in request.worker_ids:
             if not request.worker_source_entries[worker_id]:
                 continue
-            selected_source_ids = set(request.worker_source_entries[worker_id])
-            selected_source_ids.update(
+            selected_runtime_source_id_values = set(
+                request.worker_source_entries[worker_id]
+            )
+            selected_runtime_source_id_values.update(
                 plan.delegation_config_source_id
                 for plan in request.worker_root_plans[worker_id].values()
             )
@@ -248,11 +256,15 @@ class WorkerAssignmentPlanner:
                             config=request.config,
                             batch_id=request.batch_id,
                             worker_id=worker_id,
-                            selected_source_ids=selected_source_ids,
+                            selected_runtime_source_id_values=(
+                                selected_runtime_source_id_values
+                            ),
                         ),
                         prepared_metadata=self._prepared_runtime_metadata_from_assignment(
                             source_entries=request.worker_source_entries[worker_id],
                             root_plans=request.worker_root_plans[worker_id],
+                            source_jobs_by_id=request.source_jobs_by_id,
+                            manual_routing_by_host=request.manual_routing_by_host,
                         ),
                     ),
                 )
@@ -265,7 +277,7 @@ class WorkerAssignmentPlanner:
         config: dict[str, Any],
         batch_id: str,
         worker_id: str,
-        selected_source_ids: set[str],
+        selected_runtime_source_id_values: set[str],
     ) -> WorkerRuntimeSpec:
         config_name = str(config["config_name"])
         worker_paths = _path_layout().worker_paths(
@@ -277,7 +289,7 @@ class WorkerAssignmentPlanner:
         for source_config in config["sources"]:
             if (
                 not source_config["enabled"]
-                or source_config["id"] not in selected_source_ids
+                or source_config["id"] not in selected_runtime_source_id_values
             ):
                 continue
             selected_source = json.loads(json.dumps(source_config))
@@ -285,12 +297,16 @@ class WorkerAssignmentPlanner:
                 worker_paths.output_directory
             )
             source_configs.append(selected_source)
-        included_source_ids = {str(source["id"]) for source in source_configs}
-        missing_source_ids = sorted(selected_source_ids - included_source_ids)
-        if missing_source_ids:
+        included_runtime_source_id_values = {
+            str(source["id"]) for source in source_configs
+        }
+        missing_runtime_source_id_values = sorted(
+            selected_runtime_source_id_values - included_runtime_source_id_values
+        )
+        if missing_runtime_source_id_values:
             raise ValueError(
                 "worker runtime spec references unavailable configured sources: "
-                + ", ".join(missing_source_ids)
+                + ", ".join(missing_runtime_source_id_values)
             )
         return WorkerRuntimeSpec.model_validate(
             {
@@ -324,14 +340,17 @@ class WorkerAssignmentPlanner:
     def _prepared_runtime_metadata_from_assignment(
         self,
         *,
-        source_entries: dict[str, list[PreparedHostEntry]],
+        source_entries: dict[str, list[DomainEntry]],
         root_plans: dict[str, PreparedRootPlan],
+        source_jobs_by_id: dict[str, Any],
+        manual_routing_by_host: dict[str, PreparedManualRouting],
     ) -> PreparedRuntimeMetadata:
-        entries_by_root: dict[str, list[PreparedHostEntry]] = defaultdict(list)
-        for entries in source_entries.values():
+        entries_by_root: dict[str, list[tuple[str, DomainEntry]]] = defaultdict(list)
+        source_order_by_id = self._source_order_by_id(source_jobs_by_id)
+        for source_id, entries in source_entries.items():
             for entry in entries:
-                if entry.entry.registrable_domain:
-                    entries_by_root[entry.entry.registrable_domain].append(entry)
+                if entry.registrable_domain is not None:
+                    entries_by_root[entry.registrable_domain].append((source_id, entry))
         missing_roots = sorted(set(entries_by_root) - set(root_plans))
         if missing_roots:
             raise ValueError(
@@ -357,16 +376,9 @@ class WorkerAssignmentPlanner:
                     "delegation root "
                     f"{registrable_domain} is missing delegation config source"
                 )
-            public_suffixes = {entry.entry.semantics.public_suffix for entry in entries}
-            if len(public_suffixes) != 1:
-                raise ValueError(
-                    "delegation root "
-                    f"{registrable_domain} has inconsistent public suffix metadata"
-                )
         return PreparedRuntimeMetadata(
             delegation_roots={
                 registrable_domain: PreparedDelegationRootMetadata(
-                    public_suffix=entries[0].entry.semantics.public_suffix,
                     delegation_config_source_id=(
                         root_plans[registrable_domain].delegation_config_source_id
                     ),
@@ -374,13 +386,21 @@ class WorkerAssignmentPlanner:
                         root_plans[registrable_domain].delegation_behavior_fingerprint
                     ),
                     host_entries=[
-                        PreparedHostEntryMetadata(**prepared_entry_payload(entry))
-                        for entry in sorted(
+                        PreparedHostManifestEntry(
+                            **prepared_entry_payload(
+                                source_id=source_id,
+                                entry=entry,
+                                source_jobs_by_id=source_jobs_by_id,
+                                manual_routing=manual_routing_by_host.get(
+                                    entry.host, PreparedManualRouting()
+                                ),
+                            )
+                        )
+                        for source_id, entry in sorted(
                             entries,
                             key=lambda current: (
-                                current.position.source_index,
-                                current.position.line_index,
-                                current.entry.host,
+                                source_order_by_id[current[0]],
+                                current[1].host,
                             ),
                         )
                     ],
@@ -393,15 +413,23 @@ class WorkerAssignmentPlanner:
         self,
         planning_inputs: PreparedBatchPlanningInputs,
         registrable_domain: str,
-    ) -> list[PreparedHostEntry]:
+    ) -> list[tuple[str, DomainEntry]]:
+        source_order_by_id = self._source_order_by_id(planning_inputs.source_jobs_by_id)
         return sorted(
             planning_inputs.eligible_root_entries[registrable_domain],
             key=lambda entry: (
-                entry.position.source_index,
-                entry.position.line_index,
-                entry.entry.host,
+                source_order_by_id[entry[0]],
+                entry[1].host,
             ),
         )
+
+    @staticmethod
+    def _source_order_by_id(source_jobs_by_id: dict[str, Any]) -> dict[str, int]:
+        """Return source-order indexes from the prepared source-job mapping."""
+        return {
+            source_id: source_index
+            for source_index, source_id in enumerate(source_jobs_by_id)
+        }
 
     def _log_summary(
         self,

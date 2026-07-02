@@ -21,7 +21,8 @@ from domain_pipeline.prepare.assignment import (
     prepare_worker_manifest_relative_path,
     relative_path,
 )
-from domain_pipeline.prepare.models import PreparedHostEntry, PreparedInputSet
+from domain_pipeline.prepare.models import PreparedInputSet
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.prepare.planner import PreparationPlanner
 from domain_pipeline.worker.output.manager import txt_output_value
 from domain_pipeline.worker.output.rows import ReviewRowProjector
@@ -42,7 +43,7 @@ class PreparedBatch:
 
 @dataclass(frozen=True)
 class _WorkerAssignmentArtifacts:
-    worker_source_entries: dict[str, dict[str, list[PreparedHostEntry]]]
+    worker_source_entries: dict[str, dict[str, list[DomainEntry]]]
     worker_manifests: list[PreparedWorkerManifest]
 
 
@@ -97,11 +98,14 @@ class PreparedBatchWriter:
         )
 
         matched_manual_hosts = {
-            entry.entry.host
+            entry.host
             for source_entries in assignment_artifacts.worker_source_entries.values()
             for entries in source_entries.values()
             for entry in entries
-            if entry.provenance.manually_selected_for_filtered
+            if prepared_inputs.manual_routing_by_host.get(entry.host)
+            and prepared_inputs.manual_routing_by_host[
+                entry.host
+            ].manually_selected_for_filtered
         }
         preparation_review_rows = [
             row
@@ -185,6 +189,8 @@ class PreparedBatchWriter:
                     worker_ids=participating_worker_ids,
                     worker_source_entries=worker_source_entries,
                     worker_root_plans=worker_root_plans,
+                    source_jobs_by_id=prepared_inputs.source_jobs_by_id,
+                    manual_routing_by_host=prepared_inputs.manual_routing_by_host,
                 )
             ),
         )

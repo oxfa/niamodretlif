@@ -6,7 +6,7 @@ import dataclasses
 from typing import Any
 
 from domain_pipeline.routing.route_codes import TerminalRouteTransition
-from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.output.rows import (
     BaseRowDNSRequest,
     BaseRowIpLocationRequest,
@@ -14,7 +14,6 @@ from domain_pipeline.worker.output.rows import (
     BaseRowSourceRequest,
     TerminalRowBuilder,
 )
-from domain_pipeline.prepare.models import PreparedProvenance
 from domain_pipeline.worker.delegation.lookup import (
     DelegationResult,
     DelegationSoaEvidence,
@@ -39,12 +38,13 @@ class CompletedResultRequest:
     """Inputs needed to build one terminal runtime result."""
 
     source_context: WorkerSourceContext
-    entry: ParsedDomainEntry
+    entry: DomainEntry
     route_transition: TerminalRouteTransition
     evidence: CompletedResultEvidence = dataclasses.field(
         default_factory=CompletedResultEvidence
     )
-    provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
+    source_id: str | None = None
+    source_input_label: str | None = None
     row_overrides: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -55,16 +55,8 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedHostResu
         BaseRowRequest(
             source=BaseRowSourceRequest(
                 source_context=request.source_context,
-                provenance=PreparedProvenance(
-                    source_id_override=request.provenance.get("source_id_override"),
-                    source_input_label_override=request.provenance.get(
-                        "source_input_label_override"
-                    ),
-                    source_ids=tuple(request.provenance.get("source_ids", ())),
-                    source_input_labels=tuple(
-                        request.provenance.get("source_input_labels", ())
-                    ),
-                ),
+                source_id=request.source_id,
+                source_input_label=request.source_input_label,
             ),
             entry=request.entry,
             route_transition=transition,

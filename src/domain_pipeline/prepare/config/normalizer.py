@@ -85,7 +85,7 @@ class ConfigNormalizer:
     ) -> list[dict[str, Any]]:
         """Return source configs after applying defaults and derived DNS settings."""
         normalized_sources: list[dict[str, Any]] = []
-        seen_source_ids: set[str] = set()
+        seen_source_id_values: set[str] = set()
         for source in raw_config.sources:
             source_payload = self.explicit_model_dump(source)
             merged_source = self.merge_nested(defaults_payload, source_payload)
@@ -97,9 +97,9 @@ class ConfigNormalizer:
                 )
             except ValidationError as exc:
                 raise ValueError(self.format_validation_error(exc)) from exc
-            if normalized_source.id in seen_source_ids:
+            if normalized_source.id in seen_source_id_values:
                 raise ValueError(f"duplicate source id {normalized_source.id!r}")
-            seen_source_ids.add(normalized_source.id)
+            seen_source_id_values.add(normalized_source.id)
             source_dict = normalized_source.model_dump()
             self.finalize_dns_stage_defaults(source_dict)
             normalized_sources.append(source_dict)

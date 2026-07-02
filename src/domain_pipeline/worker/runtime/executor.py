@@ -21,7 +21,7 @@ from domain_pipeline.worker.cache.service import (
     CacheBundle,
     build_cache_bundle,
 )
-from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
 from domain_pipeline.worker.ip_location.providers import (
@@ -496,7 +496,7 @@ class PipelineExecutor:
         )
 
     async def lookup_host_resolution(
-        self, source_context: WorkerSourceContext, entry: ParsedDomainEntry
+        self, source_context: WorkerSourceContext, entry: DomainEntry
     ) -> HostResolutionResult:
         """Run or cache-read the optional host_resolution stage."""
         checker = RuntimeDNSCheckerFactory(
@@ -584,16 +584,8 @@ class PipelineExecutor:
                     source_context=item.source_context,
                     entry=item.entry,
                     route_transition=InputValidationRoutingPolicy().public_suffix(),
-                    provenance={
-                        "source_id_override": item.provenance.source.source_id_override,
-                        "source_input_label_override": (
-                            item.provenance.source.source_input_label_override
-                        ),
-                        "source_ids": item.provenance.source.source_ids,
-                        "source_input_labels": (
-                            item.provenance.source.source_input_labels
-                        ),
-                    },
+                    source_id=item.output_source.source_id,
+                    source_input_label=item.output_source.input_label,
                 ),
             )
         for work_item in root_work_items:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-import json
 import dataclasses
 from typing import Any, Protocol, TypedDict
 
@@ -12,8 +11,7 @@ from domain_pipeline.routing.route_codes import (
     RouteCode,
     TerminalRouteTransition,
 )
-from domain_pipeline.prepare.sources.parser import ParsedDomainEntry
-from domain_pipeline.prepare.models import PreparedProvenance
+from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
 from domain_pipeline.worker.ip_location.providers import (
@@ -25,7 +23,6 @@ from domain_pipeline.worker.ip_location.providers import (
 )
 
 REVIEW_OUTPUT_COLUMNS = (
-    "input_name",
     "host",
     "registrable_domain",
     "route_code",
@@ -41,8 +38,6 @@ REVIEW_OUTPUT_COLUMNS = (
     "ip_location_provider",
     "source_id",
     "source_input_label",
-    "source_ids",
-    "source_input_labels",
 )
 
 _IP_LOCATION_FAILURE_REASON_PRIORITY = (
@@ -81,7 +76,6 @@ class SourceContextLike(Protocol):
 class ReviewOutputRow(TypedDict):
     """Typed projection used by the review CSV output."""
 
-    input_name: str
     host: str
     registrable_domain: str
     route_code: str
@@ -97,8 +91,6 @@ class ReviewOutputRow(TypedDict):
     ip_location_provider: str
     source_id: str
     source_input_label: str
-    source_ids: str
-    source_input_labels: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,29 +98,8 @@ class BaseRowSourceRequest:
     """Source identity fields for raw terminal-row projection."""
 
     source_context: SourceContextLike
-    provenance: PreparedProvenance = dataclasses.field(
-        default_factory=PreparedProvenance
-    )
-
-    @property
-    def source_id_override(self) -> str | None:
-        """Return an optional source-id override for projected output rows."""
-        return self.provenance.source_id_override
-
-    @property
-    def source_input_label_override(self) -> str | None:
-        """Return an optional source-label override for projected output rows."""
-        return self.provenance.source_input_label_override
-
-    @property
-    def source_ids(self) -> tuple[str, ...]:
-        """Return all contributing source ids for projected output rows."""
-        return self.provenance.source_ids
-
-    @property
-    def source_input_labels(self) -> tuple[str, ...]:
-        """Return all contributing source labels for projected output rows."""
-        return self.provenance.source_input_labels
+    source_id: str | None = None
+    source_input_label: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,7 +123,7 @@ class BaseRowRequest:
     """Complete raw terminal-row projection request."""
 
     source: BaseRowSourceRequest
-    entry: ParsedDomainEntry
+    entry: DomainEntry
     route_transition: TerminalRouteTransition | None = None
     dns: BaseRowDNSRequest = dataclasses.field(default_factory=BaseRowDNSRequest)
     ip_location: BaseRowIpLocationRequest = dataclasses.field(
@@ -236,10 +207,6 @@ def review_reason_for_row(row: dict[str, Any]) -> str:
         return route_code
 
 
-def _json_list(values: list[str] | tuple[str, ...]) -> str:
-    return json.dumps(list(values), ensure_ascii=True, sort_keys=True)
-
-
 class TerminalRowBuilder:
     """Build raw terminal rows from a terminal route transition and stage evidence."""
 
@@ -275,14 +242,8 @@ def _build_terminal_row(request: BaseRowRequest) -> dict[str, Any]:
         list(ip_location_results or [])
     )
     row: dict[str, Any] = {
-        "input_name": entry.semantics.input_name or entry.host,
         "host": entry.host,
-        "registrable_domain": entry.registrable_domain,
-        "public_suffix": entry.semantics.public_suffix,
-        "is_public_suffix_input": entry.semantics.is_public_suffix_input,
-        "input_kind": entry.semantics.input_kind,
-        "apex_scope": entry.semantics.apex_scope,
-        "source_format": entry.semantics.source_format,
+        "registrable_domain": entry.registrable_domain or "",
         "route": transition.route,
         "route_code": transition.route_code.value,
         "route_reason": transition.route_reason,
@@ -349,14 +310,9 @@ def _build_terminal_row(request: BaseRowRequest) -> dict[str, Any]:
                 if result.region_name
             }
         ),
-        "source_id": request.source.source_id_override or source_context.source_id,
-        "source_input_label": (
-            request.source.source_input_label_override or source_context.input_label
-        ),
-        "source_ids": list(request.source.source_ids or (source_context.source_id,)),
-        "source_input_labels": list(
-            request.source.source_input_labels or (source_context.input_label,)
-        ),
+        "source_id": request.source.source_id or source_context.source_id,
+        "source_input_label": request.source.source_input_label
+        or source_context.input_label,
     }
     return row
 
@@ -367,7 +323,6 @@ class ReviewRowProjector:
     def project(self, row: dict[str, Any]) -> ReviewOutputRow:
         """Project one raw terminal row into the public review CSV schema."""
         projected = {
-            "input_name": str(row.get("input_name", "")),
             "host": str(row.get("host", "")),
             "registrable_domain": str(row.get("registrable_domain", "")),
             "route_code": str(row.get("route_code", "")),
@@ -383,12 +338,6 @@ class ReviewRowProjector:
             "ip_location_provider": str(row.get("ip_location_provider", "")),
             "source_id": str(row.get("source_id", "")),
             "source_input_label": str(row.get("source_input_label", "")),
-            "source_ids": _json_list(
-                tuple(str(value) for value in row.get("source_ids", []))
-            ),
-            "source_input_labels": _json_list(
-                tuple(str(value) for value in row.get("source_input_labels", []))
-            ),
         }
         return projected  # type: ignore[return-value]
 

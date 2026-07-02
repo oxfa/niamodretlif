@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from domain_pipeline.prepare.models import (
         MANUALLY_ADDED_SOURCE_ID,
         MANUALLY_SELECTED_FOR_FILTERED_SOURCE_ID,
-        PreparedHostEntry,
         PreparedInputSet,
+        PreparedManualRouting,
         PreparedRootPlan,
     )
     from domain_pipeline.prepare.planner import PreparationPlanner
@@ -34,8 +34,8 @@ _EXPORT_MODULES = {
     "PreparedBatchWriter": "domain_pipeline.prepare.batch_writer",
     "PreparedWorkerManifest": "domain_pipeline.prepare.assignment",
     "PreparationPlanner": "domain_pipeline.prepare.planner",
-    "PreparedHostEntry": "domain_pipeline.prepare.models",
     "PreparedInputSet": "domain_pipeline.prepare.models",
+    "PreparedManualRouting": "domain_pipeline.prepare.models",
     "PreparedRootPlan": "domain_pipeline.prepare.models",
     "WorkerAssignmentPlanner": "domain_pipeline.prepare.assignment",
     "prepare_batch": "domain_pipeline.prepare.batch_writer",
@@ -50,8 +50,8 @@ __all__ = [
     "PreparedBatchWriter",
     "PreparedWorkerManifest",
     "PreparationPlanner",
-    "PreparedHostEntry",
     "PreparedInputSet",
+    "PreparedManualRouting",
     "PreparedRootPlan",
     "WorkerAssignmentPlanner",
     "prepare_batch",

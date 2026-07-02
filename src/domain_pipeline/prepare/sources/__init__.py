@@ -7,17 +7,15 @@ from domain_pipeline.prepare.sources.jobs import (
     read_source_lines,
 )
 from domain_pipeline.prepare.sources.parser import (
+    DomainEntry,
     DomainListParser,
     InputFileFormat,
-    ParsedDomainEntry,
-    ParsedDomainEntryRecord,
 )
 
 __all__ = [
+    "DomainEntry",
     "DomainListParser",
     "InputFileFormat",
-    "ParsedDomainEntry",
-    "ParsedDomainEntryRecord",
     "SourceJob",
     "SourceJobFactory",
     "SourceLineReader",
