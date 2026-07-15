@@ -703,6 +703,10 @@ akamai.net
 cdnetworks.com
 farfetch-contents.com
 ## microsoft
+#### ---
+### microsoft.com
+### microsoftuwp.com
+#### ---
 bing.com
 bing.net
 bingj.com
