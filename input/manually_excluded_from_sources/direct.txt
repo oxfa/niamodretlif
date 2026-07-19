@@ -19350,7 +19350,6 @@ temp.im
 tempersyi.com
 tenag.com
 tencent-gf.com
-tencent.co.id
 tencent.com.hk
 tencentcc.com
 tencentcloud.com
@@ -20683,7 +20682,6 @@ webzzcdn.com
 wecash.net
 wecasting.com
 wechat77.com
-wechatpay.com.my
 wecloud.io
 weddingos.com
 wedolook.com
