@@ -6445,6 +6445,7 @@ ads-sg.tiktok.com
 ads-static.conde.digital
 ads-static.xhscdn.com
 ads-tracking.collectiveaudience.co
+ads-trk.vidible.tv
 ads-twitter.com
 ads-union.jd.com
 ads-uo.api.leiniao.com
@@ -28264,6 +28265,7 @@ estadisticas.lanacion.com.ar
 estadisticasgratis.com
 estadonline.publiguias.cl
 estara.com
+estat.com
 estatueofthea.info
 esteemed-laugh.pro
 esteemfurytooth.com
@@ -43375,6 +43377,7 @@ kxbqaaxjeqjqk.website
 kxbqbq.amicafarmacia.com
 kxcpsknpsodie.space
 kxdnxsjlxp.com
+kxencag.com
 kxewpz.com
 kxexlhdbaosee.website
 kxfnuquwjicjt.site
