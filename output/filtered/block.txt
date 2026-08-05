@@ -6545,6 +6545,8 @@ ads.talksport.com
 ads.tikpage.com
 ads.tiktok.com
 ads.travelaudience.com
+ads.tripod.lycos.de
+ads.tripod.lycos.es
 ads.tripod.lycos.nl
 ads.ttv.com.tw
 ads.tvb.com
@@ -6595,6 +6597,7 @@ ads3-normal-lf.zijieapi.com
 ads3-normal-lq.zijieapi.com
 ads3-normal.zijieapi.com
 ads3.videy.co
+ads360.cn
 ads4g.pl
 ads4media.online
 ads4trk.com
@@ -12950,6 +12953,7 @@ bepqoenzlqlhv.online
 bepqyvmaqlib.com
 bepranktorenia.shop
 beqioy.promessedefleurs.com
+berg-6-82.com
 beringmedia.com
 beringterm.com
 berlipurplin.com
@@ -18728,6 +18732,7 @@ content.yole365.com
 content.youmiam.com
 content22.bmo.com
 content22.citi.eu
+content22.citibank.com.au
 content22.citibank.com.sg
 content22.citibankonline.com
 content22.online.citi.com
@@ -25103,6 +25108,7 @@ dsh7ky7308k4b.cloudfront.net
 dshbju.com
 dshbxx.com
 dshcej.aosom.co.uk
+dshdly.com
 dshdzj.com
 dshfbd.com
 dshhkl.com
@@ -28598,6 +28604,7 @@ evenpatroller.com
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
+event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -28663,6 +28670,7 @@ events-ocu.zipify.com
 events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
+events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.attentivemobile.com
@@ -29008,6 +29016,7 @@ experience.deceuninck.be
 experience.faiu.com
 experience.fbbrands.com
 experience.jcu.edu.au
+experience.limelight.com
 experience.micromine.kz
 experience.phenomenex.com
 experience.rochesterregional.org
@@ -33268,6 +33277,7 @@ go.anifox.net
 go.anthonyliftgates.com
 go.app.sharekey.com
 go.asian.mingle.com
+go.askbee.my
 go.audacy.com
 go.augin.app
 go.aussie.mingle.com
@@ -33574,6 +33584,7 @@ go.paze.com
 go.peak.net
 go.pearsonvue.com
 go.peppermarketing.com.au
+go.petmire.com
 go.petrelocation.com
 go.pgx.com
 go.pheasant.com
@@ -36167,6 +36178,7 @@ hnsbsgnqcvqmn.site
 hnsgpw.com
 hntiprpnvgsfh.site
 hntnca.petpetgo.com
+hnuvcp.com
 hnveehmeh.com
 hnvhpxetfugpx.online
 hnwbhkraakeyp.site
@@ -47151,6 +47163,7 @@ m.980he.cn
 m.aangc.com
 m.abeij.com
 m.acaox.com
+m.achig.com
 m.achuc.com
 m.acmgloballab.com
 m.adaog.com
@@ -47432,6 +47445,7 @@ m.pbino.com
 m.pcaoo.com
 m.pcmobile.ca
 m.pcuna.com
+m.petmire.com
 m.phonthing.com
 m.pieaa.com
 m.pkbrxja.cn
@@ -51984,6 +51998,7 @@ mgwawoyupykxh.online
 mgwxgxnpmzcqa.website
 mgyccfrshz.com
 mgzjin.cn
+mh1.zhengdongwuye.cn
 mh9qqwotr890.koelewijn.nl
 mhabpggbogdps.site
 mhaqoffcj7.com
@@ -70360,6 +70375,7 @@ smetrics.citibank.ae
 smetrics.citibank.cn
 smetrics.citibank.co.th
 smetrics.citibank.co.uk
+smetrics.citibank.com.au
 smetrics.citibank.com.hk
 smetrics.citibank.com.my
 smetrics.citibank.com.ph
@@ -84389,6 +84405,7 @@ uczzd.com
 uczzd.net
 ud.galaxus.ch
 ud.galaxus.de
+udata.mixmarket.biz
 udbaa.com
 udblog.huya.com
 udc.yahoo.com
@@ -87250,6 +87267,7 @@ vizyonuniversitesi.com.tr
 vizyonuniversitesi.web.tr
 vizzit.se
 vj.x-ssp.com
+vj0.42422277.com
 vjcygrstkrujo.site
 vjehbytyxzsom.site
 vjhfsebbyxwru.website
