@@ -20431,6 +20431,7 @@ de-tencentclb.work
 de0.cc
 de1000.com
 de123.net
+de1919.com
 deadnine.com
 deafchina.com
 deahu.com
@@ -29126,6 +29127,7 @@ grmxdy.com
 grnuo.com
 groad.net
 groovymedicine.com
+grouk.com
 groundsun.com
 group-purchasing.com
 group-spl.com
@@ -55481,7 +55483,6 @@ p2peye.com
 p5w.net
 p6air.com
 p6sai.com
-p8.ink
 p8games.com
 pa18.com
 pa1pa.com
