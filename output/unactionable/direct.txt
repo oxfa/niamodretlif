@@ -30,7 +30,6 @@ hnsong.net
 huitaoyouhui.com
 huoyan.io
 iblue.me
-intellect.black
 jayfu.tk
 jdrns.com
 jdxsr.com
@@ -39,8 +38,9 @@ kezhi.tech
 lanbinimall.com
 ljth.hk
 minleai.com
+namiso.com
 qto-pay.com
-sd-portfh.com
+stql.org
 techgastronomy.com
 tjsylhh.com
 vwaycn.com
@@ -50,5 +50,4 @@ ybdlogistic.com
 yueqiji.com
 yunjingdian.net
 yutongplay.vip
-zhongzeny.com
 zjwcjm.com
