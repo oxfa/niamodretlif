@@ -254,6 +254,7 @@ a.apkeditor.io
 a.benshiw.net
 a.bjhuajing.com.cn
 a.bxwblog.cn
+a.dounanhuahui.com
 a.imgso.cn
 a.jjqyk.com
 a.mjlnbx.cn
@@ -320,7 +321,6 @@ a8cv.k-ikiiki.jp
 a8cv.kn-waterserver.com
 a8cv.mi-vision.co.jp
 a8cv.minnano-eikaiwa.com
-a8cv.natulahonpo.com
 a8cv.omakase-cyber-mimamori.net
 a8cv.picksitter.com
 a8cv.shop.mintme.jp
@@ -860,7 +860,6 @@ cjdisuisubvkq.website
 cjmob.com
 cktggmvztfbyb.website
 cl.he9630.com
-cl.xzqxzs.com
 clgcrfvpphnul.site
 clgserv.pro
 click.lmbcustomersupport.com
@@ -912,6 +911,7 @@ cpc.haohaowan8.com
 cpdnyodgckaxc.space
 cpmchina.co
 cpufan.club
+cpuwjmjhmzgzf.website
 cpv.czpush.com
 cpv6.com
 cq9119.com
@@ -1013,6 +1013,7 @@ deeptack.com
 depttake.ga
 desvfcxalwvhf.space
 dev-share.beaconlearningapp.com
+dev-share.smartfashion.ai
 dev.getcontact.me
 dev.sswt.co
 devoashgfuo.com
@@ -1052,7 +1053,6 @@ dkqapp.cn
 dkweuy.com
 dl.nekropol-khv.ru
 dl.sybspools.com
-dl.xzqxzs.com
 dlfvgndsdfsn.com
 dls.guidrr.com
 dlziqh9bo7.boring.fm
@@ -1101,7 +1101,7 @@ dsdydk.com
 dskeydfctmgfd.online
 dspack.com.cn
 dspmy.ge95.com
-dsqcfy.com
+dsqjkc.com
 dt.zxzhengxin.com
 dtc-v6t.com
 dtypmlrxkedmr.website
@@ -3036,6 +3036,7 @@ minero.pw
 minisplat.cn
 minr.pw
 miqiks.com
+mirfakpersei.top
 misrepush.com
 miui.hftaili.com
 miyudaquan.top
@@ -3105,6 +3106,7 @@ ms.awqsaged.cn
 ms.ienkdaccessible.cn
 ms.qaqact.cn
 mseupkcziqzzj.website
+msrbojniwlloa.online
 msypr.com
 mthwinydhnika.online
 mtl.xtpxw.com
@@ -3132,6 +3134,7 @@ mvo.sqa54e.xyz
 mvo.ythbr.xyz
 mvqyphkheqkrc.online
 mw6xj4.cn
+mwbzdzmuviwtf.website
 mxvckyokosodd.space
 mxwmylqkvyssa.site
 my.bake-club.com
@@ -3289,6 +3292,7 @@ oxvfhggzrnbav.site
 oxwnfooqpd.com
 oyawjfnkbyawy.website
 oyhynohxunlwm.site
+oyluepai.com
 ozovwqhhhbalk.space
 p.5mnh.com
 p.9wotuan.com
@@ -3326,6 +3330,7 @@ pdsxp.cn
 pe.txbe.at
 peak-ip-54.com
 pear.dleke.com
+peasbishopgive.com
 pema.cl
 penglei.info
 performanceplay.co.kr
@@ -3966,7 +3971,6 @@ titi.18tzx.com
 titi.qifajiang.cn
 tiuyotadptqrk.space
 tj-cmys.com
-tj.jinyuewang.cn
 tj.tongjiwo.com
 tjhuajiantang.com
 tkdjrsee.icu
@@ -4066,6 +4070,7 @@ tykor.net
 tylxlypkjinfx.website
 tymdtxij.com
 tyylnyqyi.com
+tzacqqvcsgqws.space
 tzbtw.com
 tzepbopyvsdav.site
 tzpydeqjplflt.site
@@ -4089,6 +4094,7 @@ uacyuislctkbd.space
 uahwjfdfna.com
 ubcpm.com
 ubertracking.info
+ubhfiofnkzela.website
 uc.haoyunyuan.cc
 uc.xddi.ru
 uc610.com
@@ -4178,6 +4184,7 @@ vdbrxbbtwyiphn.com
 vecygjfrksxdm.website
 velqgngcsyzra.website
 vendri.io
+vernaellac.com
 vetdicyeuml.com
 vevjrkcqhptnz.space
 veznydpxsmbag.website
@@ -4469,6 +4476,7 @@ xnyemao.com
 xnyhoowgjzdhf.space
 xolbmqosvwehi.com
 xoqsxdpx.xyz
+xoszyclagweyv.online
 xpj4.net
 xpnezjinizzcy.online
 xqomuywexpgii.site
