@@ -6499,6 +6499,7 @@ ads.tiktok.com
 ads.travelaudience.com
 ads.tripod.lycos.co.uk
 ads.tripod.lycos.es
+ads.tripod.lycos.nl
 ads.ttv.com.tw
 ads.tvb.com
 ads.tvp.pl
@@ -22739,6 +22740,7 @@ deeplinktest.yooture.info
 deeplinkuat.upoker.net
 deepmetrix.com
 deepretainer.com
+deeptack.com
 deerbeginner.com
 deerpreheat.com
 def.bayer04.de
@@ -27149,6 +27151,7 @@ elqtrk.intel.la
 elqtrk.intel.pl
 elqtrk.intel.ru
 elqtrk.intel.sg
+elqtrk.intelrealsense.com
 elqtrk.morningstar.be
 elqtrk.morningstar.ch
 elqtrk.morningstar.com
@@ -76864,6 +76867,7 @@ sync-transcend-cdn.com
 sync.audtd.com
 sync.mobojoy.baidu.com
 sync.shinobi.jp
+sync.tv
 sync2.audtd.com
 synccache.com
 synccora.com
@@ -84980,6 +84984,7 @@ userimmediate.com
 userlook.com
 usermaven.com
 userneeds.dk
+userreplay.net
 userreport.com
 users-api.com
 users.rentbabe.com
@@ -87135,7 +87140,6 @@ vttlfjsxfridh.site
 vtuzzlfmnpxdq.website
 vtwqzbrohcgdt.online
 vtx2r60nuf.com
-vtxpmfvvqygyc.space
 vtzmfhdyaemzg.online
 vubmzx.com
 vucxfzsavoxdd.online
@@ -87180,7 +87184,6 @@ vvaaol.enuygun.com
 vvabjoqkeklrl.top
 vvaervdbcntvs.online
 vvautxavycmwh.space
-vvcmxutvsgpux.space
 vvcszpzpuceps.space
 vvehqrcfdvaqm.website
 vvewkblqoyjyq.top
@@ -91220,7 +91223,6 @@ xzqpz.com
 xzshonsscrjzu.online
 xzswn87hm.com
 xztqfj.dreamvs.jp
-xzudsnhaguatg.space
 xzutow.affordablelamps.com
 xzv5vu7wl.com
 xzwcng.vans.com.au
@@ -91371,7 +91373,6 @@ yblvoxyjzuqrh.space
 ybmmejnmkflmw.site
 ybmulvsbb.com
 ybnquhcbojngd.space
-yboqifbcgqgoa.space
 ybotvisit.com
 ybozjqsojrktu.online
 ybp.yahoo.com
@@ -93698,7 +93699,6 @@ zypsnobkgkthp.site
 zypxlsrrellyr.site
 zyq2.destinia.sk
 zyqgwdrrrrrmm.online
-zyrijmtfflrww.website
 zyrlyttzshqwr.space
 zyvbcstcltidm.online
 zyvbvqvwqomow.top
