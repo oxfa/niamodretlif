@@ -18629,6 +18629,7 @@ content.linesight.com
 content.livesportmedia.eu
 content.logile.com
 content.mhs.net
+content.mini.pix.style
 content.mrgmarketing.net
 content.msufcu.org
 content.ncek12.com
@@ -18638,6 +18639,7 @@ content.ntwine-conferencing.com
 content.nxp.com
 content.ohcare.ohiohealth.com
 content.palram.com
+content.pix.style
 content.pollardwater.com
 content.powerdms.com
 content.prophet.com
@@ -18647,6 +18649,7 @@ content.recordpoint.com
 content.rightsourcemarketing.com
 content.s8bbs.com
 content.sffirecu.org
+content.stage.mini.pix.style
 content.tab.com.au
 content.tacticalma.com
 content.tatatelebusiness.com
