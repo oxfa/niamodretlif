@@ -827,6 +827,7 @@
 11lx.com
 11meigui.com
 11pdf.com
+11rain.com
 11space.com
 11sun.com
 11xotn7p.com
@@ -2821,6 +2822,7 @@
 4008123123.com
 4008258399.com
 4008338788.com
+4008600011.com
 4008618618.com
 4008787706.com
 4008800016.com
@@ -13672,7 +13674,6 @@ cdn-build.net
 cdn-cba.com
 cdn-hotels.com
 cdn-speed.com
-cdn.fun
 cdn.me
 cdn.show
 cdn.vin
@@ -15124,6 +15125,7 @@ chinacatel.com
 chinacba.org
 chinaccia.com
 chinacdc.com
+chinacdnb2b.com
 chinaceotv.com
 chinacfa.com
 chinacfi.net
@@ -17423,6 +17425,7 @@ cnsnvc.com
 cnso.org
 cnsoc.org
 cnsoftbei.com
+cnsolarwind.com
 cnsolomo.com
 cnsorl.com
 cnspeed.com
@@ -25531,6 +25534,7 @@ fineforming.com
 fineheads.com
 fineidc.com
 fineimmu.com
+finelybook.com
 finer2.com
 finereport.com
 finereporthelp.com
@@ -42881,6 +42885,7 @@ jsjdrcb.com
 jsjdzf.com
 jsjeda.com
 jsjform.com
+jsjgbxg.com
 jsjgtz.com
 jsjiami.com
 jsjianli.com
@@ -53231,6 +53236,7 @@ niaocms.com
 niaogebiji.com
 niaosuangao.online
 niaowoclub.com
+niaoyun.com
 niba.com
 nibaku.com
 nibomu.com
@@ -65055,6 +65061,7 @@ smartyoke.com
 smartzzx.com
 smarun.com
 smaryun.com
+smasmj.com
 smb956101.com
 smbxw.com
 smc3s.com
@@ -71149,6 +71156,7 @@ tulingdns.com
 tulipsport.com
 tuliu.com
 tulsj.com
+tumajewelry.com
 tumanyi.com
 tumchina.com
 tumengtech.com
@@ -78131,6 +78139,7 @@ xingshen.com
 xingshu.com
 xingshuishuiwu.net
 xingshulin.com
+xingsteel.com
 xingtai0319.com
 xingtai123.com
 xingtaishipping.com
@@ -86643,7 +86652,6 @@ zjwandi.com
 zjwanma.com
 zjwater.com
 zjwater.org
-zjwcjm.com
 zjwebapp.com
 zjwentou.com
 zjwfgroup.com
