@@ -8136,7 +8136,6 @@ apkevery.com
 apkplug.com
 apkrj.com
 apkxz.com
-apkyx.com
 apkzu.com
 aplaybox.com
 aplnk.com
@@ -13674,6 +13673,7 @@ cdn-build.net
 cdn-cba.com
 cdn-hotels.com
 cdn-speed.com
+cdn.fun
 cdn.me
 cdn.show
 cdn.vin
