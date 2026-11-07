@@ -2135,6 +2135,7 @@
 77ad.cc
 77faf458f4.com
 77management.net
+77tianxu.cn
 77u.com
 77wye93uy1.com
 77zdmt8yq.com
@@ -5290,7 +5291,6 @@ ad.api.moji.com
 ad.api.youshiad.cn
 ad.aucfan.com
 ad.aucview.com
-ad.auditude.com
 ad.autorace.jp
 ad.bayescom.com
 ad.beihai365.com
@@ -6855,7 +6855,6 @@ adswizz.com
 adsxtits.com
 adsxtits.pro
 adsxyz.com
-adsymptotic.com
 adsyndication.msn.com
 adsys.chinacloudapp.cn
 adsys.sinovision.net
@@ -19376,6 +19375,7 @@ counter.packa2.cz
 counter.pcauto.com.cn
 counter.people.cn
 counter.photopulse.ru
+counter.pixplug.in
 counter.powr.io
 counter.powweb.com
 counter.pr-cy.ru
@@ -24242,7 +24242,6 @@ dita6jhhqwoiz.cloudfront.net
 ditdotsol.com
 ditruntp.com
 ditwrite.com
-diudhcdocyuy.com
 diumihbdajbtq.space
 divcb7ycs5.com
 dive77kt.com
@@ -26225,6 +26224,7 @@ e.kdieu.com
 e.kfand.com
 e.kfeiu.com
 e.kguaq.com
+e.khuoy.com
 e.kjhfy.com
 e.kuaishou.cn
 e.kuaishou.com
@@ -29005,7 +29005,6 @@ evenement.ricoh.fr
 event-api.reverb.com
 event-collector.moviesanywhere.com
 event-collector.prd.data.s.joyn.de
-event-listener.air.tv
 event-log-api-data-platform-data-lake-prod.gryphline.com
 event-logger.tagboard.com
 event-router.olympics.com
@@ -29072,7 +29071,6 @@ events-ocu.zipify.com
 events-prod.autolist.com
 events-tracker.deliveroo.net
 events.accuity.com
-events.air.tv
 events.api.godaddy.com
 events.api.secureserver.net
 events.attentivemobile.com
@@ -31073,6 +31071,7 @@ fog.pixual.co
 fogegtcddjlsi.site
 foghorndash.com
 foghug.site
+fogl1onf.com
 fogrwmspvxjva.site
 fogvnoq.com
 fohshxrgpzlkj.site
@@ -33324,7 +33323,6 @@ giftedlemon.com
 giftplanning.westmont.edu
 giga-abs.de
 giganticnimblealways.com
-gigcount.com
 gigeucyldxrmp.space
 giggedanopsia.com
 gigglegrowlworrisome.com
@@ -46523,6 +46521,7 @@ litpzshqdkjvn.online
 litrujsxxymfn.website
 litterarenadisembroildisembroil.com
 litterworerabbit.com
+littlebee.site
 littlecutelions.com
 littlegeese.com
 littlestastronaut.com
@@ -48288,6 +48287,7 @@ m.keai36.cn
 m.kfeiu.com
 m.kguaq.com
 m.khaiu.com
+m.khuoy.com
 m.kjhfy.com
 m.kuptmf.cn
 m.kxhie.com
@@ -51957,7 +51957,6 @@ metrics.hatarako.net
 metrics.hawaii.aaa.com
 metrics.hayesandjarvis.co.uk
 metrics.hbogo.com
-metrics.hbogola.com
 metrics.hbr.org
 metrics.health.com
 metrics.healthpartners.com
@@ -64720,6 +64719,7 @@ rafvertizing.crazygames.com
 ragakxzz.in
 ragapa.com
 ragazzeinvendita.com
+ragckcvjwcgos.com
 rageagainstthesoap.com
 rageruvanite.com
 raggedstriking.com
@@ -72888,6 +72888,7 @@ smetrics.oreilly.com
 smetrics.orencia.com
 smetrics.orenciapatient.se
 smetrics.otsuka-us.com
+smetrics.ott.showmax.com
 smetrics.ove.com
 smetrics.ovumkc.com
 smetrics.ownertoownercommunication.com
@@ -75844,7 +75845,6 @@ sstats.deloitte.com
 sstats.deluxe.com
 sstats.dice.com
 sstats.dignityhealth.org
-sstats.directgeneral.com
 sstats.drugstore.com
 sstats.ds-pharma.com
 sstats.ds-pharma.jp
@@ -76501,6 +76501,7 @@ staticfile.net
 staticfile.org
 staticgalaksion.com
 statichf.shihuocdn.cn
+staticiv.com
 statics.3987.com
 statics.9669.com
 statics.woozooo.com
@@ -79305,6 +79306,7 @@ tag.contentanalytics.jp
 tag.cribnotes.jp
 tag.digops.sincro.io
 tag.eisa.mercari.com
+tag.elevaate.io
 tag.flagship.io
 tag.gendiscover.com
 tag.getamigo.io
@@ -80333,7 +80335,6 @@ test.takedwn.ws
 test.thei.co
 test.thomsonreuters.com
 test.zeus-wifi.jp
-test1productions.com
 test2.majelan.com
 test2.uat.mundi.work
 test92.com
@@ -93250,7 +93251,6 @@ xvyxgy.stz.com.br
 xvzplbcsffibl.site
 xvzplzvdeodkh.space
 xwafoccqlr.icu
-xwafyzovqu.icu
 xwddvfoasvtxjo.com
 xwdrmisubmm.com
 xwdsofoflwimy.website
@@ -93396,6 +93396,7 @@ xynthfjiefofs.site
 xypmbdsisnrqe.site
 xyqmulylfoizu.online
 xyqumljcicsriz.com
+xyrkl.com
 xyuqvvrvdmelc.space
 xyxgbs.lezhin.com
 xyxiqtwkjqflt.site
@@ -93669,6 +93670,7 @@ ydqzkj.com
 ydsagcvrejuim.online
 ydtfvwvmeojpx.site
 ydtokixknbrye.online
+ydtqgboeaqpbhr.com
 ydtzzw.firenzeviola.it
 ydtzzw.milannews.it
 ydtzzw.pianetabasket.com
