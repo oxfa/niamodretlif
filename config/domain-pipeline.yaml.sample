@@ -124,8 +124,9 @@ defaults:
     #   - resolver: 1.1.1.1
     #     weight: 1
     retry_attempts: 4
-    # Optional exact-host A/AAAA/CNAME resolution. It has a separate DNS
-    # coordinator from delegation. It inherits dns_query.default_resolvers unless
+    # Optional exact-host A/AAAA/CNAME resolution. The targets setting below
+    # controls which names are checked. It has a separate DNS coordinator from
+    # delegation. It inherits dns_query.default_resolvers unless
     # resolvers is provided here. Host-resolution resolver entries accept the
     # same all-or-none weight field as delegation: omit weight on every entry
     # for equal first-attempt share, or set weight on every entry for explicit
@@ -139,6 +140,15 @@ defaults:
     # after retry exhaustion.
   host_resolution:
     enabled: false
+    # DNS names to resolve for each input host. The input host is checked by
+    # default, along with each configured subdomain under the registrable root.
+    # Subdomain entries can contain nested labels (for example, api.staging).
+    # Enable root_domain to also resolve the registrable root itself.
+    targets:
+      input_host: true
+      root_domain: true
+      subdomains:
+        - www
     # resolvers:
     #   - resolver: 8.8.8.8
     #     weight: 2
@@ -273,6 +283,11 @@ sources:
       retry_attempts: 4
     host_resolution:
       enabled: false
+      targets:
+        input_host: true
+        root_domain: false
+        subdomains:
+          - www
       ecs:
         enabled: false
         subnet: ""

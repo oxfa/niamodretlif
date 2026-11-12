@@ -23,7 +23,10 @@ from domain_pipeline.worker.cache.service import (
 )
 from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.delegation.lookup import DelegationResult
-from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
+from domain_pipeline.worker.host_resolution.lookup import (
+    HostResolutionResult,
+    combine_host_resolution_results,
+)
 from domain_pipeline.worker.ip_location.providers import (
     IPLocationResult,
     build_ip_location_provider,
@@ -498,15 +501,38 @@ class PipelineExecutor:
     async def lookup_host_resolution(
         self, source_context: WorkerSourceContext, entry: DomainEntry
     ) -> HostResolutionResult:
-        """Run or cache-read the optional host_resolution stage."""
+        """Resolve configured names for the input host and registrable domain."""
         checker = RuntimeDNSCheckerFactory(
             coordinator_state=self._resources.dns_coordinator_state
         ).build(source_context.config)
-        return await self._lookup_services.dns_cache.lookup_host_resolution(
-            checker=checker,
-            host=entry.host,
-            resolver_key=checker.host_resolution_resolver_key(),
+        target_config = source_context.config["host_resolution"].get("targets", {})
+        hosts: list[str] = []
+        if target_config.get("input_host", True):
+            hosts.append(entry.host)
+        if entry.registrable_domain:
+            if target_config.get("root_domain", False):
+                hosts.append(entry.registrable_domain)
+            hosts.extend(
+                f"{subdomain}.{entry.registrable_domain}"
+                for subdomain in target_config.get("subdomains", ["www"])
+            )
+        hosts = list(dict.fromkeys(hosts))
+        if not hosts:
+            raise ValueError(
+                "host_resolution.targets selected no names for "
+                f"{entry.host!r}"
+            )
+        results = await asyncio.gather(
+            *(
+                self._lookup_services.dns_cache.lookup_host_resolution(
+                    checker=checker,
+                    host=host,
+                    resolver_key=checker.host_resolution_resolver_key(),
+                )
+                for host in hosts
+            )
         )
+        return combine_host_resolution_results(entry.host, list(results))
 
     async def lookup_ip_location(
         self,

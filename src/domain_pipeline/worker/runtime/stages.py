@@ -97,7 +97,10 @@ class DelegationStage:
                 ),
             )
             return
-        if parsed.manual_routing.manually_selected_for_filtered:
+        if (
+            parsed.manual_routing.manually_selected_for_filtered
+            and delegation_result.actionable
+        ):
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
@@ -107,7 +110,7 @@ class DelegationStage:
                 ),
             )
             return
-        if parsed.manual_routing.manually_added:
+        if parsed.manual_routing.manually_added and delegation_result.actionable:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(

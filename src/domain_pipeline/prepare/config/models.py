@@ -297,12 +297,60 @@ class DelegationConfig(DNSStageResolverConfig):
         return value
 
 
+class HostResolutionTargetsConfig(StrictModel):
+    """Names resolved relative to an input host and its registrable domain."""
+
+    input_host: bool = True
+    root_domain: bool = False
+    subdomains: list[str] = Field(default_factory=lambda: ["www"])
+
+    @field_validator("subdomains", mode="after")
+    @classmethod
+    def _normalize_subdomains(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            stripped = value.strip().rstrip(".")
+            if not stripped:
+                raise ValueError("host_resolution.targets.subdomains must not be empty")
+            try:
+                ascii_name = stripped.encode("idna").decode("ascii").lower()
+            except UnicodeError as exc:
+                raise ValueError(
+                    "host_resolution.targets.subdomains must be valid DNS names"
+                ) from exc
+            labels = ascii_name.split(".")
+            if len(ascii_name) > 253 or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or not all(char.isalnum() or char == "-" for char in label)
+                for label in labels
+            ):
+                raise ValueError(
+                    "host_resolution.targets.subdomains must be valid DNS names"
+                )
+            normalized.append(ascii_name)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("host_resolution.targets.subdomains must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def _require_target(self) -> HostResolutionTargetsConfig:
+        if not (self.input_host or self.root_domain or self.subdomains):
+            raise ValueError("host_resolution.targets must select at least one target")
+        return self
+
+
 class HostResolutionConfig(DNSStageResolverConfig):
     """Optional host-resolution stage settings."""
 
     enabled: bool | None = None
     retry_attempts: int = 3
     ecs: DNSECSConfig = Field(default_factory=DNSECSConfig)
+    targets: HostResolutionTargetsConfig = Field(
+        default_factory=HostResolutionTargetsConfig
+    )
 
     @field_validator("retry_attempts", mode="after")
     @classmethod
