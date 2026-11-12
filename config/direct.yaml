@@ -89,6 +89,11 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: true
+    targets:
+      input_host: true
+      root_domain: true
+      subdomains:
+        - www
     # Host-resolution resolver entries accept the same all-or-none weight field
     # as delegation. Omitted weights mean equal first-attempt share for this
     # stage.

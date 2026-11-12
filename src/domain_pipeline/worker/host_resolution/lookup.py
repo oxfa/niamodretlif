@@ -519,3 +519,62 @@ class HostResolutionChecker(DNSQueryService):
         )
         logger.debug("Host resolution %s -> %s", host, result.status)
         return result
+
+
+def combine_host_resolution_results(
+    host: str, results: list[HostResolutionResult]
+) -> HostResolutionResult:
+    """Combine exact-host results while preserving the original host identity."""
+    if not results:
+        raise ValueError("at least one host-resolution result is required")
+
+    ipv4_addresses = sorted(
+        {address for result in results for address in result.ipv4_addresses}
+    )
+    ipv6_addresses = sorted(
+        {address for result in results for address in result.ipv6_addresses}
+    )
+    canonical_name = next(
+        (result.canonical_name for result in results if result.canonical_name), None
+    )
+    if ipv4_addresses or ipv6_addresses:
+        return HostResolutionResult(
+            host=host,
+            dns=HostResolutionDnsEvidence(a_exists=True),
+            addresses=HostResolutionAddressEvidence(
+                canonical_name=canonical_name,
+                ipv4_addresses=ipv4_addresses,
+                ipv6_addresses=ipv6_addresses,
+            ),
+            from_cache=all(result.from_cache for result in results),
+        )
+
+    status = next(
+        (
+            candidate
+            for candidate in ("timeout", "servfail", "nxdomain", "nodata")
+            if any(result.status == candidate for result in results)
+        ),
+        "unknown",
+    )
+    dns = HostResolutionDnsEvidence(
+        a_timeout=status == "timeout",
+        a_servfail=status == "servfail",
+        a_nxdomain=status == "nxdomain",
+        a_nodata=status == "nodata",
+    )
+    detail = next(
+        (
+            result.detail
+            for result in results
+            if result.status == status and result.detail
+        ),
+        "",
+    )
+    return HostResolutionResult(
+        host=host,
+        dns=dns,
+        addresses=HostResolutionAddressEvidence(canonical_name=canonical_name),
+        from_cache=all(result.from_cache for result in results),
+        detail=detail,
+    )
