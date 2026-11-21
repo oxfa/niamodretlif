@@ -760,19 +760,18 @@ jobs:
           set -eo pipefail
           {
             echo "=== Validate publish candidate sizes ==="
-            mapfile -t additional_filtered_paths < <(
-              jq -r '.final_output_paths.filtered_files[]?' aggregate.json
+            mapfile -t filtered_paths < <(
+              jq -r '.final_output_paths.filtered[]?' aggregate.json
             )
-            additional_filtered_args=()
-            for filtered_path in "${additional_filtered_paths[@]}"; do
-              additional_filtered_args+=(--path "${filtered_path}")
+            filtered_args=()
+            for filtered_path in "${filtered_paths[@]}"; do
+              filtered_args+=(--path "${filtered_path}")
             done
             ./src/pipeline_run.py validate-publish-candidate-sizes \
               --source-root . \
               --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
-              --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
-              "${additional_filtered_args[@]}" \
+              "${filtered_args[@]}" \
               --path "$(jq -r '.final_output_paths.unactionable' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee publish-size-check.json
@@ -785,20 +784,19 @@ jobs:
           set -eo pipefail
           {
             echo "=== Commit aggregate outputs ==="
-            mapfile -t additional_filtered_paths < <(
-              jq -r '.final_output_paths.filtered_files[]?' aggregate.json
+            mapfile -t filtered_paths < <(
+              jq -r '.final_output_paths.filtered[]?' aggregate.json
             )
-            additional_filtered_args=()
-            for filtered_path in "${additional_filtered_paths[@]}"; do
-              additional_filtered_args+=(--path "${filtered_path}")
+            filtered_args=()
+            for filtered_path in "${filtered_paths[@]}"; do
+              filtered_args+=(--path "${filtered_path}")
             done
             ./src/pipeline_run.py commit-paths \
               --source-root . \
               --state-root . \
               --message "pipeline-run(${{ needs.prepare_run.outputs.batch_id }}): aggregate outputs" \
               --log-level "${{ inputs.aggregate_log_level }}" \
-              --path "$(jq -r '.final_output_paths.filtered' aggregate.json)" \
-              "${additional_filtered_args[@]}" \
+              "${filtered_args[@]}" \
               --path "$(jq -r '.final_output_paths.unactionable' aggregate.json)" \
               --path "$(jq -r '.final_output_paths.review' aggregate.json)" \
               | tee aggregate-commit.json

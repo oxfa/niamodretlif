@@ -129,7 +129,7 @@ class AggregateBatchRunner:
             return readiness
         status_payloads = readiness["status_payloads"]
         try:
-            self.services.output_merger.merge_host_value_payloads(
+            filtered_hosts = self.services.output_merger.collect_host_value_payloads(
                 [
                     ("prepare", prepare_manifest.preparation_filtered_output_values),
                     *[
@@ -137,18 +137,12 @@ class AggregateBatchRunner:
                         for manifest in worker_manifests
                         if manifest.handoff_finalized
                     ],
-                ],
-                final_output_paths["filtered"],
-            )
-            filtered_hosts = (
-                final_output_paths["filtered"].read_text(encoding="utf-8").splitlines()
+                ]
             )
             for (
                 filtered_path,
                 output_format,
-            ) in prepare_manifest.aggregate_output_spec.resolve_filtered_files(
-                state_root
-            ):
+            ) in prepare_manifest.aggregate_output_spec.resolve_filtered(state_root):
                 self.services.output_merger.write_filtered_host_values(
                     filtered_hosts,
                     filtered_path,
@@ -210,7 +204,14 @@ class AggregateBatchRunner:
             target_path=final_output_paths["log"],
         )
         self._log_output_summaries(
-            batch_id=batch_id, final_output_paths=final_output_paths
+            batch_id=batch_id,
+            final_output_paths=final_output_paths,
+            filtered_output_paths=[
+                path
+                for path, _format in (
+                    prepare_manifest.aggregate_output_spec.resolve_filtered(state_root)
+                )
+            ],
         )
         self._cleanup_worker_state(batch_id=batch_id, state_root=state_root)
 
@@ -223,10 +224,9 @@ class AggregateBatchRunner:
             "state": "aggregated",
             "cache_merge_summary": cache_merge_summary,
             "final_output_paths": {
-                "filtered": prepare_manifest.aggregate_output_spec.filtered,
-                "filtered_files": [
+                "filtered": [
                     item.path
-                    for item in prepare_manifest.aggregate_output_spec.filtered_files
+                    for item in prepare_manifest.aggregate_output_spec.filtered
                 ],
                 "unactionable": prepare_manifest.aggregate_output_spec.unactionable,
                 "review": prepare_manifest.aggregate_output_spec.review,
@@ -477,7 +477,10 @@ class AggregateBatchRunner:
             readiness["state"],
             json.dumps(
                 {
-                    "final_filtered_path": prepare_manifest.aggregate_output_spec.filtered,
+                    "final_filtered_paths": [
+                        item.path
+                        for item in prepare_manifest.aggregate_output_spec.filtered
+                    ],
                     "final_unactionable_path": (
                         prepare_manifest.aggregate_output_spec.unactionable
                     ),
@@ -497,16 +500,20 @@ class AggregateBatchRunner:
         )
 
     def _log_output_summaries(
-        self, *, batch_id: str, final_output_paths: dict[str, Path]
+        self,
+        *,
+        batch_id: str,
+        final_output_paths: dict[str, Path],
+        filtered_output_paths: list[Path],
     ) -> None:
         logger.debug(
             "Aggregate output summaries for batch %s: %s",
             batch_id,
             json.dumps(
                 {
-                    "final_filtered": self._path_debug_summary(
-                        final_output_paths["filtered"]
-                    ),
+                    "final_filtered": [
+                        self._path_debug_summary(path) for path in filtered_output_paths
+                    ],
                     "final_unactionable": self._path_debug_summary(
                         final_output_paths["unactionable"]
                     ),

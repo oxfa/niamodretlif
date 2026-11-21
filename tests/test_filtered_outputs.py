@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
 from domain_pipeline.prepare.assignment import (
@@ -13,6 +14,7 @@ from domain_pipeline.prepare.assignment import (
     aggregate_output_spec_from_config,
 )
 from domain_pipeline.prepare.config.loader import (
+    PipelineConfigLoader,
     load_config_without_runtime_credentials,
 )
 from domain_pipeline.prepare.config.models import OutputConfig
@@ -21,8 +23,8 @@ from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
 
 
-def test_block_config_uses_easylist_and_adds_filtered_output() -> None:
-    """The example block config enables EasyList parsing and one extra output."""
+def test_block_config_explicitly_configures_each_filtered_output() -> None:
+    """The block config lists every publish output at config scope."""
     config = load_config_without_runtime_credentials(Path("config/block.yaml"))
     source = config["sources"][0]
 
@@ -31,9 +33,33 @@ def test_block_config_uses_easylist_and_adds_filtered_output() -> None:
         "refs/heads/master/anti-ad-easylist.txt"
     )
     assert source["input"]["format"] == "adblock"
-    assert source["output"]["filtered_files"] == [
-        {"name": "block_easylist.txt", "format": "plain"}
-    ]
+    assert "output" not in source
+    assert config["output"] == {
+        "filtered": [
+            {"path": "output/filtered/block.txt", "format": "plain"},
+            {
+                "path": "output/filtered/block_easylist.txt",
+                "format": "adblock",
+            },
+        ],
+        "review": "output/review/block.csv",
+        "unactionable": "output/unactionable/block.txt",
+    }
+
+
+def test_sample_config_inherits_defaults_and_keeps_outputs_at_root() -> None:
+    """Resolve default source settings while keeping output config at root."""
+    config = load_config_without_runtime_credentials(
+        Path("config/domain-pipeline.yaml.sample")
+    )
+    source = config["sources"][0]
+
+    assert config["output"]["review"] == "output/review/domain-pipeline.csv"
+    assert "output" not in source
+    assert source["fetch"] == config["defaults"]["fetch"]
+    assert source["delegation"] == config["defaults"]["delegation"]
+    assert source["host_resolution"]["targets"]["root_domain"] is False
+    assert config["defaults"]["host_resolution"]["targets"]["root_domain"] is True
 
 
 def test_adblock_parser_extracts_only_exact_blocking_domains() -> None:
@@ -70,7 +96,7 @@ def test_adblock_parser_extracts_only_exact_blocking_domains() -> None:
 def test_filtered_output_formats(
     tmp_path: Path, output_format: str, expected: str
 ) -> None:
-    """Write all configured line formats while deduplicating domain values."""
+    """Render duplicate host values using each supported output format."""
     target_path = tmp_path / "filtered" / "domains.txt"
 
     AggregateOutputMerger().write_filtered_host_values(
@@ -82,29 +108,50 @@ def test_filtered_output_formats(
     assert target_path.read_text(encoding="utf-8") == expected
 
 
-def test_aggregate_spec_includes_additional_filtered_files() -> None:
-    """Resolve additional configured filtered files into the aggregate spec."""
+def test_aggregate_spec_uses_only_configured_output_paths() -> None:
+    """Resolve configured filtered files without a derived default output."""
     spec = aggregate_output_spec_from_config(
         {
             "config_name": "block",
-            "sources": [
-                {
-                    "enabled": True,
-                    "output": {
-                        "directory": "output",
-                        "filtered_files": [
-                            {"name": "block_easylist.txt", "format": "plain"}
-                        ],
+            "output": {
+                "filtered": [
+                    {"path": "output/filtered/block.txt", "format": "plain"},
+                    {
+                        "path": "output/filtered/block_easylist.txt",
+                        "format": "adblock",
                     },
-                }
+                ],
+                "review": "output/review/block.csv",
+                "unactionable": "output/unactionable/block.txt",
+            },
+            "sources": [
+                {"enabled": True},
+                {"enabled": True},
             ],
         }
     )
 
-    assert spec.filtered == "output/filtered/block.txt"
-    assert [(item.path, item.format) for item in spec.filtered_files] == [
-        ("output/filtered/block_easylist.txt", "plain")
+    assert [(item.path, item.format) for item in spec.filtered] == [
+        ("output/filtered/block.txt", "plain"),
+        ("output/filtered/block_easylist.txt", "adblock"),
     ]
+    assert spec.review == "output/review/block.csv"
+    assert spec.unactionable == "output/unactionable/block.txt"
+
+
+def test_config_requires_at_least_one_filtered_output() -> None:
+    """Require each config to define at least one filtered output."""
+    config_path = Path("config/block.yaml")
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["output"]["filtered"] = []
+
+    with pytest.raises(ValueError, match="output.filtered"):
+        PipelineConfigLoader().load_payload(
+            payload,
+            config_namespace="block",
+            config_path=config_path,
+            validate_runtime_credentials=False,
+        )
 
 
 @pytest.mark.parametrize(
@@ -148,20 +195,32 @@ def test_additional_filtered_outputs_are_not_sent_to_worker_runtime(
     runtime_spec = manifests[0].manifest.runtime_spec
 
     assert runtime_spec.sources[0].output.directory.endswith("publish_snapshot/output")
-    assert "filtered_files" not in runtime_spec.sources[0].output.model_dump()
+    assert runtime_spec.sources[0].output.model_dump() == {
+        "directory": runtime_spec.sources[0].output.directory
+    }
 
 
-def test_filtered_output_names_must_be_unique_and_safe() -> None:
-    """Reject duplicate names and names that could escape the output directory."""
-    with pytest.raises(ValueError, match="names must be unique"):
+def test_output_paths_must_be_unique_and_safe() -> None:
+    """Reject duplicate paths and paths that could escape the publish worktree."""
+    with pytest.raises(ValueError, match="output paths must be unique"):
         OutputConfig.model_validate(
             {
-                "filtered_files": [
-                    {"name": "extra.txt"},
-                    {"name": "extra.txt", "format": "adblock"},
-                ]
+                "filtered": [
+                    {"path": "output/extra.txt"},
+                    {"path": "output/extra.txt", "format": "adblock"},
+                ],
+                "review": "output/review.csv",
+                "unactionable": "output/unactionable.txt",
             }
         )
 
-    with pytest.raises(ValueError, match="filename"):
-        OutputConfig.model_validate({"filtered_files": [{"name": "../outside.txt"}]})
+    with pytest.raises(ValueError, match="safe relative path"):
+        OutputConfig.model_validate(
+            {
+                "filtered": [
+                    {"path": "../outside.txt"},
+                ],
+                "review": "output/review.csv",
+                "unactionable": "output/unactionable.txt",
+            }
+        )

@@ -1,14 +1,21 @@
 version: 2
 
-# Defaults inherited by every source unless a source overrides them.
+# Defaults are inherited independently by every source unless that source
+# overrides them. For example, in one config with sources A, B, C, and D, A and
+# B can specify their own settings while C and D omit those settings and use
+# defaults. A source override affects only that source; it does not change the
+# defaults inherited by other sources.
+# Overrides merge recursively for mappings: omitted nested keys keep their
+# inherited values, while explicitly supplied scalar or list values replace
+# the inherited value. Each source must still provide its own input.
+# The root-level output section applies once to the results of all sources in
+# this config; outputs are not source-specific.
 # One workflow owns one config file. A config file may still contain multiple
 # sources, but emitted artifacts are grouped by the config filename instead of
 # by each source id.
 #
-# Optional operator input files:
-# - input/manually_selected_for_filtered/<config-stem>.txt
-# - input/manually_excluded_from_sources/<config-stem>.txt
-# - input/manually_added/<config-stem>.txt
+# Optional operator input files are named <config-stem>.txt inside each
+# configurable category directory below.
 # manually_selected_for_filtered and manually_added entries require an
 # actionable delegation result for the registrable domain. Source-matched
 # public suffix selections route to filtered during prepare because there is no
@@ -20,7 +27,7 @@ version: 2
 # precedence over matching source entries for the same host. If delegation is
 # not actionable, they route to unactionable or review using the normal
 # delegation result. Unmatched manually_added entries require all enabled
-# sources to share dns_query, delegation, and output behavior. Unmatched
+# sources to share dns_query and delegation behavior. Unmatched
 # selected entries route to review without delegation or host-resolution lookup
 # because they are operator reconciliation rows.
 # manually_excluded_from_sources is target-based source subtraction: source
@@ -34,10 +41,28 @@ version: 2
 # - review: uncertain or operator-attention rows.
 # - unactionable: rows whose registrable domain has no actionable delegation.
 # Duplicate host collapse is keyed by final host and compares dns_query,
-# delegation, host_resolution, ip_location, and output behavior across enabled
-# sources. For manually_added matched hosts, only dns_query/delegation/output
-# behavior must match because manually_added bypasses host-resolution and
+# delegation, host_resolution, and ip_location behavior across enabled sources.
+# For manually_added matched hosts, only dns_query/delegation behavior must match
+# because manually_added bypasses host-resolution and
 # IP-location after delegation passes.
+manual_inputs:
+  manually_selected_for_filtered: manual_inputs/manually_selected_for_filtered
+  manually_excluded_from_sources: manual_inputs/manually_excluded_from_sources
+  manually_added: manual_inputs/manually_added
+
+output:
+  # All publish output paths are configured explicitly and relative to the
+  # repository root.
+  filtered:
+    - path: output/filtered/domain-pipeline.txt
+      format: plain
+    # Each file receives the same deduplicated filtered hosts, rendered as
+    # plain, hosts, or adblock lines.
+    # - path: output/filtered/domain-pipeline-adblock.txt
+    #   format: adblock
+  review: output/review/domain-pipeline.csv
+  unactionable: output/unactionable/domain-pipeline.txt
+
 defaults:
   fetch:
     # Network timeout, in seconds, for retrieving source content before the
@@ -202,20 +227,6 @@ defaults:
         # Region examples: California, Ontario.
         regions: []
 
-  output:
-    # Output directory for final aggregate publish files.
-    # For a config named config/domain-pipeline.yaml, aggregation writes:
-    # - output/filtered/domain-pipeline.txt
-    # - output/unactionable/domain-pipeline.txt
-    # - output/review/domain-pipeline.csv when review rows exist
-    directory: output
-    # Optional additional filtered copies. Each file receives the same
-    # deduplicated filtered hosts, rendered as plain, hosts, or adblock lines.
-    # The default output above remains plain domain-per-line text.
-    # filtered_files:
-    #   - name: domain-pipeline-adblock.txt
-    #     format: adblock
-
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub
   # matrix worker. Delegation consumes registrable-domain root work and fans
@@ -264,6 +275,9 @@ cache:
     nxdomain: 1
 
 sources:
+  # Every item is an independent source. Its optional fetch, DNS, delegation,
+  # host-resolution, and IP-location sections override only that source's
+  # inherited defaults.
   - id: local-default
     enabled: true
     input:
@@ -271,7 +285,7 @@ sources:
       type: file
       # For file inputs, provide one concrete file path. The source reader opens
       # input.location directly and does not expand glob patterns.
-      location: input/test.txt
+      location: manual_inputs/test.txt
       # Valid explicit values: auto, plain, hosts, adblock, dnsmasq.
       # With auto, prepare also detects supported Surge RULE-SET domain
       # declarations and Surge DOMAIN-SET lists. Surge formats are not valid
@@ -312,5 +326,3 @@ sources:
         exclude:
           countries: []
           regions: []
-    output:
-      directory: output

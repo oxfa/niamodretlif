@@ -1,9 +1,7 @@
 version: 2
 
 # Optional per-config operator files:
-# - input/manually_selected_for_filtered/block.txt
-# - input/manually_excluded_from_sources/block.txt
-# - input/manually_added/block.txt
+# Each configured category directory contains block.txt.
 # manually_selected_for_filtered and manually_added entries require actionable
 # delegation when they have a registrable domain. Source-matched public suffix
 # selections route to filtered during prepare because there is no registrable
@@ -14,11 +12,25 @@ version: 2
 # and IP-location checks and route to filtered. manually_added takes precedence
 # over matching source entries for the same host. Unmatched selected entries
 # route to review without DNS lookup; unmatched manually_added entries require
-# all enabled sources to share dns_query/delegation/output behavior.
+# all enabled sources to share dns_query/delegation behavior.
 # manually_excluded_from_sources is target-based source subtraction: source
 # entries whose parsed normalized target matches an operator entry are removed
 # before worker manifests, and non-matches are silent no-ops. Other
 # public-suffix inputs are prepare-owned terminal rows.
+
+manual_inputs:
+  manually_selected_for_filtered: manual_inputs/manually_selected_for_filtered
+  manually_excluded_from_sources: manual_inputs/manually_excluded_from_sources
+  manually_added: manual_inputs/manually_added
+
+output:
+  filtered:
+    - path: output/filtered/block.txt
+      format: plain
+    - path: output/filtered/block_easylist.txt
+      format: adblock
+  review: output/review/block.csv
+  unactionable: output/unactionable/block.txt
 
 defaults:
   fetch:
@@ -79,12 +91,6 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: false
-
-  output:
-    directory: output
-    filtered_files:
-      - name: block_easylist.txt
-        format: plain
 
 runtime:
   # Worker-local async stage concurrency inside one GitHub matrix worker.

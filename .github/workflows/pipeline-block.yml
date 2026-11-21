@@ -16,10 +16,8 @@ permissions:
   contents: write
   actions: read
 
-# Optional per-config operator files:
-# - input/manually_selected_for_filtered/block.txt
-# - input/manually_excluded_from_sources/block.txt
-# - input/manually_added/block.txt
+# Optional per-config operator files are configured in config/block.yaml under
+# manual_inputs; each category directory contains block.txt.
 # manually_selected_for_filtered and manually_added require actionable
 # delegation before routing to filtered: NS records exist, NS NODATA, NS
 # NXDOMAIN with same-owner SOA, or NS retry-exhausted with same-owner SOA.

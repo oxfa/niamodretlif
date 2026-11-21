@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 
 from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
 
@@ -28,7 +29,7 @@ class ManualInputLoader:
 
     def path(self, directory: str, config_name: str) -> Path:
         """Return one config-scoped manual input path."""
-        return self.source_root / "input" / directory / f"{config_name}.txt"
+        return self.source_root / directory / f"{config_name}.txt"
 
     def load_file(self, path: Path) -> dict[str, DomainEntry]:
         """Load manual entries from one optional file."""
@@ -42,15 +43,15 @@ class ManualInputLoader:
             entries[entry.host] = entry
         return entries
 
-    def load(self, config_name: str) -> ManualInputSet:
+    def load(self, config_name: str, directories: Mapping[str, str]) -> ManualInputSet:
         """Load and validate all manual inputs for one config."""
         manually_selected_for_filtered_path = self.path(
-            "manually_selected_for_filtered", config_name
+            directories["manually_selected_for_filtered"], config_name
         )
         manually_excluded_from_sources_path = self.path(
-            "manually_excluded_from_sources", config_name
+            directories["manually_excluded_from_sources"], config_name
         )
-        manually_added_path = self.path("manually_added", config_name)
+        manually_added_path = self.path(directories["manually_added"], config_name)
         manually_selected_for_filtered_entries = self.load_file(
             manually_selected_for_filtered_path
         )

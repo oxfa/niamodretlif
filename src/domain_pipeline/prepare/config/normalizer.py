@@ -54,10 +54,6 @@ class ConfigNormalizer:
                 merged[key] = copy.deepcopy(value)
         return merged
 
-    def normalized_output_directory(self, directory: str) -> Path:
-        """Return the normalized absolute output directory."""
-        return Path(directory).expanduser().resolve()
-
     def finalize_dns_stage_defaults(self, source_payload: dict[str, Any]) -> None:
         """Apply derived host-resolution defaults after source/default merging."""
         host_resolution = source_payload["host_resolution"]
@@ -127,6 +123,8 @@ class ConfigNormalizer:
                     "version": raw_config.version,
                     "config_name": config_namespace,
                     "config_path": str(config_path),
+                    "output": raw_config.output.model_dump(),
+                    "manual_inputs": raw_config.manual_inputs.model_dump(),
                     "defaults": defaults_payload,
                     "runtime": raw_config.runtime.model_dump(),
                     "cache": cache_payload,
@@ -135,31 +133,6 @@ class ConfigNormalizer:
             )
         except ValidationError as exc:
             raise ValueError(self.format_validation_error(exc)) from exc
-
-        enabled_output_directories = {
-            str(self.normalized_output_directory(source.output.directory))
-            for source in normalized_config.sources
-            if source.enabled
-        }
-        if len(enabled_output_directories) > 1:
-            raise ValueError(
-                "all enabled sources in one config must share the same "
-                "output.directory because outputs are namespaced by config filename"
-            )
-        enabled_filtered_files = {
-            tuple(
-                sorted(
-                    (item.name, item.format) for item in source.output.filtered_files
-                )
-            )
-            for source in normalized_config.sources
-            if source.enabled
-        }
-        if len(enabled_filtered_files) > 1:
-            raise ValueError(
-                "all enabled sources in one config must share the same "
-                "output.filtered_files"
-            )
 
         normalized_payload = normalized_config.model_dump()
         self.ip_location_policy.inject_effective_fields(

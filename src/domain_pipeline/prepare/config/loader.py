@@ -78,8 +78,8 @@ class PipelineConfigLoader:
         """Validate and normalize an already-loaded version 2 config payload."""
         if payload.get("version") != 2:
             raise ValueError(
-                "config must declare version: 2 and use top-level keys defaults, "
-                "cache, and sources"
+                "config must declare version: 2 and use top-level keys "
+                "output, manual_inputs, defaults, runtime, cache, and sources"
             )
         try:
             raw_config = models.RawPipelineConfig.model_validate(payload)

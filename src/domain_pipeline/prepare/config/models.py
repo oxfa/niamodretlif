@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
@@ -31,8 +32,18 @@ MAPPING_DEFAULT_FIELDS = {
     "delegation",
     "host_resolution",
     "ip_location",
-    "output",
 }
+
+
+def _is_safe_relative_path(value: str, *, validate_characters: bool) -> bool:
+    """Return whether a config path stays relative and inside the repository."""
+    path_value = value.strip()
+    if not path_value or path_value == "." or path_value.endswith("/") or "\\" in path_value:
+        return False
+    if validate_characters and not re.fullmatch(r"[A-Za-z0-9._/-]+", path_value):
+        return False
+    path = Path(path_value)
+    return not path.is_absolute() and ".." not in path.parts
 
 
 class StrictModel(BaseModel):
@@ -83,6 +94,13 @@ class IPLocationConfig(StrictModel):
     cache_ttl_days: int = 7
     token: str = ""
     policy: LocationPolicyConfig = Field(default_factory=LocationPolicyConfig)
+
+    @field_validator("cache_ttl_days", mode="after")
+    @classmethod
+    def _validate_cache_ttl_days(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("ip_location.cache_ttl_days must be >= 0")
+        return value
 
 
 class FetchConfig(StrictModel):
@@ -392,34 +410,82 @@ class DNSQueryConfig(StrictModel):
 
 
 class FilteredOutputConfig(StrictModel):
-    """One additional filtered output file and its line format."""
+    """One filtered output path and its line format."""
 
-    name: str
+    path: str
     format: Literal["plain", "hosts", "adblock"] = "plain"
 
-    @field_validator("name", mode="after")
+    @field_validator("path", mode="after")
     @classmethod
-    def _validate_name(cls, value: str) -> str:
-        name = value.strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+    def _validate_path(cls, value: str) -> str:
+        path = value.strip()
+        if not _is_safe_relative_path(path, validate_characters=True):
             raise ValueError(
-                "output.filtered_files[].name must be a filename containing only "
-                "letters, digits, dots, underscores, and hyphens"
+                "output.filtered[].path must be a safe relative path using "
+                "letters, digits, dots, underscores, hyphens, and slashes"
             )
-        return name
+        return Path(path).as_posix()
 
 
 class OutputConfig(StrictModel):
-    """Per-source output settings."""
+    """Config-wide publish output settings."""
 
-    directory: str = "output"
-    filtered_files: list[FilteredOutputConfig] = Field(default_factory=list)
+    filtered: list[FilteredOutputConfig] = Field(min_length=1)
+    review: str
+    unactionable: str
+
+    @field_validator("review", "unactionable", mode="after")
+    @classmethod
+    def _validate_output_path(cls, value: str, info: Any) -> str:
+        path = value.strip()
+        if not _is_safe_relative_path(path, validate_characters=True):
+            raise ValueError(
+                f"output.{info.field_name} must be a safe relative path using "
+                "letters, digits, dots, underscores, hyphens, and slashes"
+            )
+        return Path(path).as_posix()
 
     @model_validator(mode="after")
-    def _validate_filtered_files(self) -> "OutputConfig":
-        names = [item.name for item in self.filtered_files]
-        if len(set(names)) != len(names):
-            raise ValueError("output.filtered_files names must be unique")
+    def _validate_output_paths(self) -> "OutputConfig":
+        paths = [item.path for item in self.filtered]
+        paths.extend([self.review, self.unactionable])
+        if len(set(paths)) != len(paths):
+            raise ValueError("output paths must be unique")
+        return self
+
+
+class ManualInputsConfig(StrictModel):
+    """Config-scoped directories for each operator-managed input category."""
+
+    manually_selected_for_filtered: str = "manual_inputs/manually_selected_for_filtered"
+    manually_excluded_from_sources: str = "manual_inputs/manually_excluded_from_sources"
+    manually_added: str = "manual_inputs/manually_added"
+
+    @field_validator(
+        "manually_selected_for_filtered",
+        "manually_excluded_from_sources",
+        "manually_added",
+        mode="after",
+    )
+    @classmethod
+    def _validate_directory(cls, value: str, info: Any) -> str:
+        directory = value.strip()
+        if not _is_safe_relative_path(directory, validate_characters=False):
+            raise ValueError(
+                f"manual_inputs.{info.field_name} must be a relative directory "
+                "inside the repository"
+            )
+        return Path(directory).as_posix()
+
+    @model_validator(mode="after")
+    def _validate_distinct_directories(self) -> "ManualInputsConfig":
+        directories = (
+            self.manually_selected_for_filtered,
+            self.manually_excluded_from_sources,
+            self.manually_added,
+        )
+        if len(set(directories)) != len(directories):
+            raise ValueError("manual_inputs category directories must be unique")
         return self
 
 
@@ -461,6 +527,13 @@ class DelegationTTLConfig(StrictModel):
 
     actionable: int = 7
     unactionable: int = 1
+
+    @field_validator("actionable", "unactionable", mode="after")
+    @classmethod
+    def _validate_ttl_days(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("delegation cache TTL values must be >= 0")
+        return value
 
 
 class HostResolutionTTLConfig(StrictModel):
@@ -531,7 +604,6 @@ class DefaultsConfig(StrictModel):
     delegation: DelegationConfig = Field(default_factory=DelegationConfig)
     host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
     ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -554,7 +626,6 @@ class SourceOverrideConfig(StrictModel):
     delegation: DelegationConfig | None = None
     host_resolution: HostResolutionConfig | None = None
     ip_location: IPLocationConfig | None = None
-    output: OutputConfig | None = None
 
     @field_validator("id", mode="after")
     @classmethod
@@ -585,13 +656,14 @@ class EffectiveSourceConfig(StrictModel):
     delegation: DelegationConfig = Field(default_factory=DelegationConfig)
     host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
     ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
 
 
 class RawPipelineConfig(StrictModel):
     """Top-level raw version 2 configuration."""
 
     version: Literal[2]
+    output: OutputConfig
+    manual_inputs: ManualInputsConfig = Field(default_factory=ManualInputsConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
@@ -610,6 +682,8 @@ class NormalizedPipelineConfig(StrictModel):
     version: Literal[2]
     config_name: str
     config_path: str
+    output: OutputConfig
+    manual_inputs: ManualInputsConfig = Field(default_factory=ManualInputsConfig)
     defaults: DefaultsConfig
     runtime: RuntimeConfig
     cache: CacheConfig

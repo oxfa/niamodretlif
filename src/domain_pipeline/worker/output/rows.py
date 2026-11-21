@@ -322,7 +322,7 @@ class ReviewRowProjector:
 
     def project(self, row: dict[str, Any]) -> ReviewOutputRow:
         """Project one raw terminal row into the public review CSV schema."""
-        projected = {
+        projected: ReviewOutputRow = {
             "host": str(row.get("host", "")),
             "registrable_domain": str(row.get("registrable_domain", "")),
             "route_code": str(row.get("route_code", "")),
@@ -339,7 +339,7 @@ class ReviewRowProjector:
             "source_id": str(row.get("source_id", "")),
             "source_input_label": str(row.get("source_input_label", "")),
         }
-        return projected  # type: ignore[return-value]
+        return projected
 
     def project_many(self, rows: Iterable[dict[str, Any]]) -> list[ReviewOutputRow]:
         """Project multiple raw terminal rows in input order."""

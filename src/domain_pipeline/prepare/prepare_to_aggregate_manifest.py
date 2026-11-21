@@ -6,9 +6,25 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from domain_pipeline.paths.layout import PathLayout
+
+
+def _validate_publish_path(value: str, *, field_name: str) -> str:
+    """Validate a repo-relative publish path stored in the aggregate manifest."""
+    normalized_value = value.strip()
+    path = Path(normalized_value)
+    if (
+        not normalized_value
+        or normalized_value == "."
+        or normalized_value.endswith("/")
+        or "\\" in normalized_value
+    ):
+        raise ValueError(f"{field_name} must be a safe relative publish path")
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{field_name} must be a safe relative publish path")
+    return path.as_posix()
 
 
 class PrepareAggregateModel(BaseModel):
@@ -18,28 +34,39 @@ class PrepareAggregateModel(BaseModel):
 
 
 class FilteredOutputSpec(PrepareAggregateModel):
-    """One extra filtered output path and its rendered line format."""
+    """One filtered output path and its rendered line format."""
 
     path: str
     format: Literal["plain", "hosts", "adblock"]
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _validate_publish_path(value, field_name="filtered[].path")
 
 
 class AggregateOutputSpec(PrepareAggregateModel):
     """Repo-relative aggregate output/cache/log paths."""
 
-    filtered: str
-    filtered_files: list[FilteredOutputSpec] = Field(default_factory=list)
+    filtered: list[FilteredOutputSpec] = Field(min_length=1)
     unactionable: str
     review: str
     audit: str
     log: str
     cache: str
 
+    @field_validator("unactionable", "review")
+    @classmethod
+    def _validate_publish_paths(cls, value: str, info: Any) -> str:
+        return _validate_publish_path(
+            value,
+            field_name=f"output.{info.field_name}",
+        )
+
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved aggregate paths rooted at one pipeline-run workspace root."""
         publish_root = PathLayout(state_root).publish_worktree_root()
         return {
-            "filtered": publish_root / Path(self.filtered),
             "unactionable": publish_root / Path(self.unactionable),
             "review": publish_root / Path(self.review),
             "audit": state_root / Path(self.audit),
@@ -47,13 +74,10 @@ class AggregateOutputSpec(PrepareAggregateModel):
             "cache": state_root / Path(self.cache),
         }
 
-    def resolve_filtered_files(self, state_root: Path) -> list[tuple[Path, str]]:
-        """Resolve configured extra filtered outputs in the publish worktree."""
+    def resolve_filtered(self, state_root: Path) -> list[tuple[Path, str]]:
+        """Resolve configured filtered outputs in the publish worktree."""
         publish_root = PathLayout(state_root).publish_worktree_root()
-        return [
-            (publish_root / Path(item.path), item.format)
-            for item in self.filtered_files
-        ]
+        return [(publish_root / Path(item.path), item.format) for item in self.filtered]
 
 
 class PrepareAggregateManifest(PrepareAggregateModel):

@@ -58,7 +58,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Set
 
-import publicsuffix2  # type: ignore
+import publicsuffix2
 
 log = logging.getLogger(__name__)
 _PRIVATE_SUFFIX_SECTION_MARKER = "// ===BEGIN PRIVATE DOMAINS==="

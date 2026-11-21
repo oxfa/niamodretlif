@@ -17,6 +17,32 @@ from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantErr
 class AggregateOutputMerger:
     """Merge worker and prepare-owned output fragments into final outputs."""
 
+    def collect_host_value_payloads(
+        self,
+        source_payloads: Iterable[tuple[str, Iterable[str]]],
+    ) -> list[str]:
+        """Merge host values and reject duplicates, returning sorted values."""
+        seen_hosts: dict[str, str] = {}
+        ordered_hosts: list[str] = []
+        for source_label, values in source_payloads:
+            for value in values:
+                host = value.strip()
+                if not host:
+                    continue
+                previous_source = seen_hosts.get(host)
+                if previous_source is not None:
+                    raise DuplicateOutputInvariantError(
+                        "aggregate_host",
+                        host,
+                        context={
+                            "first_source": previous_source,
+                            "duplicate_source": source_label,
+                        },
+                    )
+                seen_hosts[host] = source_label
+                ordered_hosts.append(host)
+        return sorted(ordered_hosts)
+
     def write_filtered_host_values(
         self,
         hosts: Iterable[str],
@@ -49,25 +75,7 @@ class AggregateOutputMerger:
         target_path: Path,
     ) -> None:
         """Merge embedded host TXT values and reject duplicate output values."""
-        seen_hosts: dict[str, str] = {}
-        ordered_hosts: list[str] = []
-        for source_label, values in source_payloads:
-            for value in values:
-                host = value.strip()
-                if not host:
-                    continue
-                previous_source = seen_hosts.get(host)
-                if previous_source is not None:
-                    raise DuplicateOutputInvariantError(
-                        "aggregate_host",
-                        host,
-                        context={
-                            "first_source": previous_source,
-                            "duplicate_source": source_label,
-                        },
-                    )
-                seen_hosts[host] = source_label
-                ordered_hosts.append(host)
+        ordered_hosts = self.collect_host_value_payloads(source_payloads)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(
             "".join(f"{host}\n" for host in sorted(ordered_hosts)),

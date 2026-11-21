@@ -236,7 +236,9 @@ class PreparationPlanner:
             config=config,
             jobs=jobs,
             source_jobs_by_id={job.source_id: job for job in jobs},
-            manual_inputs=self.manual_loader.load(str(config["config_name"])),
+            manual_inputs=self.manual_loader.load(
+                str(config["config_name"]), config["manual_inputs"]
+            ),
             parser=DomainListParser(),
         )
 
@@ -305,7 +307,7 @@ class PreparationPlanner:
             if previous is not None and previous != fingerprint:
                 raise ValueError(
                     f"manually added host {request.host!r} appears in multiple enabled "
-                    "sources with different dns_query/delegation/output behavior"
+                    "sources with different dns_query/delegation behavior"
                 )
             request.routing.manually_added_fingerprints_by_host[request.host] = (
                 fingerprint
@@ -316,7 +318,7 @@ class PreparationPlanner:
         previous = request.routing.host_fingerprints.get(request.host)
         if previous is not None and previous != fingerprint:
             raise ValueError(
-                f"duplicate host {request.host!r} has conflicting dns/stage/output behavior"
+                f"duplicate host {request.host!r} has conflicting dns/stage behavior"
             )
         request.routing.host_fingerprints[request.host] = fingerprint
 
@@ -344,7 +346,7 @@ class PreparationPlanner:
                         "manually added file "
                         f"{state.manual_inputs.manually_added_path} contains "
                         f"unmatched host {host!r}; unmatched manually_added requires "
-                        "all enabled sources to share dns_query/delegation/output behavior"
+                        "all enabled sources to share dns_query/delegation behavior"
                     )
                 state.collections.entries_by_host[prepared_entry_merge_key(entry)] = (
                     entry
@@ -538,7 +540,6 @@ class PreparationPlanner:
             "delegation": self._canonical_delegation_behavior(source_config),
             "host_resolution": self._canonical_host_resolution_behavior(source_config),
             "ip_location": source_config["ip_location"],
-            "output": source_config["output"],
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -548,6 +549,5 @@ class PreparationPlanner:
         payload = {
             "dns_query": source_config["dns_query"],
             "delegation": self._canonical_delegation_behavior(source_config),
-            "output": source_config["output"],
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))

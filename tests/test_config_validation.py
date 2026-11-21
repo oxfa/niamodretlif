@@ -1,0 +1,44 @@
+"""Tests for pipeline configuration validation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import BaseModel
+
+from domain_pipeline.prepare.config.models import (
+    DelegationTTLConfig,
+    IPLocationConfig,
+)
+from domain_pipeline.prepare.config.loader import PipelineConfigLoader
+
+
+def test_version_error_lists_all_top_level_config_sections(tmp_path: Path) -> None:
+    """Report the full list of required top-level configuration sections."""
+    with pytest.raises(
+        ValueError,
+        match="output, manual_inputs, defaults, runtime, cache, and sources",
+    ):
+        PipelineConfigLoader().load_payload(
+            {"version": 1},
+            config_namespace="sample",
+            config_path=tmp_path / "sample.yaml",
+            validate_runtime_credentials=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (DelegationTTLConfig, {"actionable": -1}),
+        (DelegationTTLConfig, {"unactionable": -1}),
+        (IPLocationConfig, {"cache_ttl_days": -1}),
+    ],
+)
+def test_cache_ttl_days_must_not_be_negative(
+    model: type[BaseModel], payload: dict[str, int]
+) -> None:
+    """Reject negative cache TTLs across cache configuration models."""
+    with pytest.raises(ValueError, match=">= 0"):
+        model.model_validate(payload)

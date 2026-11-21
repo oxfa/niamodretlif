@@ -96,11 +96,8 @@ class WorkerPathSpec:
 
 @dataclass(frozen=True)
 class AggregatePathSpec:
-    """Repo paths persisted into the prepare-to-aggregate manifest."""
+    """Internal paths persisted into the prepare-to-aggregate manifest."""
 
-    filtered: Path
-    unactionable: Path
-    review: Path
     raw_audit: Path
     runtime_log: Path
     cache: Path
@@ -352,14 +349,9 @@ class PathLayout:
             ),
         )
 
-    def aggregate_paths(
-        self, *, config_name: str, output_directory: Path
-    ) -> AggregatePathSpec:
-        """Return persisted aggregate paths while preserving config-owned outputs."""
+    def aggregate_paths(self, *, config_name: str) -> AggregatePathSpec:
+        """Return aggregate-owned state paths; publish paths come from config."""
         return AggregatePathSpec(
-            filtered=output_directory / "filtered" / f"{config_name}.txt",
-            unactionable=output_directory / "unactionable" / f"{config_name}.txt",
-            review=output_directory / "review" / f"{config_name}.csv",
             raw_audit=self.output.runtime_raw_audit_path(config_name=config_name),
             runtime_log=self.output.runtime_log_path(config_name=config_name),
             cache=self.workflow.runtime_cache_path(),
