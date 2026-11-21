@@ -312,6 +312,7 @@ class WorkerAssignmentPlanner:
             selected_source["output"]["directory"] = relative_path(
                 worker_paths.output_directory
             )
+            selected_source["output"].pop("filtered_files", None)
             source_configs.append(selected_source)
         included_runtime_source_id_values = {
             str(source["id"]) for source in source_configs

@@ -7,11 +7,17 @@ from pathlib import Path
 import pytest
 
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
-from domain_pipeline.prepare.assignment import aggregate_output_spec_from_config
+from domain_pipeline.prepare.assignment import (
+    WorkerAssignmentPlanner,
+    WorkerManifestBuildRequest,
+    aggregate_output_spec_from_config,
+)
 from domain_pipeline.prepare.config.loader import (
     load_config_without_runtime_credentials,
 )
 from domain_pipeline.prepare.config.models import OutputConfig
+from domain_pipeline.prepare.models import PreparedRootPlan
+from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
 
 
@@ -99,6 +105,50 @@ def test_aggregate_spec_includes_additional_filtered_files() -> None:
     assert [(item.path, item.format) for item in spec.filtered_files] == [
         ("output/filtered/block_easylist.txt", "plain")
     ]
+
+
+@pytest.mark.parametrize(
+    ("config_path", "source_id"),
+    [("config/block.yaml", "block"), ("config/direct.yaml", "direct")],
+)
+def test_additional_filtered_outputs_are_not_sent_to_worker_runtime(
+    config_path: str, source_id: str
+) -> None:
+    """Keep aggregate-only filtered output settings out of worker manifests."""
+    config = load_config_without_runtime_credentials(Path(config_path))
+    source = next(item for item in config["sources"] if item["id"] == source_id)
+    entry = DomainEntry(host="ads.example.com", registrable_domain="example.com")
+    source_job = SourceJob(
+        source_id=source_id,
+        input_label="fixture",
+        output_stem=str(config["config_name"]),
+        lines=[],
+        config=source,
+    )
+    manifests = WorkerAssignmentPlanner().build_worker_manifests(
+        WorkerManifestBuildRequest(
+            config=config,
+            batch_id="batch",
+            worker_ids=["worker-1"],
+            worker_source_entries={"worker-1": {source_id: [entry]}},
+            worker_root_plans={
+                "worker-1": {
+                    "example.com": PreparedRootPlan(
+                        registrable_domain="example.com",
+                        entry_count=1,
+                        delegation_config_source_id=source_id,
+                        delegation_behavior_fingerprint="fixture",
+                    )
+                }
+            },
+            source_jobs_by_id={source_id: source_job},
+            manual_routing_by_host={},
+        )
+    )
+    runtime_spec = manifests[0].manifest.runtime_spec
+
+    assert runtime_spec.sources[0].output.directory.endswith("publish_snapshot/output")
+    assert "filtered_files" not in runtime_spec.sources[0].output.model_dump()
 
 
 def test_filtered_output_names_must_be_unique_and_safe() -> None:
