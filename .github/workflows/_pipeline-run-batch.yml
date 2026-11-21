@@ -27,9 +27,6 @@ on:
 
 permissions: {}
 
-env:
-  PYTHONPATH: src
-
 jobs:
   prepare_run:
     name: Validate settings and prepare batch
@@ -57,18 +54,19 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+          enable-cache: true
+          cache-dependency-glob: src/pipeline_run.py
       - name: Validate settings
         id: validate
         run: |
           set -eo pipefail
           {
             echo "=== Validate settings ==="
-            python -m domain_pipeline.pipeline_run validate-run-settings \
+            ./src/pipeline_run.py validate-run-settings \
               --worker-count "${{ inputs.worker_count }}" \
               --max-parallel-workers "${PIPELINE_RUN_MAX_PARALLEL_WORKERS:-}" \
               --max-parallel-workers-default "${{ inputs.max_parallel_workers_default }}" \
@@ -100,7 +98,7 @@ jobs:
           set -eo pipefail
           {
             echo "=== Build committed batch state ==="
-            python -m domain_pipeline.pipeline_run prepare-batch \
+            ./src/pipeline_run.py prepare-batch \
               --source-root . \
               --state-root . \
               --config "${{ inputs.config_path }}" \
@@ -162,11 +160,12 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+          enable-cache: true
+          cache-dependency-glob: src/pipeline_run.py
       # Prefer the prior attempt from the same workflow run when a rerun needs
       # to resume DNS-only cache progress, then fall back to the broader
       # config-wide lineage. Later diagnostics log GitHub restore output,
@@ -244,7 +243,7 @@ jobs:
             .actions_caches[]? |
             "worker baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
           ' "${response_path}" | tee -a "${worker_cache_log_path}"
-          python -m domain_pipeline.pipeline_run inspect-cache-lifecycle \
+          ./src/pipeline_run.py inspect-cache-lifecycle \
             --scope worker \
             --cache-hit "${cache_hit}" \
             --candidate-response "${response_path}" \
@@ -269,7 +268,7 @@ jobs:
           # Preparation may produce zero participating worker manifests when every
           # host is removed by manually_excluded_from_sources or becomes a
           # preparation-owned terminal row, such as public-suffix inputs.
-          python -m domain_pipeline.pipeline_run initialize-worker-statuses \
+          ./src/pipeline_run.py initialize-worker-statuses \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -309,7 +308,7 @@ jobs:
           # host-resolution starts no host-resolution consumers. Delegation
           # runs an NS query; SOA fallback is used for NS NXDOMAIN or
           # retry-exhausted NS outcomes, and NS NODATA is directly actionable.
-          python -m domain_pipeline.pipeline_run worker \
+          ./src/pipeline_run.py worker \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -340,7 +339,7 @@ jobs:
         continue-on-error: true
         run: |
           set -eo pipefail
-          python -m domain_pipeline.pipeline_run finalize-worker-aggregate-handoff \
+          ./src/pipeline_run.py finalize-worker-aggregate-handoff \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -351,7 +350,7 @@ jobs:
         if: ${{ steps.init.outputs.participates == 'true' && steps.process.outputs.overall_conclusion == 'success' && steps.finalize_handoff.outcome == 'success' }}
         run: |
           set -eo pipefail
-          python -m domain_pipeline.pipeline_run finalize-worker-statuses \
+          ./src/pipeline_run.py finalize-worker-statuses \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -362,7 +361,7 @@ jobs:
         if: ${{ steps.init.outputs.participates == 'true' && (steps.process.outputs.overall_conclusion != 'success' || steps.finalize_handoff.outcome != 'success') }}
         run: |
           set -eo pipefail
-          python -m domain_pipeline.pipeline_run finalize-worker-statuses \
+          ./src/pipeline_run.py finalize-worker-statuses \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -460,16 +459,17 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+          enable-cache: true
+          cache-dependency-glob: src/pipeline_run.py
       - name: Prepare publish worktree
         run: |
           set -eo pipefail
           # This is a local temporary worktree path, not the Git branch name.
-          python -m domain_pipeline.pipeline_run prepare-publish-worktree \
+          ./src/pipeline_run.py prepare-publish-worktree \
             --source-root . \
             --state-root . \
             --target-branch "${{ needs.prepare_run.outputs.target_branch }}" \
@@ -549,7 +549,7 @@ jobs:
             .actions_caches[]? |
             "aggregate baseline cache candidate key=\(.key) ref=\(.ref) version=\(.version) created_at=\(.created_at) last_accessed_at=\(.last_accessed_at) size_in_bytes=\(.size_in_bytes)"
           ' "${response_path}" | tee -a "${CACHE_LOG_PATH}"
-          python -m domain_pipeline.pipeline_run inspect-cache-lifecycle \
+          ./src/pipeline_run.py inspect-cache-lifecycle \
             --scope aggregate \
             --cache-hit "${cache_hit}" \
             --candidate-response "${response_path}" \
@@ -559,7 +559,7 @@ jobs:
             | tee -a "${CACHE_LOG_PATH}"
       - name: Configure git actor
         run: |
-          python -m domain_pipeline.pipeline_run configure-git \
+          ./src/pipeline_run.py configure-git \
             --source-root . \
             --state-root .
       - name: Download workflow artifacts
@@ -599,7 +599,7 @@ jobs:
           set -eo pipefail
           {
             echo "=== Materialize incomplete worker statuses ==="
-            python -m domain_pipeline.pipeline_run materialize-incomplete-statuses \
+            ./src/pipeline_run.py materialize-incomplete-statuses \
               --source-root . \
               --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -613,7 +613,7 @@ jobs:
           set -eo pipefail
           {
             echo "=== Validate aggregate barrier ==="
-            python -m domain_pipeline.pipeline_run validate-aggregate \
+            ./src/pipeline_run.py validate-aggregate \
               --source-root . \
               --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -627,7 +627,7 @@ jobs:
           set -eo pipefail
           {
             echo "=== Aggregate batch outputs ==="
-            python -m domain_pipeline.pipeline_run aggregate \
+            ./src/pipeline_run.py aggregate \
               --source-root . \
               --state-root . \
               --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
@@ -767,7 +767,7 @@ jobs:
             for filtered_path in "${additional_filtered_paths[@]}"; do
               additional_filtered_args+=(--path "${filtered_path}")
             done
-            python -m domain_pipeline.pipeline_run validate-publish-candidate-sizes \
+            ./src/pipeline_run.py validate-publish-candidate-sizes \
               --source-root . \
               --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
@@ -792,7 +792,7 @@ jobs:
             for filtered_path in "${additional_filtered_paths[@]}"; do
               additional_filtered_args+=(--path "${filtered_path}")
             done
-            python -m domain_pipeline.pipeline_run commit-paths \
+            ./src/pipeline_run.py commit-paths \
               --source-root . \
               --state-root . \
               --message "pipeline-run(${{ needs.prepare_run.outputs.batch_id }}): aggregate outputs" \
@@ -811,7 +811,7 @@ jobs:
           set -eo pipefail
           {
             echo "=== Push published state ==="
-            python -m domain_pipeline.pipeline_run push-branch \
+            ./src/pipeline_run.py push-branch \
               --source-root . \
               --state-root . \
               --log-level "${{ inputs.aggregate_log_level }}" \
