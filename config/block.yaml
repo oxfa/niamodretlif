@@ -82,6 +82,9 @@ defaults:
 
   output:
     directory: output
+    filtered_files:
+      - name: block_easylist.txt
+        format: plain
 
 runtime:
   # Worker-local async stage concurrency inside one GitHub matrix worker.
@@ -126,6 +129,9 @@ sources:
     input:
       type: url
       # location: https://is.gd/vQFXgT
-      location: https://tinyurl.com/bdzx57hc
+      location: https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/refs/heads/master/anti-ad-easylist.txt
+      # Domain-only processing keeps exact blocking rules; exceptions and
+      # filters that cannot be represented as one domain are ignored.
+      format: adblock
     ip_location:
       enabled: false

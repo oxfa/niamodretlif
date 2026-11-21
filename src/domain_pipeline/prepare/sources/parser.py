@@ -12,9 +12,9 @@ Explicitly configurable formats:
 * **Plain text** - one domain per line (for example ``example.com``).
 * **Hosts files** - lines prefixed with an IP address such as
   ``0.0.0.0 example.com`` or ``127.0.0.1 example.com``.
-* **AdBlock / uBlock network filters** - rules like ``||example.com^``
-  or exception rules like ``@@||example.com^``. Cosmetic filters
-  (containing ``##`` or ``#@#``) are discarded.
+* **AdBlock / uBlock network filters** - exact blocking domain rules like
+  ``||example.com^``. Exceptions and rules that cannot be represented as one
+  domain are ignored.
 * **dnsmasq server rules** - lines like ``server=/example.com/8.8.8.8``.
 
 Auto-detected-only formats:
@@ -177,21 +177,22 @@ class DnsmasqFormatHandler(SourceFormatHandler):
 
 
 class AdblockFormatHandler(SourceFormatHandler):
-    """Matcher and extractor for AdBlock/uBlock network filters."""
+    """Matcher and extractor for exact blocking AdBlock domain rules."""
 
     format = InputFileFormat.ADBLOCK
-    line_regex = re.compile(r"^(?:@@)?\|\|[^^\s]+\^$")
+    line_regex = re.compile(r"^(?:@@)?\|\|[A-Za-z0-9._-]+\^$")
 
     def matches_line(self, line: str, syntax: DomainSyntax) -> bool:
-        """Return whether the line has AdBlock network-filter shape."""
+        """Return whether the line blocks one exact domain or host."""
         _ = syntax
         return self.line_regex.match(line) is not None
 
     def parse_line(self, line: str, syntax: DomainSyntax) -> ParsedFormatLine:
-        """Extract AdBlock rule target and suffix semantics."""
+        """Extract an exact blocking domain, skipping exceptions and other rules."""
         _ = syntax
-        host = line.lstrip("@|").rstrip("^")
-        return ParsedFormatLine(self._rule_host(host))
+        if line.startswith("@@") or not self.matches_line(line, syntax):
+            return ParsedFormatLine("")
+        return ParsedFormatLine(line[2:-1])
 
 
 class HostsFormatHandler(SourceFormatHandler):
@@ -411,6 +412,8 @@ class DomainListParser:
             return ""
         handler = self._handlers_by_format.get(input_format)
         if handler is None:
+            return ""
+        if not handler.matches_line(line, self.syntax):
             return ""
         parsed = handler.parse_line(line, self.syntax)
         return parsed.host

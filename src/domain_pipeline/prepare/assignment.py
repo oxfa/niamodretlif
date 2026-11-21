@@ -115,8 +115,24 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
         config_name=config_name,
         output_directory=output_directory,
     )
+    filtered_files = []
+    configured_files = enabled_sources[0]["output"].get("filtered_files", [])
+    for configured_file in configured_files:
+        name = str(configured_file["name"])
+        if name == aggregate_paths.filtered.name:
+            raise ValueError(
+                "output.filtered_files[].name must not replace the default "
+                f"filtered output {aggregate_paths.filtered.name!r}"
+            )
+        filtered_files.append(
+            {
+                "path": relative_path(output_directory / "filtered" / name),
+                "format": configured_file["format"],
+            }
+        )
     return AggregateOutputSpec(
         filtered=relative_path(aggregate_paths.filtered),
+        filtered_files=filtered_files,
         unactionable=relative_path(aggregate_paths.unactionable),
         review=relative_path(aggregate_paths.review),
         audit=relative_path(aggregate_paths.raw_audit),

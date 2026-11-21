@@ -17,6 +17,32 @@ from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantErr
 class AggregateOutputMerger:
     """Merge worker and prepare-owned output fragments into final outputs."""
 
+    def write_filtered_host_values(
+        self,
+        hosts: Iterable[str],
+        target_path: Path,
+        *,
+        output_format: str,
+    ) -> None:
+        """Write already-merged filtered hosts using one configured line format."""
+        formatters = {
+            "plain": lambda host: host,
+            "hosts": lambda host: f"0.0.0.0 {host}",
+            "adblock": lambda host: f"||{host}^",
+        }
+        try:
+            format_host = formatters[output_format]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported filtered output format {output_format!r}"
+            ) from exc
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(
+            "".join(f"{format_host(host)}\n" for host in sorted(set(hosts))),
+            encoding="utf-8",
+        )
+
     def merge_host_value_payloads(
         self,
         source_payloads: Iterable[tuple[str, Iterable[str]]],

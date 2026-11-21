@@ -273,10 +273,10 @@ class RequestsIPLocationProvider:
         return IP_LOCATION_FAILURE_REASON_REQUEST_FAILED
 
     def _raise_if_fatal_credential_error(
-        self, exc: requests.RequestException | ValueError
+        self, _exc: requests.RequestException | ValueError
     ) -> None:
         """Raise a fatal credential error when the exception proves one."""
-        del exc
+        return None
 
     def _handle_lookup_exception(
         self,

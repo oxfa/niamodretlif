@@ -146,6 +146,20 @@ class ConfigNormalizer:
                 "all enabled sources in one config must share the same "
                 "output.directory because outputs are namespaced by config filename"
             )
+        enabled_filtered_files = {
+            tuple(
+                sorted(
+                    (item.name, item.format) for item in source.output.filtered_files
+                )
+            )
+            for source in normalized_config.sources
+            if source.enabled
+        }
+        if len(enabled_filtered_files) > 1:
+            raise ValueError(
+                "all enabled sources in one config must share the same "
+                "output.filtered_files"
+            )
 
         normalized_payload = normalized_config.model_dump()
         self.ip_location_policy.inject_effective_fields(

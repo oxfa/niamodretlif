@@ -209,6 +209,12 @@ defaults:
     # - output/unactionable/domain-pipeline.txt
     # - output/review/domain-pipeline.csv when review rows exist
     directory: output
+    # Optional additional filtered copies. Each file receives the same
+    # deduplicated filtered hosts, rendered as plain, hosts, or adblock lines.
+    # The default output above remains plain domain-per-line text.
+    # filtered_files:
+    #   - name: domain-pipeline-adblock.txt
+    #     format: adblock
 
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -17,10 +17,18 @@ class PrepareAggregateModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class FilteredOutputSpec(PrepareAggregateModel):
+    """One extra filtered output path and its rendered line format."""
+
+    path: str
+    format: Literal["plain", "hosts", "adblock"]
+
+
 class AggregateOutputSpec(PrepareAggregateModel):
     """Repo-relative aggregate output/cache/log paths."""
 
     filtered: str
+    filtered_files: list[FilteredOutputSpec] = Field(default_factory=list)
     unactionable: str
     review: str
     audit: str
@@ -38,6 +46,14 @@ class AggregateOutputSpec(PrepareAggregateModel):
             "log": state_root / Path(self.log),
             "cache": state_root / Path(self.cache),
         }
+
+    def resolve_filtered_files(self, state_root: Path) -> list[tuple[Path, str]]:
+        """Resolve configured extra filtered outputs in the publish worktree."""
+        publish_root = PathLayout(state_root).publish_worktree_root()
+        return [
+            (publish_root / Path(item.path), item.format)
+            for item in self.filtered_files
+        ]
 
 
 class PrepareAggregateManifest(PrepareAggregateModel):

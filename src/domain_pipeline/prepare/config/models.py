@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import re
 from typing import Any, Literal
 
 from pydantic import (
@@ -390,10 +391,36 @@ class DNSQueryConfig(StrictModel):
         return DNSConfigPolicy().validate_retry_backoff_base_seconds(value)
 
 
+class FilteredOutputConfig(StrictModel):
+    """One additional filtered output file and its line format."""
+
+    name: str
+    format: Literal["plain", "hosts", "adblock"] = "plain"
+
+    @field_validator("name", mode="after")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        name = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise ValueError(
+                "output.filtered_files[].name must be a filename containing only "
+                "letters, digits, dots, underscores, and hyphens"
+            )
+        return name
+
+
 class OutputConfig(StrictModel):
     """Per-source output settings."""
 
     directory: str = "output"
+    filtered_files: list[FilteredOutputConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_filtered_files(self) -> "OutputConfig":
+        names = [item.name for item in self.filtered_files]
+        if len(set(names)) != len(names):
+            raise ValueError("output.filtered_files names must be unique")
+        return self
 
 
 class InputConfig(StrictModel):

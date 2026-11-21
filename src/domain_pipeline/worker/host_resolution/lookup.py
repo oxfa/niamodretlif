@@ -557,7 +557,7 @@ def combine_host_resolution_results(
         ),
         "unknown",
     )
-    dns = HostResolutionDnsEvidence(
+    dns_evidence = HostResolutionDnsEvidence(
         a_timeout=status == "timeout",
         a_servfail=status == "servfail",
         a_nxdomain=status == "nxdomain",
@@ -573,7 +573,7 @@ def combine_host_resolution_results(
     )
     return HostResolutionResult(
         host=host,
-        dns=dns,
+        dns=dns_evidence,
         addresses=HostResolutionAddressEvidence(canonical_name=canonical_name),
         from_cache=all(result.from_cache for result in results),
         detail=detail,

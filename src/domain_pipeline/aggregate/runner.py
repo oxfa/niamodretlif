@@ -140,6 +140,20 @@ class AggregateBatchRunner:
                 ],
                 final_output_paths["filtered"],
             )
+            filtered_hosts = (
+                final_output_paths["filtered"].read_text(encoding="utf-8").splitlines()
+            )
+            for (
+                filtered_path,
+                output_format,
+            ) in prepare_manifest.aggregate_output_spec.resolve_filtered_files(
+                state_root
+            ):
+                self.services.output_merger.write_filtered_host_values(
+                    filtered_hosts,
+                    filtered_path,
+                    output_format=output_format,
+                )
             self.services.output_merger.merge_host_value_payloads(
                 [
                     (manifest.worker_id, manifest.unactionable_output_values)
@@ -210,6 +224,10 @@ class AggregateBatchRunner:
             "cache_merge_summary": cache_merge_summary,
             "final_output_paths": {
                 "filtered": prepare_manifest.aggregate_output_spec.filtered,
+                "filtered_files": [
+                    item.path
+                    for item in prepare_manifest.aggregate_output_spec.filtered_files
+                ],
                 "unactionable": prepare_manifest.aggregate_output_spec.unactionable,
                 "review": prepare_manifest.aggregate_output_spec.review,
             },
