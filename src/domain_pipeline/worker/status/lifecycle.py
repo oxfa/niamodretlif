@@ -18,7 +18,7 @@ from domain_pipeline.worker.worker_to_aggregate_manifest import (
 )
 from domain_pipeline.worker.status.store import WorkerStatusStore
 
-PIPELINE_RUN_FORMAT_VERSION = 2
+PIPELINE_RUN_FORMAT_VERSION = 3
 WORKER_STATUS_VERSION = 2
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_SUCCESS = "success"

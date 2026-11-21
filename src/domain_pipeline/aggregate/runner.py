@@ -24,6 +24,10 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
 )
 from domain_pipeline.prepare.assignment import relative_path
+from domain_pipeline.prepare.source_line_index import (
+    SourceLineIndex,
+    load_source_line_index,
+)
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
     load_worker_aggregate_manifest_for_worker,
@@ -129,28 +133,40 @@ class AggregateBatchRunner:
             return readiness
         status_payloads = readiness["status_payloads"]
         try:
-            filtered_hosts = self.services.output_merger.collect_host_value_payloads(
-                [
-                    ("prepare", prepare_manifest.preparation_filtered_output_values),
-                    *[
-                        (manifest.worker_id, manifest.filtered_output_values)
+            unactionable_domains = (
+                self.services.output_merger.collect_host_value_payloads(
+                    [
+                        (
+                            manifest.worker_id,
+                            manifest.unactionable_registrable_domains,
+                        )
                         for manifest in worker_manifests
                         if manifest.handoff_finalized
-                    ],
-                ]
+                    ]
+                )
+            )
+            source_contents, source_line_index = self._load_source_archive(
+                batch_id=batch_id,
+                state_root=state_root,
             )
             for (
                 filtered_path,
                 output_format,
             ) in prepare_manifest.aggregate_output_spec.resolve_filtered(state_root):
-                self.services.output_merger.write_filtered_host_values(
-                    filtered_hosts,
+                self.services.output_merger.write_filtered_source_content(
+                    source_contents,
+                    source_line_index,
+                    unactionable_domains,
+                    prepare_manifest.manually_added_domains,
                     filtered_path,
                     output_format=output_format,
                 )
             self.services.output_merger.merge_host_value_payloads(
                 [
-                    (manifest.worker_id, manifest.unactionable_output_values)
+                    (
+                        manifest.worker_id,
+                        manifest.unactionable_registrable_domains,
+                    )
                     for manifest in worker_manifests
                     if manifest.handoff_finalized
                 ],
@@ -239,6 +255,26 @@ class AggregateBatchRunner:
                 "runtime_log": prepare_manifest.aggregate_output_spec.log,
             },
         }
+
+    def _load_source_archive(
+        self, *, batch_id: str, state_root: Path
+    ) -> tuple[list[str], SourceLineIndex]:
+        """Load the prepared cleaned source files and their line index."""
+        workflow_paths = PathLayout(state_root).workflow
+        index = load_source_line_index(
+            workflow_paths.batch_source_line_index_path(batch_id=batch_id)
+        )
+        source_root = workflow_paths.batch_source_inputs_root(batch_id=batch_id)
+        contents: list[str] = []
+        for source_ordinal in range(len(index.source_formats)):
+            source_path = source_root / f"source-{source_ordinal:04d}.txt"
+            try:
+                contents.append(source_path.read_text(encoding="utf-8"))
+            except OSError as exc:
+                raise ValueError(
+                    f"unable to read prepared source input {source_path}: {exc}"
+                ) from exc
+        return contents, index
 
     def handle_failed_ready_batch(
         self,

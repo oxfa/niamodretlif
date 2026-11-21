@@ -31,7 +31,6 @@ class WorkerOutputPaths:
     """Publish-snapshot output paths for one worker execution."""
 
     output_directory: Path
-    filtered: Path
     unactionable: Path
     review: Path
 
@@ -62,11 +61,6 @@ class WorkerPathSpec:
     def output_directory(self) -> Path:
         """Return the worker publish-snapshot output directory."""
         return self.output.output_directory
-
-    @property
-    def filtered(self) -> Path:
-        """Return the worker filtered-output path."""
-        return self.output.filtered
 
     @property
     def unactionable(self) -> Path:
@@ -155,6 +149,14 @@ class WorkflowPathLayout:
         """Return the workflow-state root for one prepared batch."""
         return self.workflow_state_root() / "batches" / batch_id
 
+    def batch_source_inputs_root(self, *, batch_id: str) -> Path:
+        """Return the fixed archive directory for cleaned source inputs."""
+        return self.batch_root(batch_id=batch_id) / "source_inputs"
+
+    def batch_source_line_index_path(self, *, batch_id: str) -> Path:
+        """Return the fixed path for the source-to-registrable-domain line index."""
+        return self.batch_root(batch_id=batch_id) / "source-line-index.json"
+
     def prepare_worker_manifest_root(self, *, batch_id: str) -> Path:
         """Return the workflow-state prepare-to-worker manifest root."""
         return self.batch_root(batch_id=batch_id) / "workers"
@@ -204,16 +206,6 @@ class WorkflowPathLayout:
             self.worker_state_root(batch_id=batch_id, worker_id=worker_id)
             / "publish_snapshot"
             / "output"
-        )
-
-    def worker_filtered_path(
-        self, *, batch_id: str, worker_id: str, config_name: str
-    ) -> Path:
-        """Return the worker filtered-output path."""
-        return (
-            self.worker_publish_output_root(batch_id=batch_id, worker_id=worker_id)
-            / "filtered"
-            / f"{config_name}.txt"
         )
 
     def worker_unactionable_path(
@@ -330,11 +322,6 @@ class PathLayout:
                 output_directory=self.workflow.worker_publish_output_root(
                     batch_id=batch_id,
                     worker_id=worker_id,
-                ),
-                filtered=self.workflow.worker_filtered_path(
-                    batch_id=batch_id,
-                    worker_id=worker_id,
-                    config_name=config_name,
                 ),
                 unactionable=self.workflow.worker_unactionable_path(
                     batch_id=batch_id,

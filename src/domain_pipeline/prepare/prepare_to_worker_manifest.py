@@ -29,7 +29,6 @@ class WorkerOutputSpec(PrepareWorkerModel):
     """Repo-relative per-worker publish-snapshot and internal-state paths."""
 
     result_root: str
-    filtered: str
     unactionable: str
     review: str
     terminal_rows: str
@@ -39,7 +38,6 @@ class WorkerOutputSpec(PrepareWorkerModel):
         """Return resolved per-worker paths rooted at one pipeline-run workspace root."""
         return {
             "result_root": state_root / Path(self.result_root),
-            "filtered": state_root / Path(self.filtered),
             "unactionable": state_root / Path(self.unactionable),
             "review": state_root / Path(self.review),
             "terminal_rows": state_root / Path(self.terminal_rows),
@@ -47,35 +45,11 @@ class WorkerOutputSpec(PrepareWorkerModel):
         }
 
 
-class PreparedHostManifestEntry(PrepareWorkerModel):
-    """Worker-local prepared host entry owned by one delegation root."""
-
-    host: str
-    runtime_source_id: str
-    source_id: str
-    source_input_label: str
-    manually_selected_for_filtered: bool
-    manually_added: bool
-
-    @model_validator(mode="after")
-    def _validate_host_entry_metadata(self) -> "PreparedHostManifestEntry":
-        if not self.host:
-            raise ValueError("prepared host entry host is required")
-        if not self.runtime_source_id:
-            raise ValueError("prepared host entry runtime_source_id is required")
-        if not self.source_id:
-            raise ValueError("prepared host entry source_id is required")
-        if not self.source_input_label:
-            raise ValueError("prepared host entry source_input_label is required")
-        return self
-
-
 class PreparedDelegationRootMetadata(PrepareWorkerModel):
-    """Worker-local root metadata with root-owned prepared host entries."""
+    """Worker-local settings selected for one registrable-domain check."""
 
     delegation_config_source_id: str
     delegation_behavior_fingerprint: str
-    host_entries: list[PreparedHostManifestEntry]
 
     @model_validator(mode="after")
     def _validate_root_metadata(self) -> "PreparedDelegationRootMetadata":
@@ -85,8 +59,6 @@ class PreparedDelegationRootMetadata(PrepareWorkerModel):
             raise ValueError(
                 "delegation root delegation_behavior_fingerprint is required"
             )
-        if not self.host_entries:
-            raise ValueError("delegation root host_entries must not be empty")
         return self
 
 

@@ -97,48 +97,20 @@ class DelegationStage:
                 ),
             )
             return
-        if (
-            parsed.manual_routing.manually_selected_for_filtered
-            and delegation_result.actionable
-        ):
-            await self.runtime.put_completed(
-                queue_bundle,
-                _completed_request(
-                    parsed,
-                    ManualRoutingPolicy().selected_for_filtered(),
-                    CompletedResultEvidence(delegation_result=delegation_result),
-                ),
-            )
-            return
-        if parsed.manual_routing.manually_added and delegation_result.actionable:
-            await self.runtime.put_completed(
-                queue_bundle,
-                _completed_request(
-                    parsed,
-                    ManualRoutingPolicy().manually_added_actionable(),
-                    CompletedResultEvidence(delegation_result=delegation_result),
-                ),
-            )
-            return
-        host_resolution_config = parsed.source_context.config["host_resolution"]
-        if not bool(host_resolution_config.get("enabled", False)):
-            await self.runtime.put_completed(
-                queue_bundle,
-                _completed_request(
-                    parsed,
-                    HostResolutionRoutingPolicy().skipped(),
-                    CompletedResultEvidence(delegation_result=delegation_result),
-                ),
-            )
-            return
-        async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
-            await queue_bundle.delegation_to_host_resolution.put(
-                HostResolutionWorkItem(
-                    parsed=parsed,
-                    delegation_result=delegation_result,
-                    delegation_transition=delegation_transition,
-                )
-            )
+        if parsed.manual_routing.manually_selected_for_filtered:
+            route_transition = ManualRoutingPolicy().selected_for_filtered()
+        elif parsed.manual_routing.manually_added:
+            route_transition = ManualRoutingPolicy().manually_added_actionable()
+        else:
+            route_transition = HostResolutionRoutingPolicy().skipped()
+        await self.runtime.put_completed(
+            queue_bundle,
+            _completed_request(
+                parsed,
+                route_transition,
+                CompletedResultEvidence(delegation_result=delegation_result),
+            ),
+        )
 
 
 class HostResolutionStage:

@@ -15,7 +15,6 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     PrepareWorkerManifest,
     PreparedDelegationRootMetadata,
-    PreparedHostManifestEntry,
     PreparedRuntimeMetadata,
     WorkerOutputSpec,
     WorkerRuntimeSpec,
@@ -23,12 +22,11 @@ from domain_pipeline.prepare.prepare_to_worker_manifest import (
 from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
 from domain_pipeline.prepare.models import (
     PreparedInputSet,
-    PreparedManualRouting,
     PreparedRootPlan,
 )
 from domain_pipeline.prepare.sources.parser import DomainEntry
 
-PIPELINE_RUN_FORMAT_VERSION = 2
+PIPELINE_RUN_FORMAT_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +56,6 @@ class PreparedBatchPlanningInputs:
     eligible_root_entries: dict[str, list[tuple[str, DomainEntry]]]
     public_suffix_entries: list[tuple[str, DomainEntry]]
     root_plans: dict[str, PreparedRootPlan]
-    manual_routing_by_host: dict[str, PreparedManualRouting]
 
 
 @dataclass(frozen=True)
@@ -71,7 +68,6 @@ class WorkerManifestBuildRequest:
     worker_source_entries: dict[str, dict[str, list[DomainEntry]]]
     worker_root_plans: dict[str, dict[str, PreparedRootPlan]]
     source_jobs_by_id: dict[str, Any]
-    manual_routing_by_host: dict[str, PreparedManualRouting]
 
 
 def relative_path(path: Path) -> str:
@@ -148,29 +144,6 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
     )
 
 
-def prepared_entry_payload(
-    *,
-    source_id: str,
-    entry: DomainEntry,
-    source_jobs_by_id: dict[str, Any],
-    manual_routing: PreparedManualRouting,
-) -> dict[str, Any]:
-    """Serialize one root-owned prepared host entry for worker runtime."""
-    source_job = source_jobs_by_id[source_id]
-    return {
-        "host": entry.host,
-        "runtime_source_id": source_id,
-        "source_id": manual_routing.output_source_id or source_id,
-        "source_input_label": (
-            manual_routing.output_source_input_label or source_job.input_label
-        ),
-        "manually_selected_for_filtered": (
-            manual_routing.manually_selected_for_filtered
-        ),
-        "manually_added": manual_routing.manually_added,
-    }
-
-
 class WorkerAssignmentPlanner:
     """Assign prepared roots to worker-owned runtime bundles."""
 
@@ -186,7 +159,6 @@ class WorkerAssignmentPlanner:
             eligible_root_entries=eligible_root_entries,
             public_suffix_entries=public_suffix_entries,
             root_plans=prepared_inputs.root_plans,
-            manual_routing_by_host=prepared_inputs.manual_routing_by_host,
         )
 
     def assign(
@@ -206,12 +178,7 @@ class WorkerAssignmentPlanner:
         worker_root_plans: dict[str, dict[str, PreparedRootPlan]] = {
             worker_id: {} for worker_id in worker_ids
         }
-        worker_entry_counts: Counter = Counter()
         worker_root_counts: Counter = Counter()
-        root_entry_counts = {
-            registrable_domain: len(entries)
-            for registrable_domain, entries in planning_inputs.eligible_root_entries.items()
-        }
 
         def assign_root(worker_id: str, registrable_domain: str) -> None:
             for source_id, entry in self._ordered_entries_for_root(
@@ -221,25 +188,19 @@ class WorkerAssignmentPlanner:
             worker_root_plans[worker_id][registrable_domain] = (
                 planning_inputs.root_plans[registrable_domain]
             )
-            worker_entry_counts[worker_id] += root_entry_counts[registrable_domain]
             worker_root_counts[worker_id] += 1
             plan = planning_inputs.root_plans[registrable_domain]
             logger.debug(
-                "Batch preparation assigned root=%s status=%s worker=%s entry_count=%d",
+                "Batch preparation assigned root=%s status=%s worker=%s",
                 registrable_domain,
                 plan.status,
                 worker_id,
-                root_entry_counts[registrable_domain],
             )
 
-        for registrable_domain in sorted(
-            planning_inputs.root_plans,
-            key=lambda root: (-root_entry_counts[root], root),
-        ):
+        for registrable_domain in sorted(planning_inputs.root_plans):
             worker_id = min(
                 worker_ids,
                 key=lambda current_worker_id: (
-                    worker_entry_counts[current_worker_id],
                     worker_root_counts[current_worker_id],
                     current_worker_id,
                 ),
@@ -248,10 +209,9 @@ class WorkerAssignmentPlanner:
 
         self._log_summary(
             worker_ids=worker_ids,
-            worker_root_plans=worker_root_plans,
-            worker_entry_counts=worker_entry_counts,
+            worker_root_counts=worker_root_counts,
         )
-        return worker_source_entries, worker_root_plans, worker_entry_counts
+        return worker_source_entries, worker_root_plans, worker_root_counts
 
     def build_worker_manifests(
         self, request: WorkerManifestBuildRequest
@@ -259,8 +219,6 @@ class WorkerAssignmentPlanner:
         """Return the committed prepare-to-worker manifests for participating workers."""
         manifests: list[PreparedWorkerManifest] = []
         for worker_id in request.worker_ids:
-            if not request.worker_source_entries[worker_id]:
-                continue
             selected_runtime_source_id_values = set(
                 request.worker_source_entries[worker_id]
             )
@@ -286,8 +244,6 @@ class WorkerAssignmentPlanner:
                         prepared_metadata=self._prepared_runtime_metadata_from_assignment(
                             source_entries=request.worker_source_entries[worker_id],
                             root_plans=request.worker_root_plans[worker_id],
-                            source_jobs_by_id=request.source_jobs_by_id,
-                            manual_routing_by_host=request.manual_routing_by_host,
                         ),
                     ),
                 )
@@ -350,7 +306,6 @@ class WorkerAssignmentPlanner:
                 "sources": source_configs,
                 "output_spec": WorkerOutputSpec(
                     result_root=relative_path(worker_paths.result_root),
-                    filtered=relative_path(worker_paths.filtered),
                     unactionable=relative_path(worker_paths.unactionable),
                     review=relative_path(worker_paths.review),
                     terminal_rows=relative_path(worker_paths.terminal_rows),
@@ -365,15 +320,12 @@ class WorkerAssignmentPlanner:
         *,
         source_entries: dict[str, list[DomainEntry]],
         root_plans: dict[str, PreparedRootPlan],
-        source_jobs_by_id: dict[str, Any],
-        manual_routing_by_host: dict[str, PreparedManualRouting],
     ) -> PreparedRuntimeMetadata:
-        entries_by_root: dict[str, list[tuple[str, DomainEntry]]] = defaultdict(list)
-        source_order_by_id = self._source_order_by_id(source_jobs_by_id)
-        for source_id, entries in source_entries.items():
+        entries_by_root: dict[str, list[DomainEntry]] = defaultdict(list)
+        for entries in source_entries.values():
             for entry in entries:
                 if entry.registrable_domain is not None:
-                    entries_by_root[entry.registrable_domain].append((source_id, entry))
+                    entries_by_root[entry.registrable_domain].append(entry)
         missing_roots = sorted(set(entries_by_root) - set(root_plans))
         if missing_roots:
             raise ValueError(
@@ -402,33 +354,14 @@ class WorkerAssignmentPlanner:
         return PreparedRuntimeMetadata(
             delegation_roots={
                 registrable_domain: PreparedDelegationRootMetadata(
-                    delegation_config_source_id=(
-                        root_plans[registrable_domain].delegation_config_source_id
-                    ),
-                    delegation_behavior_fingerprint=(
-                        root_plans[registrable_domain].delegation_behavior_fingerprint
-                    ),
-                    host_entries=[
-                        PreparedHostManifestEntry(
-                            **prepared_entry_payload(
-                                source_id=source_id,
-                                entry=entry,
-                                source_jobs_by_id=source_jobs_by_id,
-                                manual_routing=manual_routing_by_host.get(
-                                    entry.host, PreparedManualRouting()
-                                ),
-                            )
-                        )
-                        for source_id, entry in sorted(
-                            entries,
-                            key=lambda current: (
-                                source_order_by_id[current[0]],
-                                current[1].host,
-                            ),
-                        )
-                    ],
+                    delegation_config_source_id=root_plans[
+                        registrable_domain
+                    ].delegation_config_source_id,
+                    delegation_behavior_fingerprint=root_plans[
+                        registrable_domain
+                    ].delegation_behavior_fingerprint,
                 )
-                for registrable_domain, entries in sorted(entries_by_root.items())
+                for registrable_domain in sorted(entries_by_root)
             },
         )
 
@@ -458,14 +391,12 @@ class WorkerAssignmentPlanner:
         self,
         *,
         worker_ids: list[str],
-        worker_root_plans: dict[str, dict[str, PreparedRootPlan]],
-        worker_entry_counts: Counter,
+        worker_root_counts: Counter,
     ) -> None:
         worker_summaries = [
             {
                 "worker_id": worker_id,
-                "entry_count": worker_entry_counts[worker_id],
-                "delegation_root_count": len(worker_root_plans[worker_id]),
+                "delegation_root_count": worker_root_counts[worker_id],
             }
             for worker_id in worker_ids
         ]

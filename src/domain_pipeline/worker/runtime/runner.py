@@ -108,7 +108,7 @@ class WorkerBatchRunner:
             )
             log.exception("Worker %s manifest validation failed", request.worker_id)
             return {
-                "automation_format_version": 2,
+                "automation_format_version": 3,
                 "batch_id": request.batch_id,
                 "worker_id": request.worker_id,
                 "participates": True,
@@ -119,7 +119,7 @@ class WorkerBatchRunner:
             }
         if prepare_manifest is None:
             return {
-                "automation_format_version": 2,
+                "automation_format_version": 3,
                 "batch_id": request.batch_id,
                 "worker_id": request.worker_id,
                 "participates": False,
@@ -155,7 +155,7 @@ class WorkerBatchRunner:
             log_path=log_path,
         )
         return {
-            "automation_format_version": 2,
+            "automation_format_version": 3,
             "batch_id": request.batch_id,
             "worker_id": request.worker_id,
             "participates": True,
@@ -245,7 +245,7 @@ class WorkerBatchRunner:
     ) -> None:
         """Remove stale worker-local sidecars while keeping the handoff stub."""
         cleanup_paths = [
-            worker_paths["filtered"].parent.parent,
+            worker_paths["review"].parent.parent,
             worker_paths["terminal_rows"].parent,
             worker_paths["cache"].parent,
         ]

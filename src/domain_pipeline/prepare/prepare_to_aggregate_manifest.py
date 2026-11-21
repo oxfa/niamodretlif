@@ -45,6 +45,13 @@ class FilteredOutputSpec(PrepareAggregateModel):
         return _validate_publish_path(value, field_name="filtered[].path")
 
 
+class ManuallyAddedDomain(PrepareAggregateModel):
+    """Unmatched manual host emitted separately from configured source records."""
+
+    host: str
+    registrable_domain: str | None
+
+
 class AggregateOutputSpec(PrepareAggregateModel):
     """Repo-relative aggregate output/cache/log paths."""
 
@@ -87,9 +94,9 @@ class PrepareAggregateManifest(PrepareAggregateModel):
     batch_id: str
     aggregate_output_spec: AggregateOutputSpec
     worker_ids: list[str]
+    manually_added_domains: list[ManuallyAddedDomain]
     preparation_review_output_rows: list[dict[str, str]]
     preparation_terminal_rows: list[dict[str, Any]]
-    preparation_filtered_output_values: list[str] = Field(default_factory=list)
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved aggregate-managed paths for this batch."""

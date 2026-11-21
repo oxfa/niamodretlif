@@ -4,7 +4,6 @@ from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantErr
 from domain_pipeline.worker.output.manager import (
     audit_output_path_for_source,
     csv_row_signature,
-    filtered_output_path_for_source,
     output_paths_for_source,
     review_basename_for_source,
     review_output_path_for_source,
@@ -35,7 +34,6 @@ __all__ = [
     "WriterResult",
     "audit_output_path_for_source",
     "csv_row_signature",
-    "filtered_output_path_for_source",
     "output_paths_for_source",
     "review_basename_for_source",
     "review_output_path_for_source",

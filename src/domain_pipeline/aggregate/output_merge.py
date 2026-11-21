@@ -12,6 +12,14 @@ from domain_pipeline.worker.output.manager import (
 )
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS, ReviewOutputRow
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
+    ManuallyAddedDomain,
+)
+from domain_pipeline.prepare.source_line_index import SourceLineIndex
+from domain_pipeline.prepare.sources.parser import (
+    DomainListParser,
+    InputFileFormat,
+)
 
 
 class AggregateOutputMerger:
@@ -43,14 +51,17 @@ class AggregateOutputMerger:
                 ordered_hosts.append(host)
         return sorted(ordered_hosts)
 
-    def write_filtered_host_values(
+    def write_filtered_source_content(
         self,
-        hosts: Iterable[str],
+        source_contents: list[str],
+        source_line_index: SourceLineIndex,
+        unactionable_registrable_domains: Iterable[str],
+        manually_added_domains: Iterable[ManuallyAddedDomain],
         target_path: Path,
         *,
         output_format: str,
     ) -> None:
-        """Write already-merged filtered hosts using one configured line format."""
+        """Render retained sources and actionable manual additions in one format."""
         formatters = {
             "plain": lambda host: host,
             "hosts": lambda host: f"0.0.0.0 {host}",
@@ -63,11 +74,88 @@ class AggregateOutputMerger:
                 f"unsupported filtered output format {output_format!r}"
             ) from exc
 
+        if len(source_contents) != len(source_line_index.source_formats):
+            raise ValueError(
+                "source archive count does not match source line index formats"
+            )
+
+        unactionable = set(unactionable_registrable_domains)
+        roots_by_source_line: dict[tuple[int, int], set[str]] = {}
+        for root, references in source_line_index.registrable_domain_lines.items():
+            for reference in references:
+                roots_by_source_line.setdefault(
+                    (reference.source_ordinal, reference.line_number), set()
+                ).add(root)
+
+        source_lines = [
+            content.splitlines(keepends=True) for content in source_contents
+        ]
+        for source_ordinal, line_number in roots_by_source_line:
+            if source_ordinal >= len(source_lines) or line_number > len(
+                source_lines[source_ordinal]
+            ):
+                raise ValueError(
+                    "source line index references a missing archived source line "
+                    f"{source_ordinal}:{line_number}"
+                )
+
+        parser = DomainListParser()
+        rendered_lines: list[str] = []
+        for source_ordinal, (lines, source_format) in enumerate(
+            zip(source_lines, source_line_index.source_formats, strict=True)
+        ):
+            try:
+                input_format = InputFileFormat(source_format)
+            except ValueError as exc:
+                raise ValueError(
+                    f"source line index has unsupported format {source_format!r}"
+                ) from exc
+            for line_number, line in enumerate(lines, start=1):
+                entries = parser.parse_source_line_entries(
+                    line, file_format=input_format
+                )
+                indexed_roots = roots_by_source_line.get(
+                    (source_ordinal, line_number), set()
+                )
+                parsed_roots = {
+                    entry.registrable_domain
+                    for entry in entries
+                    if entry.registrable_domain is not None
+                }
+                if indexed_roots != parsed_roots:
+                    raise ValueError(
+                        "source line index does not match archived source line "
+                        f"{source_ordinal}:{line_number}"
+                    )
+
+                excluded_roots = indexed_roots & unactionable
+                retained_entries = [
+                    entry
+                    for entry in entries
+                    if entry.registrable_domain not in excluded_roots
+                ]
+                if output_format == "adblock" and input_format is InputFileFormat.ADBLOCK:
+                    if entries and not retained_entries:
+                        continue
+                    rendered_lines.append(
+                        line if line.endswith(("\n", "\r")) else f"{line}\n"
+                    )
+                    continue
+                rendered_lines.extend(
+                    f"{format_host(entry.host)}\n"
+                    for entry in retained_entries
+                )
+
+        for manual_domain in sorted(manually_added_domains, key=lambda item: item.host):
+            if (
+                manual_domain.registrable_domain is not None
+                and manual_domain.registrable_domain in unactionable
+            ):
+                continue
+            rendered_lines.append(f"{format_host(manual_domain.host)}\n")
+
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(
-            "".join(f"{format_host(host)}\n" for host in sorted(set(hosts))),
-            encoding="utf-8",
-        )
+        target_path.write_text("".join(rendered_lines), encoding="utf-8")
 
     def merge_host_value_payloads(
         self,

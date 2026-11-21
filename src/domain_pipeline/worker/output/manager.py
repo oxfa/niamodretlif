@@ -38,16 +38,6 @@ def review_output_path_for_source(source_context: WorkerSourceContext) -> Path:
     return output_dir / "review" / review_name
 
 
-def filtered_output_path_for_source(source_context: WorkerSourceContext) -> Path:
-    """Return the filtered-output text path for one worker source context."""
-    output_dir = Path(source_context.config["output"].get("directory", "."))
-    return (
-        output_dir
-        / "filtered"
-        / f"{source_context.output_stem}.{TEXT_OUTPUT_EXTENSION}"
-    )
-
-
 def unactionable_output_path_for_source(source_context: WorkerSourceContext) -> Path:
     """Return the unactionable-output text path for one worker source context."""
     output_dir = Path(source_context.config["output"].get("directory", "."))
@@ -124,7 +114,6 @@ def txt_output_value(row: dict[str, Any]) -> str:
 def output_paths_for_source(source_context: WorkerSourceContext) -> dict[str, Path]:
     """Return concrete output paths for one worker source context."""
     return {
-        "filtered": filtered_output_path_for_source(source_context),
         "unactionable": unactionable_output_path_for_source(source_context),
         "audit": audit_output_path_for_source(source_context),
     }

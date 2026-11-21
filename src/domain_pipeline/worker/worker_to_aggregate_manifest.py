@@ -35,8 +35,7 @@ class WorkerAggregateManifest(WorkerAggregateModel):
     batch_id: str
     worker_id: str
     handoff_finalized: bool
-    filtered_output_values: list[str]
-    unactionable_output_values: list[str]
+    unactionable_registrable_domains: list[str]
     review_output_rows: list[dict[str, str]]
     terminal_rows: list[dict[str, Any]]
     log_text: str
@@ -56,8 +55,7 @@ class WorkerAggregateManifest(WorkerAggregateModel):
             batch_id=manifest.batch_id,
             worker_id=manifest.worker_id,
             handoff_finalized=False,
-            filtered_output_values=[],
-            unactionable_output_values=[],
+            unactionable_registrable_domains=[],
             review_output_rows=[],
             terminal_rows=[],
             log_text="",
@@ -82,8 +80,9 @@ class WorkerAggregateManifest(WorkerAggregateModel):
             batch_id=manifest.batch_id,
             worker_id=manifest.worker_id,
             handoff_finalized=True,
-            filtered_output_values=_read_text_values(resolved["filtered"]),
-            unactionable_output_values=_read_text_values(resolved["unactionable"]),
+            unactionable_registrable_domains=_read_text_values(
+                resolved["unactionable"]
+            ),
             review_output_rows=_read_review_rows(resolved["review"]),
             terminal_rows=_read_jsonl_rows(resolved["terminal_rows"]),
             log_text=_read_optional_text(manifest.resolve_log_path(state_root)),
@@ -264,7 +263,7 @@ def finalize_worker_aggregate_handoff(
     )
     if failure_reason:
         return {
-            "automation_format_version": 2,
+            "automation_format_version": 3,
             "batch_id": batch_id,
             "worker_id": worker_id,
             "participates": True,
@@ -273,7 +272,7 @@ def finalize_worker_aggregate_handoff(
         }
     if prepare_manifest is None:
         return {
-            "automation_format_version": 2,
+            "automation_format_version": 3,
             "batch_id": batch_id,
             "worker_id": worker_id,
             "participates": False,

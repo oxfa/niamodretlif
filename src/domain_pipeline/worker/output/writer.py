@@ -47,14 +47,13 @@ class WriterResult:
     output_paths: list[Path]
 
 
-GroupKey = tuple[Path, Path, Path, Path]
+GroupKey = tuple[Path, Path, Path]
 
 
 @dataclass
 class OutputGroupRows:
     """Buffered output rows accepted for one output-path group."""
 
-    filtered: list[dict[str, Any]]
     unactionable: list[dict[str, Any]]
     audit: list[dict[str, Any]]
     review: list[dict[str, Any]]
@@ -82,7 +81,6 @@ class OutputGroupBuffer:
 class OutputGroupWriteRequest:
     """Concrete output targets and buffered rows for one output group write."""
 
-    filtered_path: Path
     unactionable_path: Path
     audit_path: Path
     review_path: Path
@@ -105,7 +103,6 @@ class ResultOutputWriter:
         """Return the buffered output group for one worker source context."""
         output_paths = output_paths_for_source(source_context)
         group_key = (
-            output_paths["filtered"],
             output_paths["unactionable"],
             output_paths["audit"],
             review_output_path_for_source(source_context),
@@ -113,24 +110,22 @@ class ResultOutputWriter:
         group = self.groups.get(group_key)
         if group is None:
             logger.debug(
-                "Creating writer output group for source=%s filtered=%s unactionable=%s audit=%s "
+                "Creating writer output group for source=%s unactionable=%s audit=%s "
                 "review=%s",
                 source_context.source_id,
                 group_key[0],
                 group_key[1],
                 group_key[2],
-                group_key[3],
             )
             group = OutputGroupBuffer(
                 source_context=source_context,
                 rows=OutputGroupRows(
-                    filtered=[],
                     unactionable=[],
                     audit=[],
                     review=[],
                 ),
                 seen=OutputGroupSeen(
-                    text_outputs={"filtered": set(), "unactionable": set()},
+                    text_outputs={"unactionable": set()},
                     audit_rows=set(),
                     review_rows=set(),
                 ),
@@ -173,12 +168,6 @@ class ResultOutputWriter:
                 group.seen.text_outputs["unactionable"].add(output_value)
                 self.counts["emitted_unactionable_txt_values"] += 1
                 group.rows.unactionable.append(result.row)
-        elif result.route == "filtered":
-            output_value = txt_output_value(result.row)
-            if output_value not in group.seen.text_outputs["filtered"]:
-                group.seen.text_outputs["filtered"].add(output_value)
-                self.counts["emitted_filtered_txt_values"] += 1
-                group.rows.filtered.append(result.row)
         elif result.route == "review":
             self._queue_review_row(group=group, row=result.row)
 
@@ -198,22 +187,12 @@ class ResultOutputWriter:
 
     def _write_group_files(self, request: OutputGroupWriteRequest) -> None:
         """Write one buffered group to explicit target paths."""
-        filtered_path = request.filtered_path
         unactionable_path = request.unactionable_path
         audit_path = request.audit_path
         review_path = request.review_path
         group = request.group
-        filtered_path.parent.mkdir(parents=True, exist_ok=True)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with (
-            filtered_path.open("w", encoding="utf-8", newline="") as filtered_handle,
-            audit_path.open("w", encoding="utf-8", newline="") as audit_handle,
-        ):
-            for row in sorted(
-                group.rows.filtered,
-                key=lambda current: (txt_output_value(current), current["host"]),
-            ):
-                filtered_handle.write(f"{txt_output_value(row)}\n")
+        with audit_path.open("w", encoding="utf-8", newline="") as audit_handle:
             for row in sorted(group.rows.audit, key=lambda current: current["host"]):
                 json.dump(row, audit_handle)
                 audit_handle.write("\n")
@@ -242,23 +221,20 @@ class ResultOutputWriter:
     def write(self) -> WriterResult:
         """Write collected results to their worker-local output sidecar files."""
         for (
-            filtered_path,
             unactionable_path,
             audit_path,
             review_path,
         ), group in self.groups.items():
             logger.debug(
-                "Writing output group for source=%s filtered_rows=%d unactionable_rows=%d "
-                "audit_rows=%d review_rows=%d",
+                "Writing output group for source=%s unactionable_rows=%d audit_rows=%d "
+                "review_rows=%d",
                 group.source_context.source_id,
-                len(group.rows.filtered),
                 len(group.rows.unactionable),
                 len(group.rows.audit),
                 len(group.rows.review),
             )
             self._write_group_files(
                 OutputGroupWriteRequest(
-                    filtered_path=filtered_path,
                     unactionable_path=unactionable_path,
                     audit_path=audit_path,
                     review_path=review_path,

@@ -112,14 +112,35 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p .tmp/prepared_batch/.workflow_state/batches
-          cp -R \
-            ".workflow_state/batches/${{ steps.batch.outputs.batch_id }}" \
-            .tmp/prepared_batch/.workflow_state/batches/
+          batch_root=".workflow_state/batches/${{ steps.batch.outputs.batch_id }}"
+          artifact_batch_root=".tmp/prepared_batch/.workflow_state/batches/${{ steps.batch.outputs.batch_id }}"
+          mkdir -p "${artifact_batch_root}/source_inputs"
+          cp \
+            "${batch_root}/prepare-aggregate-manifest.json" \
+            "${artifact_batch_root}/prepare-aggregate-manifest.json"
+          cp "${batch_root}/source-line-index.json" "${artifact_batch_root}/source-line-index.json"
+          cp -R "${batch_root}/source_inputs/." "${artifact_batch_root}/source_inputs/"
       - name: Upload prepared batch artifact
         uses: actions/upload-artifact@v7
         with:
           name: workflow-internal-prepared-batch
           path: .tmp/prepared_batch
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Stage worker manifests artifact
+        run: |
+          set -eo pipefail
+          batch_id="${{ steps.batch.outputs.batch_id }}"
+          artifact_batch_root=".tmp/prepared_worker_manifests/.workflow_state/batches/${batch_id}"
+          mkdir -p "${artifact_batch_root}/workers"
+          cp -R \
+            ".workflow_state/batches/${batch_id}/workers/." \
+            "${artifact_batch_root}/workers/"
+      - name: Upload worker manifests artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: workflow-internal-worker-manifests
+          path: .tmp/prepared_worker_manifests
           include-hidden-files: true
           if-no-files-found: error
       - name: Stage prepared batch debug artifact
@@ -136,10 +157,46 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  prepare_worker_inputs:
+    name: Package worker input
+    needs:
+      - prepare_run
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_id: ${{ fromJSON(needs.prepare_run.outputs.worker_ids_json) }}
+    steps:
+      - name: Download prepared batch
+        uses: actions/download-artifact@v8
+        with:
+          name: workflow-internal-worker-manifests
+          path: .tmp/prepared_worker_manifests
+      - name: Stage worker input artifact
+        run: |
+          set -eo pipefail
+          batch_id="${{ needs.prepare_run.outputs.batch_id }}"
+          worker_id="${{ matrix.worker_id }}"
+          worker_manifest=".tmp/prepared_worker_manifests/.workflow_state/batches/${batch_id}/workers/${worker_id}/prepare-worker-manifest.json"
+          artifact_root=".tmp/worker-input-${worker_id}"
+          mkdir -p "${artifact_root}/.workflow_state/batches/${batch_id}/workers/${worker_id}"
+          cp "${worker_manifest}" \
+            "${artifact_root}/.workflow_state/batches/${batch_id}/workers/${worker_id}/prepare-worker-manifest.json"
+      - name: Upload worker input artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: workflow-internal-worker-input-${{ matrix.worker_id }}
+          path: .tmp/worker-input-${{ matrix.worker_id }}
+          include-hidden-files: true
+          if-no-files-found: error
+
   run_workers:
     name: Run workers
     needs:
       - prepare_run
+      - prepare_worker_inputs
     runs-on: ubuntu-latest
     timeout-minutes: 355
     permissions:
@@ -251,23 +308,22 @@ jobs:
             --wal-path .workflow_state/runtime/cache/check-cache.sqlite3-wal \
             --shm-path .workflow_state/runtime/cache/check-cache.sqlite3-shm \
             | tee -a "${worker_cache_log_path}"
-      - name: Download prepared batch artifact
+      - name: Download worker input artifact
         uses: actions/download-artifact@v8
         with:
-          name: workflow-internal-prepared-batch
-          path: .tmp/prepared_batch
-      - name: Restore prepared batch state
+          name: workflow-internal-worker-input-${{ matrix.worker_id }}
+          path: .tmp/worker_input
+      - name: Restore worker input state
         run: |
           set -eo pipefail
           mkdir -p .workflow_state
-          cp -R .tmp/prepared_batch/.workflow_state/. .workflow_state/
+          cp -R .tmp/worker_input/.workflow_state/. .workflow_state/
       - name: Initialize worker statuses
         id: init
         run: |
           set -eo pipefail
-          # Preparation may produce zero participating worker manifests when every
-          # host is removed by manually_excluded_from_sources or becomes a
-          # preparation-owned terminal row, such as public-suffix inputs.
+          # Empty root assignments still have a worker manifest and complete
+          # the same status and aggregate handoff lifecycle.
           ./src/pipeline_run.py initialize-worker-statuses \
             --source-root . \
             --state-root . \

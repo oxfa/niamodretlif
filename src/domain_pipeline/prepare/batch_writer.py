@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
+    ManuallyAddedDomain,
     PrepareAggregateManifest,
 )
 from domain_pipeline.prepare.assignment import (
@@ -22,9 +24,17 @@ from domain_pipeline.prepare.assignment import (
     relative_path,
 )
 from domain_pipeline.prepare.models import PreparedInputSet
-from domain_pipeline.prepare.sources.parser import DomainEntry
+from domain_pipeline.prepare.source_line_index import (
+    SourceLineIndex,
+    SourceLineReference,
+    write_source_line_index,
+)
+from domain_pipeline.prepare.sources.parser import (
+    DomainEntry,
+    DomainListParser,
+    InputFileFormat,
+)
 from domain_pipeline.prepare.planner import PreparationPlanner
-from domain_pipeline.worker.output.manager import txt_output_value
 from domain_pipeline.worker.output.rows import ReviewRowProjector
 
 
@@ -36,9 +46,11 @@ class PreparedBatch:
     config_name: str
     prepare_aggregate_manifest: PrepareAggregateManifest
     worker_manifests: list[PreparedWorkerManifest]
-    preparation_filtered_output_values: list[str]
     preparation_review_rows: list[dict[str, Any]]
     preparation_terminal_rows: list[dict[str, Any]]
+    source_input_contents: list[str]
+    source_line_index: SourceLineIndex
+    manually_added_domains: list[ManuallyAddedDomain]
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,11 @@ class PreparedBatchWriter:
     ) -> PreparedBatch:
         """Build a batch from already-prepared input metadata."""
         config_name = str(prepared_inputs.config["config_name"])
+        (
+            source_input_contents,
+            source_line_index,
+            manually_added_domains,
+        ) = self._prepare_source_archive(prepared_inputs)
         planning_inputs = self.assignment_planner.planning_inputs_from_prepared(
             prepared_inputs
         )
@@ -95,6 +112,10 @@ class PreparedBatchWriter:
             prepared_inputs=prepared_inputs,
             worker_ids=worker_ids,
             batch_id=batch_id,
+            input_record_count=sum(
+                len(content.splitlines()) for content in source_input_contents
+            )
+            + len(manually_added_domains),
         )
 
         matched_manual_hosts = {
@@ -117,11 +138,6 @@ class PreparedBatchWriter:
             for row in prepared_inputs.preparation_terminal_rows
             if row["host"] not in matched_manual_hosts
         ]
-        preparation_filtered_output_values = sorted(
-            txt_output_value(row)
-            for row in preparation_terminal_rows
-            if row.get("route") == "filtered"
-        )
         review_row_projector = ReviewRowProjector()
         return PreparedBatch(
             batch_id=batch_id,
@@ -136,7 +152,7 @@ class PreparedBatchWriter:
                     manifest.worker_id
                     for manifest in assignment_artifacts.worker_manifests
                 ],
-                preparation_filtered_output_values=preparation_filtered_output_values,
+                manually_added_domains=manually_added_domains,
                 preparation_review_output_rows=[
                     cast(dict[str, str], dict(review_row_projector.project(row)))
                     for row in preparation_review_rows
@@ -146,9 +162,94 @@ class PreparedBatchWriter:
                 ],
             ),
             worker_manifests=assignment_artifacts.worker_manifests,
-            preparation_filtered_output_values=preparation_filtered_output_values,
             preparation_review_rows=preparation_review_rows,
             preparation_terminal_rows=preparation_terminal_rows,
+            source_input_contents=source_input_contents,
+            source_line_index=source_line_index,
+            manually_added_domains=manually_added_domains,
+        )
+
+    def _prepare_source_archive(
+        self, prepared_inputs: PreparedInputSet
+    ) -> tuple[list[str], SourceLineIndex, list[ManuallyAddedDomain]]:
+        """Archive configured sources and return unmatched manual domains separately."""
+        parser = DomainListParser()
+        contents: list[str] = []
+        source_formats: list[str] = []
+        references_by_domain: dict[str, list[SourceLineReference]] = {}
+        for source_ordinal, source_job in enumerate(
+            prepared_inputs.source_jobs_by_id.values()
+        ):
+            configured_format = source_job.config.get("input", {}).get(
+                "format", "auto"
+            )
+            forced_format = (
+                None if configured_format == "auto" else configured_format
+            )
+            file_format, prepared_lines = parser.prepare_source_lines(
+                source_job.lines,
+                source_name=source_job.input_label,
+                forced_format=forced_format,
+            )
+            source_formats.append(file_format.value)
+            retained_lines: list[str] = []
+            for prepared_line in prepared_lines:
+                retained_lines.append(prepared_line.content)
+                line_number = len(retained_lines)
+                for registrable_domain in sorted(
+                    {
+                        entry.registrable_domain
+                        for entry in prepared_line.entries
+                        if entry.registrable_domain
+                    }
+                ):
+                    references_by_domain.setdefault(
+                        str(registrable_domain), []
+                    ).append(
+                        SourceLineReference(
+                            source_ordinal=source_ordinal,
+                            line_number=line_number,
+                        )
+                    )
+            contents.append("".join(retained_lines))
+
+        source_hosts = {
+            entry.host
+            for content, source_format in zip(contents, source_formats, strict=True)
+            for line in content.splitlines(keepends=True)
+            for entry in parser.parse_source_line_entries(
+                line, file_format=InputFileFormat(source_format)
+            )
+        }
+        manually_added_entries = {
+            entry.host: entry
+            for entries in prepared_inputs.entries_by_source.values()
+            for entry in entries
+            if (
+                prepared_inputs.manual_routing_by_host.get(entry.host)
+                and prepared_inputs.manual_routing_by_host[entry.host].manually_added
+                and entry.host not in source_hosts
+            )
+        }
+        manually_added_hosts = sorted(manually_added_entries)
+        return (
+            contents,
+            SourceLineIndex(
+                source_formats=tuple(source_formats),
+                registrable_domain_lines={
+                    domain: tuple(references)
+                    for domain, references in references_by_domain.items()
+                },
+            ),
+            [
+                ManuallyAddedDomain(
+                    host=host,
+                    registrable_domain=manually_added_entries[
+                        host
+                    ].registrable_domain,
+                )
+                for host in manually_added_hosts
+            ],
         )
 
     def _build_worker_assignment_artifacts(
@@ -158,26 +259,21 @@ class PreparedBatchWriter:
         prepared_inputs: PreparedInputSet,
         worker_ids: list[str],
         batch_id: str,
+        input_record_count: int,
     ) -> _WorkerAssignmentArtifacts:
         total_work_units = len(planning_inputs.root_plans)
         if (
             total_work_units < 1
             and not prepared_inputs.preparation_terminal_rows
-            and prepared_inputs.parsed_source_entry_count < 1
+            and input_record_count < 1
         ):
             raise ValueError("config produced no input lines to process")
-        participating_worker_ids = worker_ids[: min(len(worker_ids), total_work_units)]
-        if total_work_units > 0 and not participating_worker_ids:
+        if total_work_units > 0 and not worker_ids:
             raise ValueError("at least one worker_id is required to prepare a batch")
-        if not participating_worker_ids:
-            return _WorkerAssignmentArtifacts(
-                worker_source_entries={},
-                worker_manifests=[],
-            )
-        worker_source_entries, worker_root_plans, _worker_entry_counts = (
+        worker_source_entries, worker_root_plans, _ = (
             self.assignment_planner.assign(
                 planning_inputs=planning_inputs,
-                worker_ids=participating_worker_ids,
+                worker_ids=worker_ids,
             )
         )
         return _WorkerAssignmentArtifacts(
@@ -186,11 +282,10 @@ class PreparedBatchWriter:
                 WorkerManifestBuildRequest(
                     config=prepared_inputs.config,
                     batch_id=batch_id,
-                    worker_ids=participating_worker_ids,
+                    worker_ids=worker_ids,
                     worker_source_entries=worker_source_entries,
                     worker_root_plans=worker_root_plans,
                     source_jobs_by_id=prepared_inputs.source_jobs_by_id,
-                    manual_routing_by_host=prepared_inputs.manual_routing_by_host,
                 )
             ),
         )
@@ -206,6 +301,25 @@ class PreparedBatchWriter:
             prepared.prepare_aggregate_manifest.model_dump(mode="json"),
         )
         committed_paths.append(relative_path(aggregate_manifest_path))
+        source_input_root = PathLayout(Path(".")).workflow.batch_source_inputs_root(
+            batch_id=prepared.batch_id
+        )
+        for source_ordinal, content in enumerate(prepared.source_input_contents):
+            source_path_relative = (
+                source_input_root / f"source-{source_ordinal:04d}.txt"
+            )
+            source_path = state_root / source_path_relative
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(content, encoding="utf-8")
+            committed_paths.append(relative_path(source_path_relative))
+        source_index_relative = PathLayout(Path(".")).workflow.batch_source_line_index_path(
+            batch_id=prepared.batch_id
+        )
+        write_source_line_index(
+            prepared.source_line_index,
+            state_root / source_index_relative,
+        )
+        committed_paths.append(relative_path(source_index_relative))
         for worker_manifest in prepared.worker_manifests:
             manifest_path = prepare_worker_manifest_relative_path(
                 batch_id=prepared.batch_id,

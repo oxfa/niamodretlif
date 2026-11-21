@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -33,7 +32,6 @@ from domain_pipeline.routing import (
     ManualRoutingPolicy,
     TerminalRouteTransition,
 )
-from domain_pipeline.worker.host_resolution.lookup import host_resolution_dns_profile
 from domain_pipeline.worker.output.rows import (
     BaseRowRequest,
     BaseRowSourceRequest,
@@ -92,26 +90,6 @@ class ManualRowRequest:
     route_transition: TerminalRouteTransition
     source_id: str
     input_label: str
-
-
-@dataclasses.dataclass
-class ManualRoutingState:
-    """Manual-routing validation state shared while source rows are collected."""
-
-    manual_inputs: ManualInputSet
-    host_fingerprints: dict[str, str] = dataclasses.field(default_factory=dict)
-    manually_added_fingerprints_by_host: dict[str, str] = dataclasses.field(
-        default_factory=dict
-    )
-
-
-@dataclasses.dataclass(frozen=True)
-class HostBehaviorRequest:
-    """Inputs needed to validate one prepared host behavior fingerprint."""
-
-    host: str
-    job: SourceJob
-    routing: ManualRoutingState
 
 
 def _resolve_from_root(source_root: Path, path: Path) -> Path:
@@ -267,7 +245,6 @@ class PreparationPlanner:
         )
 
     def _collect_configured_source_entries(self, state: PreparationState) -> None:
-        routing = ManualRoutingState(manual_inputs=state.manual_inputs)
         excluded_hosts = set(state.manual_inputs.manually_excluded_from_sources_entries)
         for job in state.jobs:
             configured_format = job.config.get("input", {}).get("format", "auto")
@@ -282,9 +259,6 @@ class PreparationPlanner:
                 state.collections.matched_hosts.add(host)
                 if host in excluded_hosts:
                     continue
-                self._validate_host_behavior_fingerprint(
-                    HostBehaviorRequest(host=host, job=job, routing=routing)
-                )
                 manual_routing = PreparedManualRouting(
                     manually_selected_for_filtered=(
                         host
@@ -298,33 +272,9 @@ class PreparationPlanner:
                 if manual_routing.manually_selected_for_filtered:
                     state.collections.manual_routing_by_host[host] = manual_routing
 
-    def _validate_host_behavior_fingerprint(self, request: HostBehaviorRequest) -> None:
-        if request.host in request.routing.manual_inputs.manually_added_entries:
-            fingerprint = self._manually_added_behavior_fingerprint(request.job.config)
-            previous = request.routing.manually_added_fingerprints_by_host.get(
-                request.host
-            )
-            if previous is not None and previous != fingerprint:
-                raise ValueError(
-                    f"manually added host {request.host!r} appears in multiple enabled "
-                    "sources with different dns_query/delegation behavior"
-                )
-            request.routing.manually_added_fingerprints_by_host[request.host] = (
-                fingerprint
-            )
-            return
-
-        fingerprint = self._source_behavior_fingerprint(request.job.config)
-        previous = request.routing.host_fingerprints.get(request.host)
-        if previous is not None and previous != fingerprint:
-            raise ValueError(
-                f"duplicate host {request.host!r} has conflicting dns/stage behavior"
-            )
-        request.routing.host_fingerprints[request.host] = fingerprint
-
     def _merge_manually_added_entries(self, state: PreparationState) -> None:
         manually_added_config_fingerprints = {
-            self._manually_added_behavior_fingerprint(job.config) for job in state.jobs
+            delegation_behavior_fingerprint(job.config) for job in state.jobs
         }
         manually_added_label = _source_relative_label(
             self.source_root,
@@ -510,44 +460,3 @@ class PreparationPlanner:
                 ],
             )
         return root_plans
-
-    def _stage_dns_config(self, source_config: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **dict(source_config["dns_query"]),
-            "delegation": dict(source_config["delegation"]),
-            "host_resolution": dict(source_config["host_resolution"]),
-        }
-
-    def _canonical_delegation_behavior(
-        self, source_config: dict[str, Any]
-    ) -> dict[str, Any]:
-        return json.loads(delegation_behavior_fingerprint(source_config))
-
-    def _canonical_host_resolution_behavior(
-        self, source_config: dict[str, Any]
-    ) -> dict[str, Any]:
-        dns_config = self._stage_dns_config(source_config)
-        host_resolution_config = dict(source_config["host_resolution"])
-        return {
-            **host_resolution_dns_profile(dns_config),
-            "enabled": host_resolution_config["enabled"],
-            "retry_attempts": host_resolution_config["retry_attempts"],
-        }
-
-    def _source_behavior_fingerprint(self, source_config: dict[str, Any]) -> str:
-        payload = {
-            "dns_query": source_config["dns_query"],
-            "delegation": self._canonical_delegation_behavior(source_config),
-            "host_resolution": self._canonical_host_resolution_behavior(source_config),
-            "ip_location": source_config["ip_location"],
-        }
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-    def _manually_added_behavior_fingerprint(
-        self, source_config: dict[str, Any]
-    ) -> str:
-        payload = {
-            "dns_query": source_config["dns_query"],
-            "delegation": self._canonical_delegation_behavior(source_config),
-        }
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"))

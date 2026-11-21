@@ -11,21 +11,9 @@ from domain_pipeline.worker.runtime.contracts import (
     DelegationRootWorkItem,
     ParsedHostItem,
     RuntimeItemPosition,
-    RuntimeManualRouting,
     RuntimeOutputSource,
     WorkerSourceContext,
 )
-
-
-def _entry_from_payload(
-    *,
-    registrable_domain: str,
-    payload: dict[str, Any],
-) -> DomainEntry:
-    return DomainEntry(
-        host=str(payload["host"]),
-        registrable_domain=registrable_domain,
-    )
 
 
 def _source_context_from_config(
@@ -72,52 +60,41 @@ class RuntimeItemLoader:
     def _prepared_roots(self) -> dict[str, Any]:
         """Return root-owned prepared metadata for worker runtime mode."""
         roots = self._prepared_payload().get("delegation_roots")
-        if not isinstance(roots, dict) or not roots:
-            raise ValueError("prepared metadata delegation_roots must not be empty")
+        if not isinstance(roots, dict):
+            raise ValueError("prepared metadata delegation_roots must be an object")
         return roots
 
     def _prepared_item_payloads(
         self,
-    ) -> list[tuple[WorkerSourceContext, DomainEntry, dict[str, Any]]]:
-        """Flatten root-owned prepared host entries into worker-local item payloads."""
+    ) -> list[tuple[WorkerSourceContext, DomainEntry]]:
+        """Create one worker item for each assigned registrable domain."""
         source_contexts = {
             source_context.source_id: source_context
             for source_context in self.source_contexts()
         }
-        item_payloads: list[tuple[WorkerSourceContext, DomainEntry, dict[str, Any]]] = (
-            []
-        )
+        item_payloads: list[tuple[WorkerSourceContext, DomainEntry]] = []
         for registrable_domain, root_payload in self._prepared_roots().items():
             if not isinstance(root_payload, dict):
                 raise ValueError(
                     "prepared metadata delegation root "
                     f"{registrable_domain!r} must be an object"
                 )
-            entries = root_payload.get("host_entries")
-            if not isinstance(entries, list) or not entries:
+            source_id = str(root_payload["delegation_config_source_id"])
+            source_context = source_contexts.get(source_id)
+            if source_context is None:
                 raise ValueError(
-                    "prepared metadata delegation root "
-                    f"{registrable_domain!r} host_entries must not be empty"
+                    "delegation root "
+                    f"{registrable_domain!r} references unknown source {source_id!r}"
                 )
-            for item in entries:
-                if not isinstance(item, dict):
-                    raise ValueError(
-                        "prepared metadata delegation root "
-                        f"{registrable_domain!r} host entry must be an object"
-                    )
-                source_id = str(item["runtime_source_id"])
-                source_context = source_contexts.get(source_id)
-                if source_context is None:
-                    raise ValueError(
-                        "prepared host entry "
-                        f"{item.get('host', '')!r} references unknown source "
-                        f"{source_id!r}"
-                    )
-                entry = _entry_from_payload(
-                    registrable_domain=str(registrable_domain),
-                    payload=item,
+            item_payloads.append(
+                (
+                    source_context,
+                    DomainEntry(
+                        host=str(registrable_domain),
+                        registrable_domain=str(registrable_domain),
+                    ),
                 )
-                item_payloads.append((source_context, entry, item))
+            )
         return item_payloads
 
     def runtime_items(self) -> list[ParsedHostItem]:
@@ -130,19 +107,11 @@ class RuntimeItemLoader:
                 entry=entry,
                 position=RuntimeItemPosition(sequence=index, total=total),
                 output_source=RuntimeOutputSource(
-                    source_id=str(manifest_entry["source_id"]),
-                    input_label=str(manifest_entry["source_input_label"]),
-                ),
-                manual_routing=RuntimeManualRouting(
-                    manually_selected_for_filtered=bool(
-                        manifest_entry["manually_selected_for_filtered"]
-                    ),
-                    manually_added=bool(manifest_entry["manually_added"]),
+                    source_id=source_context.source_id,
+                    input_label=source_context.input_label,
                 ),
             )
-            for index, (source_context, entry, manifest_entry) in enumerate(
-                item_payloads
-            )
+            for index, (source_context, entry) in enumerate(item_payloads)
         ]
 
     def delegation_work_items(
@@ -173,7 +142,6 @@ class RuntimeItemLoader:
             )
             delegation_config_source_id, fingerprint = self._delegation_root_metadata(
                 registrable_domain=registrable_domain,
-                ordered_items=ordered_items,
                 root_metadata=root_metadata,
             )
             delegation_source_context = source_contexts.get(delegation_config_source_id)
@@ -206,11 +174,9 @@ class RuntimeItemLoader:
         self,
         *,
         registrable_domain: str,
-        ordered_items: tuple[ParsedHostItem, ...],
         root_metadata: dict[str, Any],
     ) -> tuple[str, str]:
         """Return selected source id and behavior fingerprint for one root."""
-        _ = ordered_items
         metadata = root_metadata.get(registrable_domain)
         if not isinstance(metadata, dict):
             raise ValueError(
