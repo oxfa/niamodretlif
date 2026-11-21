@@ -6499,7 +6499,6 @@ ads.ccstock.cn
 ads.cdn.rovio.com
 ads.ce.cn
 ads.csdn.net
-ads.cup.com.cn
 ads.cyberctm.com
 ads.dahlmessenger.com
 ads.dandelionchocolate.jp
@@ -18642,6 +18641,7 @@ computers.panasonic.eu
 comradegoodsfloor.com
 comscore.com
 comtelitalia.alcatel-lucent.com
+comunicacao.edpcomunicacao.com.br
 comunicacion.usj.es
 comunicaciones.davivienda.com.pa
 comunicaciones.daviviendacorredores.com
@@ -25231,6 +25231,7 @@ dpd9yiocsyy6p.cloudfront.net
 dpeacqvovcsux.site
 dpehzyosanbhl.website
 dpelvmieclelc.online
+dpfdkelsimf.com
 dpfezxfkstyhu.online
 dpfwqzjkavjmb.site
 dphheyqbwgaau.online
@@ -27211,6 +27212,7 @@ ednqjm.magnanni.com
 edococounter.de
 edonwiqgwlvmc.online
 edprivatedqualize.org
+edpsmart.edpcomunicacao.com.br
 edpzlobrjxsyk.online
 edqcwkyitviom.space
 edrakiber.com
@@ -27912,6 +27914,7 @@ elqtrk.intel.la
 elqtrk.intel.pl
 elqtrk.intel.ru
 elqtrk.intel.sg
+elqtrk.intelrealsense.com
 elqtrk.morningstar.be
 elqtrk.morningstar.ch
 elqtrk.morningstar.com
@@ -35635,6 +35638,7 @@ gz-data.com
 gz51la.com
 gz93n2pkh.com
 gzads.com
+gzamaarcaecfv.com
 gzastugagqpu.in
 gzbcuy.mamarella.com
 gzberdhytgbsy.website
@@ -38417,6 +38421,7 @@ iefiop.raizs.com.br
 ieg.intel.com
 iegwze.goldcar.es
 iegzaknrowaju.online
+iehmiqwudyc.com
 ieju.zgtwpscw.cn
 iekfxxkrpjock.space
 ieladhfhoiclv.online
@@ -47904,6 +47909,7 @@ lp.demo9.demoamericas275.adobe.com
 lp.dmillersb.journeyusshared.adobe.com
 lp.dmillersbdev.journeyusshared.adobe.com
 lp.dynabook.com
+lp.edpcomunicacao.com.br
 lp.egghead.link
 lp.em.viking.com
 lp.email-kpn.cjm.adobe.com
@@ -49948,6 +49954,7 @@ marketing.echohealthinc.com
 marketing.echostarmobile.com
 marketing.ecosystemintegrity.com
 marketing.ecslearn.com
+marketing.edpcomunicacao.com.br
 marketing.efleets.com
 marketing.ehimrx.com
 marketing.ehy.com
@@ -65113,6 +65120,7 @@ qwfuug.phoneclick.it
 qwgayltthcval.space
 qwikln.com
 qwjjfgqlfkmih.site
+qwkdjyceo.com
 qwkrsjiufwkks.site
 qwkunzuhtgbyu.site
 qwlfbjwkaxqqe.site
@@ -66191,6 +66199,7 @@ reklama.mail.ru
 rekuyy.com
 rel-link.californiapsychics.com
 rel-s.com
+relacionamento.edpcomunicacao.com.br
 relap.io
 relap.mail.ru
 relappro.com
@@ -82069,6 +82078,7 @@ tmhgma.juwelo.de
 tmhwidens.com
 tmi.jv-telcoid.es
 tmi.vodafone.de
+tmidahaefogi.com
 tmisc.home.news.cn
 tmjlhukzzbhut.online
 tmjrmpkkgatjh.website
@@ -87536,6 +87546,7 @@ uqoxtbwmhofzc.site
 uqqgmvetpuzrs.online
 uqqmj868.xyz
 uqqypanepjrlw.site
+uqrnrywr.com
 uqrtfsfrawfgn.website
 uqrvnzrdldmay.space
 uqsbqklhkdyuf.website
