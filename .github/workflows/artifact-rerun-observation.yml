@@ -1,9 +1,10 @@
-name: Artifact rerun observation
+name: Artifact correlation observation
 on:
   push:
     branches: [codex/artifact-rerun-observation]
 permissions:
   contents: read
+  actions: read
 jobs:
   worker:
     runs-on: ubuntu-latest
@@ -12,19 +13,24 @@ jobs:
       matrix:
         worker: [worker-01, worker-02]
     steps:
-      - name: Fail selected worker before upload on reruns
-        if: ${{ matrix.worker == 'worker-02' && github.run_attempt != '1' }}
+      - name: Fail before upload on attempt two
+        if: ${{ matrix.worker == 'worker-02' && github.run_attempt == '2' }}
         run: exit 1
       - name: Write marker
         env:
           WORKER: ${{ matrix.worker }}
           ATTEMPT: ${{ github.run_attempt }}
-        run: printf '%s %s\n' "$WORKER" "$ATTEMPT" > marker.txt
-      - uses: actions/upload-artifact@v7
+          CHECK_ID: ${{ job.check_run_id }}
+        run: printf '%s %s %s\n' "$WORKER" "$ATTEMPT" "$CHECK_ID" > marker.txt
+      - name: Upload worker bundle
+        uses: actions/upload-artifact@v7
         with:
-          name: observation-${{ matrix.worker }}
+          name: correlation-${{ matrix.worker }}
           path: marker.txt
           if-no-files-found: error
+      - name: Fail after upload on attempt three
+        if: ${{ matrix.worker == 'worker-02' && github.run_attempt == '3' }}
+        run: exit 1
   observe:
     if: ${{ always() }}
     needs: worker
@@ -32,8 +38,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: observation-*
+          pattern: correlation-*
           path: downloads
           merge-multiple: false
       - name: Display selected files
         run: find downloads -type f -print -exec cat {} \;
+      - name: Inspect latest worker jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100&filter=latest" | jq '[.jobs[] | select(.name | startswith("worker (")) | {id, name, run_attempt, check_run_url, created_at, started_at, completed_at, conclusion, steps: [.steps[] | {name, conclusion, started_at, completed_at}]}]'
