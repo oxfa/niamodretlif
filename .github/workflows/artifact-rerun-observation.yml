@@ -1,4 +1,4 @@
-name: Artifact receipt observation
+name: Artifact reusable correlation observation
 on:
   push:
     branches: [codex/artifact-rerun-observation]
@@ -6,89 +6,5 @@ permissions:
   contents: read
   actions: read
 jobs:
-  worker:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        worker: [worker-01, worker-02]
-    steps:
-      - name: Fail before upload on attempt two
-        if: ${{ matrix.worker == 'worker-02' && github.run_attempt == '2' }}
-        run: exit 1
-      - name: Write marker
-        env:
-          WORKER: ${{ matrix.worker }}
-          ATTEMPT: ${{ github.run_attempt }}
-        run: printf '%s %s\n' "$WORKER" "$ATTEMPT" > marker.txt
-      - name: Upload worker bundle
-        id: upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: receipt-${{ matrix.worker }}
-          path: marker.txt
-          if-no-files-found: error
-      - name: Record artifact receipt
-        env:
-          WORKER: ${{ matrix.worker }}
-          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
-        run: echo "ARTIFACT_RECEIPT_V1 $WORKER $ARTIFACT_ID"
-      - name: Fail after upload on attempt three
-        if: ${{ matrix.worker == 'worker-02' && github.run_attempt == '3' }}
-        run: exit 1
-  observe:
-    if: ${{ always() }}
-    needs: worker
-    runs-on: ubuntu-latest
-    steps:
-      - name: Select artifact IDs from latest job logs
-        id: select
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eo pipefail
-          api="https://api.github.com/repos/$GITHUB_REPOSITORY/actions"
-          jobs=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$api/runs/$GITHUB_RUN_ID/jobs?per_page=100&filter=latest")
-          ids=()
-          while IFS=$'\t' read -r name jobid upload receipt; do
-            worker="${name#worker (}"
-            worker="${worker%)}"
-            echo "JOB $worker $jobid upload=$upload receipt=$receipt"
-            if [[ "$upload" != success || "$receipt" != success ]]; then
-              echo "DECISION $worker INCOMPLETE"
-              continue
-            fi
-            log=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$api/jobs/$jobid/logs")
-            mapfile -t receipts < <(printf '%s\n' "$log" | awk '$2 == "ARTIFACT_RECEIPT_V1" && NF == 4 {print $3 " " $4}')
-            if [[ ${#receipts[@]} != 1 ]]; then echo "DECISION $worker AMBIGUOUS"; exit 1; fi
-            read -r named artifact <<<"${receipts[0]}"
-            if [[ "$named" != "$worker" || ! "$artifact" =~ ^[0-9]+$ ]]; then exit 1; fi
-            echo "DECISION $worker ACCEPT $artifact"
-            ids+=("$artifact")
-          done < <(jq -r '.jobs[] | select(.name | startswith("worker (")) | [.name, (.id|tostring), ([.steps[] | select(.name == "Upload worker bundle") | .conclusion][0] // "none"), ([.steps[] | select(.name == "Record artifact receipt") | .conclusion][0] // "none")] | @tsv' <<<"$jobs")
-          joined=$(IFS=,; echo "${ids[*]}")
-          echo "ids=$joined" >> "$GITHUB_OUTPUT"
-      - name: Download selected IDs
-        if: ${{ steps.select.outputs.ids != '' }}
-        uses: actions/download-artifact@v8
-        with:
-          artifact-ids: ${{ steps.select.outputs.ids }}
-          path: downloads
-          merge-multiple: false
-      - name: Display selected files
-        run: find downloads -type f -print -exec cat {} \;
-
-      - name: Verify REST exact-ID downloads from observed rerun
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          api="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts"
-          for entry in "14766352338:worker-01 1" "14765859596:worker-02 3"; do
-            id="${entry%%:*}"
-            expected="${entry#*:}"
-            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$api/$id/zip" -o "$id.zip"
-            actual=$(unzip -p "$id.zip" marker.txt)
-            printf "REST_ARTIFACT %s %s\n" "$id" "$actual"
-            test "$actual" = "$expected"
-          done
+  batch:
+    uses: ./.github/workflows/_artifact-correlation-observation.yml
