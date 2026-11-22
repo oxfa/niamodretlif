@@ -1,0 +1,39 @@
+name: Artifact rerun observation
+on:
+  push:
+    branches: [codex/artifact-rerun-observation]
+permissions:
+  contents: read
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [worker-01, worker-02]
+    steps:
+      - name: Fail selected worker before upload on reruns
+        if: ${{ matrix.worker == 'worker-02' && github.run_attempt != '1' }}
+        run: exit 1
+      - name: Write marker
+        env:
+          WORKER: ${{ matrix.worker }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: printf '%s %s\n' "$WORKER" "$ATTEMPT" > marker.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: observation-${{ matrix.worker }}
+          path: marker.txt
+          if-no-files-found: error
+  observe:
+    if: ${{ always() }}
+    needs: worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: observation-*
+          path: downloads
+          merge-multiple: false
+      - name: Display selected files
+        run: find downloads -type f -print -exec cat {} \;
