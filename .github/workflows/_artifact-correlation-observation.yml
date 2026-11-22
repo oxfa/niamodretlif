@@ -1,0 +1,58 @@
+name: Synthetic reusable correlation observation
+on:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  run_workers:
+    name: Run workers
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_id: [worker-01, worker-02]
+    steps:
+      - name: Fail before upload on second attempt
+        if: ${{ matrix.worker_id == 'worker-02' && github.run_attempt == '2' }}
+        run: exit 1
+      - name: Create marker
+        env:
+          WORKER: ${{ matrix.worker_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: printf '%s %s\n' "$WORKER" "$ATTEMPT" > marker.txt
+      - name: Upload worker bundle
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: reusable-receipt-${{ matrix.worker_id }}
+          path: marker.txt
+          if-no-files-found: error
+      - name: Record artifact receipt
+        env:
+          WORKER: ${{ matrix.worker_id }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: echo "ARTIFACT_RECEIPT_V1 $WORKER $ARTIFACT_ID"
+  aggregate_and_publish:
+    name: Aggregate and publish
+    if: ${{ always() }}
+    needs: run_workers
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Inspect latest reusable worker names and step logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="${{ github.api_url }}/repos/$GITHUB_REPOSITORY/actions"
+          curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "$api/runs/$GITHUB_RUN_ID/jobs?per_page=100&filter=latest" > jobs.json
+          jq -r '.jobs[] | [.name, (.id|tostring), (.run_attempt|tostring), .status, (.conclusion // "null")] | @tsv' jobs.json
+          while IFS=$'\t' read -r name jobid step outcome; do
+            echo "RECEIPT_JOB name=$name id=$jobid step=$step outcome=$outcome"
+            if [[ "$outcome" != success ]]; then continue; fi
+            code=$(curl -sSL -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "$api/jobs/$jobid/steps/$step/logs" -o step.log)
+            echo "STEP_HTTP job=$jobid status=$code"
+            if [[ "$code" == 200 ]]; then cat step.log; fi
+          done < <(jq -r '.jobs[] | select(.name | contains("Run workers")) | . as $job | [$job.name, ($job.id|tostring), ([$job.steps[] | select(.name == "Record artifact receipt") | .number][0] // 0 | tostring), ([$job.steps[] | select(.name == "Record artifact receipt") | .conclusion][0] // "none")] | @tsv' jobs.json)
