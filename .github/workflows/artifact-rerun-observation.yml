@@ -77,3 +77,18 @@ jobs:
           merge-multiple: false
       - name: Display selected files
         run: find downloads -type f -print -exec cat {} \;
+
+      - name: Verify REST exact-ID downloads from observed rerun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts"
+          for entry in "14766352338:worker-01 1" "14765859596:worker-02 3"; do
+            id="${entry%%:*}"
+            expected="${entry#*:}"
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$api/$id/zip" -o "$id.zip"
+            actual=$(unzip -p "$id.zip" marker.txt)
+            printf "REST_ARTIFACT %s %s\n" "$id" "$actual"
+            test "$actual" = "$expected"
+          done
