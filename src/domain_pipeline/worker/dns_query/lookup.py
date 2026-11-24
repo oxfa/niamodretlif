@@ -201,17 +201,17 @@ def dns_query_coordinator_key(
     )
 
 
-def dns_resolver_entry_values(entries: list[Any]) -> tuple[list[str], dict[str, int]]:
+def dns_resolver_entry_values(
+    entries: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, int]]:
     """Return resolver endpoints and non-default weights from config entries."""
     resolvers: list[str] = []
     weights: dict[str, int] = {}
     for entry in entries:
-        if isinstance(entry, dict):
-            resolver = str(entry["resolver"])
-            raw_weight = entry.get("weight")
-        else:
-            resolver = str(entry)
-            raw_weight = None
+        if not isinstance(entry, dict):
+            raise ValueError("DNS resolver entries must be mappings")
+        resolver = str(entry["resolver"])
+        raw_weight = entry.get("weight")
         resolvers.append(resolver)
         if raw_weight is not None and int(raw_weight) > 1:
             weights[resolver] = int(raw_weight)
@@ -231,18 +231,12 @@ def dns_stage_resolver_profile(
 ) -> tuple[list[str], dict[str, int]]:
     """Return stage recursive resolvers and weights after default fallback."""
     if stage_config.get("resolvers") is not None:
-        resolvers, weights = dns_resolver_entry_values(
-            list(stage_config.get("resolvers") or [])
-        )
-        if not weights:
-            weights = {
-                str(resolver): int(weight)
-                for resolver, weight in dict(
-                    stage_config.get("resolver_weights") or {}
-                ).items()
-                if int(weight) > 1
-            }
-        return resolvers, weights
+        if "resolver_weights" in stage_config:
+            raise ValueError(
+                "unsupported DNS stage field 'resolver_weights'; "
+                "set weights on resolver entries"
+            )
+        return dns_resolver_entry_values(list(stage_config.get("resolvers") or []))
     return default_dns_resolver_profile(dns_config)
 
 
