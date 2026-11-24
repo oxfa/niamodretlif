@@ -37,22 +37,128 @@ logger = logging.getLogger(__name__)
 DELEGATION_TABLE = "delegation_history"
 HOST_RESOLUTION_TABLE = "host_resolution_history"
 IP_LOCATION_TABLE = "ip_location_history"
-DELEGATION_COLUMNS = (
-    "domain",
-    "resolver_key",
-    "ns_records_exist",
-    "ns_nodata",
-    "ns_nxdomain",
-    "ns_retry_exhausted",
-    "ns_lookup_error",
-    "soa_exists",
-    "soa_absent",
-    "soa_retry_exhausted",
-    "no_nameservers",
-    "nameservers",
-    "checked_at",
-    "expires_at",
-)
+CACHE_TABLE_COLUMN_SPECS: dict[str, tuple[tuple[str, str, int], ...]] = {
+    DELEGATION_TABLE: (
+        ("domain", "TEXT", 1),
+        ("resolver_key", "TEXT", 2),
+        ("ns_records_exist", "INTEGER", 0),
+        ("ns_nodata", "INTEGER", 0),
+        ("ns_nxdomain", "INTEGER", 0),
+        ("ns_retry_exhausted", "INTEGER", 0),
+        ("ns_lookup_error", "INTEGER", 0),
+        ("soa_exists", "INTEGER", 0),
+        ("soa_absent", "INTEGER", 0),
+        ("soa_retry_exhausted", "INTEGER", 0),
+        ("no_nameservers", "INTEGER", 0),
+        ("nameservers", "TEXT", 0),
+        ("checked_at", "TEXT", 0),
+        ("expires_at", "TEXT", 0),
+    ),
+    HOST_RESOLUTION_TABLE: (
+        ("host", "TEXT", 1),
+        ("resolver_key", "TEXT", 2),
+        ("a_exists", "INTEGER", 0),
+        ("a_nodata", "INTEGER", 0),
+        ("a_nxdomain", "INTEGER", 0),
+        ("a_timeout", "INTEGER", 0),
+        ("a_servfail", "INTEGER", 0),
+        ("canonical_name", "TEXT", 0),
+        ("ipv4_addresses", "TEXT", 0),
+        ("ipv6_addresses", "TEXT", 0),
+        ("checked_at", "TEXT", 0),
+        ("expires_at", "TEXT", 0),
+    ),
+    IP_LOCATION_TABLE: (
+        ("provider", "TEXT", 1),
+        ("ip", "TEXT", 2),
+        ("country_code", "TEXT", 0),
+        ("region_code", "TEXT", 0),
+        ("region_name", "TEXT", 0),
+        ("checked_at", "TEXT", 0),
+        ("expires_at", "TEXT", 0),
+    ),
+}
+
+
+def _column_names(table_name: str) -> tuple[str, ...]:
+    return tuple(
+        name
+        for name, _declared_type, _primary_key_position in CACHE_TABLE_COLUMN_SPECS[
+            table_name
+        ]
+    )
+
+
+DELEGATION_COLUMNS = _column_names(DELEGATION_TABLE)
+HOST_RESOLUTION_COLUMNS = _column_names(HOST_RESOLUTION_TABLE)
+IP_LOCATION_COLUMNS = _column_names(IP_LOCATION_TABLE)
+
+
+def _user_schema_objects(connection: sqlite3.Connection) -> set[tuple[str, str]]:
+    return {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            "SELECT type, name FROM sqlite_schema "
+            "WHERE name NOT GLOB 'sqlite_*' "
+            "AND type IN ('table', 'index', 'view', 'trigger')"
+        )
+    }
+
+
+def validate_cache_schema(connection: sqlite3.Connection) -> None:
+    """Require exactly the current cache tables and column definitions."""
+    expected_objects = {
+        ("table", table_name) for table_name in CACHE_TABLE_COLUMN_SPECS
+    }
+    actual_objects = _user_schema_objects(connection)
+    if actual_objects != expected_objects:
+        missing = sorted(expected_objects - actual_objects)
+        unexpected = sorted(actual_objects - expected_objects)
+        raise sqlite3.DatabaseError(
+            f"cache database schema does not match current schema: "
+            f"missing={missing!r}, unexpected={unexpected!r}"
+        )
+
+    for table_name, column_specs in CACHE_TABLE_COLUMN_SPECS.items():
+        expected_columns = tuple(
+            (name, declared_type, 1, None, primary_key_position, 0)
+            for name, declared_type, primary_key_position in column_specs
+        )
+        actual_columns = tuple(
+            (
+                str(row[1]),
+                str(row[2]).upper(),
+                int(row[3]),
+                row[4],
+                int(row[5]),
+                int(row[6]),
+            )
+            for row in connection.execute(f"PRAGMA table_xinfo('{table_name}')")
+        )
+        if actual_columns != expected_columns:
+            raise sqlite3.DatabaseError(
+                f"cache table {table_name} does not match current schema"
+            )
+
+
+def _create_current_schema(connection: sqlite3.Connection) -> None:
+    for table_name, column_specs in CACHE_TABLE_COLUMN_SPECS.items():
+        definitions = [
+            f"{name} {declared_type} NOT NULL"
+            for name, declared_type, _primary_key_position in column_specs
+        ]
+        primary_key_columns = [
+            name
+            for primary_key_position, name in sorted(
+                (primary_key_position, name)
+                for name, _declared_type, primary_key_position in column_specs
+                if primary_key_position
+            )
+        ]
+        definitions.append(f"PRIMARY KEY ({', '.join(primary_key_columns)})")
+        connection.execute(
+            f"CREATE TABLE {table_name} ({', '.join(definitions)})"
+        )
 
 
 def utc_now() -> datetime:
@@ -60,10 +166,11 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_datetime(raw_value: str) -> datetime:
+def parse_cache_timestamp(raw_value: str) -> datetime:
+    """Parse a persisted cache timestamp and normalize it to UTC."""
     parsed = datetime.fromisoformat(raw_value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("cache timestamp must include a timezone offset")
     return parsed.astimezone(timezone.utc)
 
 
@@ -124,8 +231,8 @@ class DelegationHistoryRecord:
                 no_nameservers=bool(row["no_nameservers"]),
                 nameservers=_parse_string_list(str(row["nameservers"])),
                 timestamps=CacheTimestamps(
-                    checked_at=_parse_datetime(str(row["checked_at"])),
-                    expires_at=_parse_datetime(str(row["expires_at"])),
+                    checked_at=parse_cache_timestamp(str(row["checked_at"])),
+                    expires_at=parse_cache_timestamp(str(row["expires_at"])),
                 ),
             ),
         )
@@ -156,8 +263,8 @@ class HostResolutionHistoryRecord:
                 ipv6_addresses=_parse_string_list(str(row["ipv6_addresses"])),
             ),
             timestamps=CacheTimestamps(
-                checked_at=_parse_datetime(str(row["checked_at"])),
-                expires_at=_parse_datetime(str(row["expires_at"])),
+                checked_at=parse_cache_timestamp(str(row["checked_at"])),
+                expires_at=parse_cache_timestamp(str(row["expires_at"])),
             ),
         )
 
@@ -188,8 +295,8 @@ class IpLocationHistoryRecord:
                 region_name=str(row["region_name"]),
             ),
             timestamps=CacheTimestamps(
-                checked_at=_parse_datetime(str(row["checked_at"])),
-                expires_at=_parse_datetime(str(row["expires_at"])),
+                checked_at=parse_cache_timestamp(str(row["checked_at"])),
+                expires_at=parse_cache_timestamp(str(row["expires_at"])),
             ),
         )
 
@@ -211,102 +318,24 @@ class CacheRepository:
     def load(cls, path: Path) -> "CacheRepository":
         """Open the SQLite cache and initialize the current schema."""
         path.parent.mkdir(parents=True, exist_ok=True)
+        path_existed_before_open = path.exists()
         connection = sqlite3.connect(path, check_same_thread=False)
-        return cls(path, connection)
+        try:
+            if path_existed_before_open and not _user_schema_objects(connection):
+                validate_cache_schema(connection)
+            return cls(path, connection)
+        except Exception:
+            connection.close()
+            raise
 
     def _initialize_schema(self) -> None:
+        if _user_schema_objects(self._connection):
+            validate_cache_schema(self._connection)
+        else:
+            _create_current_schema(self._connection)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=NORMAL")
-        self._connection.execute(f"""
-            CREATE TABLE IF NOT EXISTS {DELEGATION_TABLE} (
-                domain TEXT NOT NULL,
-                resolver_key TEXT NOT NULL,
-                ns_records_exist INTEGER NOT NULL,
-                ns_nodata INTEGER NOT NULL,
-                ns_nxdomain INTEGER NOT NULL,
-                ns_retry_exhausted INTEGER NOT NULL,
-                ns_lookup_error INTEGER NOT NULL,
-                soa_exists INTEGER NOT NULL,
-                soa_absent INTEGER NOT NULL,
-                soa_retry_exhausted INTEGER NOT NULL,
-                no_nameservers INTEGER NOT NULL,
-                nameservers TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                PRIMARY KEY (domain, resolver_key)
-            )
-            """)
-        self._connection.execute(f"""
-            CREATE TABLE IF NOT EXISTS {HOST_RESOLUTION_TABLE} (
-                host TEXT NOT NULL,
-                resolver_key TEXT NOT NULL,
-                a_exists INTEGER NOT NULL,
-                a_nodata INTEGER NOT NULL,
-                a_nxdomain INTEGER NOT NULL,
-                a_timeout INTEGER NOT NULL,
-                a_servfail INTEGER NOT NULL,
-                canonical_name TEXT NOT NULL,
-                ipv4_addresses TEXT NOT NULL,
-                ipv6_addresses TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                PRIMARY KEY (host, resolver_key)
-            )
-            """)
-        self._connection.execute(f"""
-            CREATE TABLE IF NOT EXISTS {IP_LOCATION_TABLE} (
-                provider TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                country_code TEXT NOT NULL,
-                region_code TEXT NOT NULL,
-                region_name TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                PRIMARY KEY (provider, ip)
-            )
-            """)
-        self._validate_current_schema()
         self._connection.commit()
-
-    def _validate_current_schema(self) -> None:
-        """Reject restored cache databases that do not match the current schema."""
-        expected_columns = {
-            DELEGATION_TABLE: set(DELEGATION_COLUMNS),
-            HOST_RESOLUTION_TABLE: {
-                "host",
-                "resolver_key",
-                "a_exists",
-                "a_nodata",
-                "a_nxdomain",
-                "a_timeout",
-                "a_servfail",
-                "canonical_name",
-                "ipv4_addresses",
-                "ipv6_addresses",
-                "checked_at",
-                "expires_at",
-            },
-            IP_LOCATION_TABLE: {
-                "provider",
-                "ip",
-                "country_code",
-                "region_code",
-                "region_name",
-                "checked_at",
-                "expires_at",
-            },
-        }
-        for table_name, required_columns in expected_columns.items():
-            columns = {
-                str(row["name"])
-                for row in self._connection.execute(f"PRAGMA table_info({table_name})")
-            }
-            missing_columns = sorted(required_columns - columns)
-            if missing_columns:
-                raise sqlite3.DatabaseError(
-                    f"cache table {table_name} is missing required columns: "
-                    + ", ".join(missing_columns)
-                )
 
     def put_delegation(self, request: DelegationCacheWriteRequest) -> None:
         """Store one delegation lookup result."""
@@ -419,7 +448,7 @@ class CacheRepository:
                     checked_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(row[column] for column in row.keys()),
+                tuple(row[column] for column in HOST_RESOLUTION_COLUMNS),
             )
         for row in ip_location_rows:
             self._connection.execute(
@@ -428,7 +457,7 @@ class CacheRepository:
                     provider, ip, country_code, region_code, region_name, checked_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(row[column] for column in row.keys()),
+                tuple(row[column] for column in IP_LOCATION_COLUMNS),
             )
         self._connection.commit()
 

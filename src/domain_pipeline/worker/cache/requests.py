@@ -40,6 +40,16 @@ class CacheTimestamps:
     ttl_days: int = 0
     expires_at: datetime | None = None
 
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("checked_at", self.checked_at),
+            ("expires_at", self.expires_at),
+        ):
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(f"cache timestamp {field_name} must be timezone-aware")
+
     def effective_expires_at(self) -> datetime:
         """Return the persisted cache expiration timestamp."""
         if self.expires_at is not None:

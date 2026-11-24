@@ -8,6 +8,7 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,6 +30,7 @@ from domain_pipeline.worker.cache.repository import (
     IpLocationHistoryRecord,
     HostResolutionHistoryRecord,
     CacheRepository,
+    validate_cache_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,13 @@ class CacheFetchRequest:
     where_sql: str
     values: tuple[str, ...]
     record_factory: Callable[[sqlite3.Row], Any]
-    now: Any
+    now: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.now, datetime):
+            raise TypeError("cache read timestamp must be a datetime")
+        if self.now.tzinfo is None or self.now.utcoffset() is None:
+            raise ValueError("cache read timestamp must be timezone-aware")
 
 
 def _open_read_connection(path: Path) -> sqlite3.Connection:
@@ -72,7 +80,7 @@ class AsyncCacheService:
         return candidates
 
     async def get_fresh_delegation_with_source(
-        self, domain: str, resolver_key: str, now: Any
+        self, domain: str, resolver_key: str, now: datetime
     ) -> tuple[DelegationHistoryRecord | None, CacheHitSource | None]:
         """Return a fresh delegation record and whether it came from overlay or baseline."""
         return await asyncio.to_thread(
@@ -80,7 +88,7 @@ class AsyncCacheService:
         )
 
     async def get_fresh_host_resolution_with_source(
-        self, host: str, resolver_key: str, now: Any
+        self, host: str, resolver_key: str, now: datetime
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         """Return a fresh host-resolution record and cache-hit source."""
         return await asyncio.to_thread(
@@ -88,7 +96,7 @@ class AsyncCacheService:
         )
 
     async def get_fresh_ip_location_with_source(
-        self, provider: str, ip: str, now: Any
+        self, provider: str, ip: str, now: datetime
     ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
         """Return a fresh IP-location record and cache-hit source."""
         return await asyncio.to_thread(
@@ -103,28 +111,37 @@ class AsyncCacheService:
                 continue
             try:
                 with contextlib.closing(_open_read_connection(path)) as connection:
-                    row = connection.execute(
+                    validate_cache_schema(connection)
+                    rows = connection.execute(
                         (
                             f"SELECT {request.columns} FROM {request.table_name} "
                             f"WHERE {request.where_sql}"
                         ),
                         request.values,
-                    ).fetchone()
+                    )
+                    for row in rows:
+                        try:
+                            record = request.record_factory(row)
+                        except ValueError as exc:
+                            logger.warning(
+                                "Skipping %s cache row with invalid timestamp at %s: %s",
+                                source,
+                                path,
+                                exc,
+                            )
+                            continue
+                        if record.is_expired(request.now):
+                            continue
+                        return record, source
             except sqlite3.DatabaseError as exc:
                 logger.warning(
                     "Skipping unreadable %s cache at %s: %s", source, path, exc
                 )
                 continue
-            if row is None:
-                continue
-            record = request.record_factory(row)
-            if record.is_expired(request.now):
-                continue
-            return record, source
         return None, None
 
     def _get_fresh_delegation_sync_with_source(
-        self, domain: str, resolver_key: str, now: Any
+        self, domain: str, resolver_key: str, now: datetime
     ) -> tuple[DelegationHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
             CacheFetchRequest(
@@ -138,7 +155,7 @@ class AsyncCacheService:
         )
 
     def _get_fresh_host_resolution_sync_with_source(
-        self, host: str, resolver_key: str, now: Any
+        self, host: str, resolver_key: str, now: datetime
     ) -> tuple[HostResolutionHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
             CacheFetchRequest(
@@ -152,7 +169,7 @@ class AsyncCacheService:
         )
 
     def _get_fresh_ip_location_sync_with_source(
-        self, provider: str, ip: str, now: Any
+        self, provider: str, ip: str, now: datetime
     ) -> tuple[IpLocationHistoryRecord | None, CacheHitSource | None]:
         return self._fetch_one(
             CacheFetchRequest(
