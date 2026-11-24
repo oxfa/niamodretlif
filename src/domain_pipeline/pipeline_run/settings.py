@@ -16,8 +16,10 @@ class WorkflowRunPlanner:
 
     def default_worker_ids(self, worker_count: int) -> list[str]:
         """Return stable worker identities for one configured worker slot count."""
-        if worker_count < 1:
-            raise ValueError("worker_count must be at least 1")
+        # Change this limit only if GitHub updates the Free-plan standard runner
+        # concurrency limit: https://docs.github.com/en/actions/reference/limits
+        if worker_count < 1 or worker_count > 20:
+            raise ValueError("worker_count must be between 1 and 20")
         return [f"worker-{index:02d}" for index in range(1, worker_count + 1)]
 
     def validate_run_settings(

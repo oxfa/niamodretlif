@@ -29,6 +29,7 @@ permissions:
 # manifests and emits no output rows; non-matches are silent no-ops.
 jobs:
   batch:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     uses: ./.github/workflows/_pipeline-run-batch.yml
     with:
       config_name: block

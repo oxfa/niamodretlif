@@ -22,8 +22,8 @@ jobs:
     env:
       KEEP_COUNT: "2"
       CACHE_PREFIXES: |
-        domain-pipeline-runtime-cache-v3-block-
-        domain-pipeline-runtime-cache-v3-direct-
+        domain-pipeline-runtime-cache-block-
+        domain-pipeline-runtime-cache-direct-
         codeql-overlay-base-database-
       WORKFLOW_HISTORY_FILES: |
         pipeline-block.yml

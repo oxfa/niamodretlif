@@ -47,9 +47,17 @@ jobs:
       PIPELINE_MAX_RUNTIME_SECONDS: ${{ vars.PIPELINE_MAX_RUNTIME_SECONDS }}
       IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
+      - name: Identify preparation batch
+        id: identity
+        run: echo "batch_id=batch-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -79,19 +87,6 @@ jobs:
           # Default publishes go to main; the repository variable can override it.
           echo "target_branch=${PIPELINE_PUBLISH_TARGET_BRANCH:-main}" >> "$GITHUB_OUTPUT"
           echo "source_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-      - name: Stage validation artifact
-        run: |
-          set -eo pipefail
-          mkdir -p .debug_artifacts/prepare/validation/logs
-          cp settings.json .debug_artifacts/prepare/validation/logs/settings.json
-          cp validate-settings.log .debug_artifacts/prepare/validation/logs/validate-settings.log
-      - name: Upload validation artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: debug-validation-settings
-          path: .debug_artifacts/prepare/validation
-          include-hidden-files: true
-          if-no-files-found: error
       - name: Build committed batch state
         id: batch
         run: |
@@ -107,96 +102,55 @@ jobs:
               --worker-count "${{ inputs.worker_count }}" \
               | tee batch.json
           } 2>&1 | tee prepare-batch.log
+          test "$(jq -r '.batch_id' batch.json)" = "${{ steps.identity.outputs.batch_id }}"
           echo "batch_id=$(jq -r '.batch_id' batch.json)" >> "$GITHUB_OUTPUT"
-      - name: Stage prepared batch artifact
+      - name: Stage worker input artifacts
         run: |
           set -eo pipefail
-          mkdir -p .tmp/prepared_batch/.workflow_state/batches
-          batch_root=".workflow_state/batches/${{ steps.batch.outputs.batch_id }}"
-          artifact_batch_root=".tmp/prepared_batch/.workflow_state/batches/${{ steps.batch.outputs.batch_id }}"
-          mkdir -p "${artifact_batch_root}/source_inputs"
-          cp \
-            "${batch_root}/prepare-aggregate-manifest.json" \
-            "${artifact_batch_root}/prepare-aggregate-manifest.json"
-          cp "${batch_root}/source-line-index.json" "${artifact_batch_root}/source-line-index.json"
-          cp -R "${batch_root}/source_inputs/." "${artifact_batch_root}/source_inputs/"
-      - name: Upload prepared batch artifact
+          mkdir -p .tmp
+          ./src/pipeline_run.py handoff-stage-worker-inputs \
+            --state-root . \
+            --batch-id "${{ steps.batch.outputs.batch_id }}" \
+            --worker-ids-json '${{ steps.validate.outputs.worker_ids_json }}' \
+            --destination .tmp/worker-inputs
+      - name: Validate staged worker inputs
+        run: |
+          ./src/pipeline_run.py handoff-validate-worker-inputs \
+            --state-root . --batch-id "${{ steps.batch.outputs.batch_id }}" \
+            --worker-ids-json '${{ steps.validate.outputs.worker_ids_json }}' \
+            --destination .tmp/worker-inputs
+      - name: Upload combined worker input artifact
         uses: actions/upload-artifact@v7
         with:
-          name: workflow-internal-prepared-batch
+          name: workflow-internal-combined-worker-inputs-${{ steps.batch.outputs.batch_id }}
+          path: .tmp/worker-inputs
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Stage prepared batch artifact
+        if: ${{ always() && steps.identity.outcome == 'success' }}
+        env:
+          PREPARE_SUCCESS: ${{ steps.batch.outcome == 'success' }}
+        run: |
+          set -eo pipefail
+          args=()
+          if [ "$PREPARE_SUCCESS" = true ]; then args+=(--require-runtime); fi
+          ./src/pipeline_run.py handoff-stage \
+            --state-root . --handoff prepare-aggregate \
+            --batch-id "${{ steps.identity.outputs.batch_id }}" \
+            --destination .tmp/prepared_batch "${args[@]}"
+      - name: Upload prepared batch artifact
+        if: ${{ always() && steps.identity.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: workflow-internal-prepared-batch-${{ steps.identity.outputs.batch_id }}
           path: .tmp/prepared_batch
           include-hidden-files: true
-          if-no-files-found: error
-      - name: Stage worker manifests artifact
-        run: |
-          set -eo pipefail
-          batch_id="${{ steps.batch.outputs.batch_id }}"
-          artifact_batch_root=".tmp/prepared_worker_manifests/.workflow_state/batches/${batch_id}"
-          mkdir -p "${artifact_batch_root}/workers"
-          cp -R \
-            ".workflow_state/batches/${batch_id}/workers/." \
-            "${artifact_batch_root}/workers/"
-      - name: Upload worker manifests artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: workflow-internal-worker-manifests
-          path: .tmp/prepared_worker_manifests
-          include-hidden-files: true
-          if-no-files-found: error
-      - name: Stage prepared batch debug artifact
-        run: |
-          set -eo pipefail
-          mkdir -p .debug_artifacts/prepare/batch/logs
-          cp batch.json .debug_artifacts/prepare/batch/logs/batch.json
-          cp prepare-batch.log .debug_artifacts/prepare/batch/logs/prepare-batch.log
-      - name: Upload prepared batch debug artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: debug-prepared-batch
-          path: .debug_artifacts/prepare/batch
-          include-hidden-files: true
-          if-no-files-found: error
-
-  prepare_worker_inputs:
-    name: Package worker input
-    needs:
-      - prepare_run
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        worker_id: ${{ fromJSON(needs.prepare_run.outputs.worker_ids_json) }}
-    steps:
-      - name: Download prepared batch
-        uses: actions/download-artifact@v8
-        with:
-          name: workflow-internal-worker-manifests
-          path: .tmp/prepared_worker_manifests
-      - name: Stage worker input artifact
-        run: |
-          set -eo pipefail
-          batch_id="${{ needs.prepare_run.outputs.batch_id }}"
-          worker_id="${{ matrix.worker_id }}"
-          worker_manifest=".tmp/prepared_worker_manifests/.workflow_state/batches/${batch_id}/workers/${worker_id}/prepare-worker-manifest.json"
-          artifact_root=".tmp/worker-input-${worker_id}"
-          mkdir -p "${artifact_root}/.workflow_state/batches/${batch_id}/workers/${worker_id}"
-          cp "${worker_manifest}" \
-            "${artifact_root}/.workflow_state/batches/${batch_id}/workers/${worker_id}/prepare-worker-manifest.json"
-      - name: Upload worker input artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: workflow-internal-worker-input-${{ matrix.worker_id }}
-          path: .tmp/worker-input-${{ matrix.worker_id }}
-          include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   run_workers:
     name: Run workers
     needs:
       - prepare_run
-      - prepare_worker_inputs
     runs-on: ubuntu-latest
     timeout-minutes: 355
     permissions:
@@ -211,13 +165,16 @@ jobs:
       IP_LOCATION_IPINFO_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        id: checkout_worker
         with:
           fetch-depth: 0
       - name: Set up Python
+        id: setup_python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Set up uv
+        id: setup_uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: "0.13.9"
@@ -236,14 +193,15 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-
-            domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-
+            domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-runtime-cache-${{ inputs.config_name }}-
       - name: Log worker baseline cache restore
+        id: log_worker_baseline_cache
         run: |
           set -eo pipefail
-          worker_cache_log_path=".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log"
+          worker_cache_log_path="$(./src/pipeline_run.py handoff-worker-diagnostic-path --state-root . --batch-id "${{ needs.prepare_run.outputs.batch_id }}" --worker-id "${{ matrix.worker_id }}" --kind cache-log)"
           mkdir -p "$(dirname "${worker_cache_log_path}")"
           cache_hit="${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
           if [ -z "${cache_hit}" ]; then
@@ -270,22 +228,23 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "worker baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
-          echo "worker baseline cache primary_key=domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
-          echo "worker baseline cache restore_prefixes=domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-" | tee -a "${worker_cache_log_path}"
+          echo "worker baseline cache primary_key=domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${worker_cache_log_path}"
+          echo "worker baseline cache restore_prefixes=domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-${{ inputs.config_name }}-" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache cache-hit=${cache_hit}" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache restore_result=${restore_result}" | tee -a "${worker_cache_log_path}"
           echo "worker baseline cache restored_paths=${summary}" | tee -a "${worker_cache_log_path}"
           ls -la .workflow_state/runtime/cache | tee -a "${worker_cache_log_path}"
       - name: Inspect worker cache candidates
+        id: inspect_worker_cache_candidates
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -eo pipefail
-          worker_cache_log_path=".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log"
+          worker_cache_log_path="$(./src/pipeline_run.py handoff-worker-diagnostic-path --state-root . --batch-id "${{ needs.prepare_run.outputs.batch_id }}" --worker-id "${{ matrix.worker_id }}" --kind cache-log)"
           mkdir -p "$(dirname "${worker_cache_log_path}")"
           cache_hit="${{ steps.restore_worker_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-runtime-cache-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -308,31 +267,60 @@ jobs:
             --wal-path .workflow_state/runtime/cache/check-cache.sqlite3-wal \
             --shm-path .workflow_state/runtime/cache/check-cache.sqlite3-shm \
             | tee -a "${worker_cache_log_path}"
-      - name: Download worker input artifact
+      - name: Download combined worker input artifact
+        id: download_worker_input
         uses: actions/download-artifact@v8
         with:
-          name: workflow-internal-worker-input-${{ matrix.worker_id }}
-          path: .tmp/worker_input
+          name: workflow-internal-combined-worker-inputs-${{ needs.prepare_run.outputs.batch_id }}
+          path: .tmp/combined-worker-inputs
       - name: Restore worker input state
+        id: restore_worker_input
         run: |
           set -eo pipefail
-          mkdir -p .workflow_state
-          cp -R .tmp/worker_input/.workflow_state/. .workflow_state/
+          ./src/pipeline_run.py handoff-restore \
+            --state-root . --handoff prepare-worker \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+            --worker-id "${{ matrix.worker_id }}" --archive ".tmp/combined-worker-inputs/${{ matrix.worker_id }}"
       - name: Initialize worker statuses
         id: init
+        continue-on-error: true
         run: |
           set -eo pipefail
           # Empty root assignments still have a worker manifest and complete
           # the same status and aggregate handoff lifecycle.
+          init_status=0
           ./src/pipeline_run.py initialize-worker-statuses \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
-            | tee init.json
-          echo "participates=$(jq -r '.participates' init.json)" >> "$GITHUB_OUTPUT"
+            > init.json 2> init.stderr || init_status=$?
+          cat init.json
+          cat init.stderr >&2
+          init_result_valid=false
+          if [ -s init.json ] && jq -e 'type == "object" and (.conclusion == "success" or .conclusion == "failure")' init.json >/dev/null 2>> init.stderr; then
+            init_result_valid=true
+            conclusion="$(jq -r '.conclusion' init.json)"
+            error_reason="$(jq -r 'if (.failure_reason | type) == \"string\" then .failure_reason else \"\" end' init.json | tr '\r\n' '  ')"
+          else
+            conclusion="failure"
+            error_reason="worker status initialization failed before returning a valid result (exit status ${init_status})"
+            init_detail="$( { tail -n 10 init.stderr; tail -n 10 init.json; } | tr '\r\n' ' ' )"
+            if [ -n "${init_detail}" ]; then error_reason="${error_reason}: ${init_detail}"; fi
+          fi
+          status_recording_error=""
+          if [ "${init_result_valid}" = true ]; then
+            status_recording_error="$(jq -r '.status_recording_error // empty' init.json | tr '\r\n' '  ')"
+          fi
+          if [ -n "${status_recording_error}" ]; then
+            error_reason="${error_reason}; additionally, failure status could not be recorded: ${status_recording_error}"
+          fi
+          echo "overall_conclusion=${conclusion}" >> "$GITHUB_OUTPUT"
+          printf 'error_reason=%s\n' "$error_reason" >> "$GITHUB_OUTPUT"
+          if [ "${init_status}" -ne 0 ]; then exit "${init_status}"; fi
       - name: Log runner public network addresses
-        if: ${{ steps.init.outputs.participates == 'true' }}
+        id: log_worker_network_addresses
+        if: ${{ steps.init.outcome == 'success' && steps.init.outputs.overall_conclusion == 'success' }}
         run: |
           set -eo pipefail
           mkdir -p .tmp
@@ -353,7 +341,7 @@ jobs:
           capture_public_address "ipv6" -6 "https://api6.ipify.org"
       - name: Process worker assignment
         id: process
-        if: ${{ steps.init.outputs.participates == 'true' }}
+        if: ${{ steps.init.outcome == 'success' && steps.init.outputs.overall_conclusion == 'success' }}
         continue-on-error: true
         run: |
           set -eo pipefail
@@ -364,6 +352,7 @@ jobs:
           # host-resolution starts no host-resolution consumers. Delegation
           # runs an NS query; SOA fallback is used for NS NXDOMAIN or
           # retry-exhausted NS outcomes, and NS NODATA is directly actionable.
+          worker_status=0
           ./src/pipeline_run.py worker \
             --source-root . \
             --state-root . \
@@ -371,14 +360,33 @@ jobs:
             --worker-id "${{ matrix.worker_id }}" \
             --log-level "${{ inputs.worker_log_level }}" \
             --max-runtime-seconds "${{ needs.prepare_run.outputs.worker_runtime_budget_seconds }}" \
-            | tee worker.json
-          echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"
-          echo "error_reason=$(jq -r '.error_reason // empty' worker.json)" >> "$GITHUB_OUTPUT"
+            > worker.json 2> worker.stderr || worker_status=$?
+          cat worker.json
+          cat worker.stderr >&2
+          if [ -s worker.json ] && jq -e 'type == "object" and (.overall_conclusion == "success" or .overall_conclusion == "failure")' worker.json >/dev/null; then
+            echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"
+            error_reason="$(jq -r '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == \"string\" and length > 0)) | join(\"; \" )' worker.json | tr '\r\n' '  ')"
+            if [ "${worker_status}" -ne 0 ] && [ -z "${error_reason}" ]; then
+              worker_detail="$(tail -n 10 worker.stderr | tr '\r\n' '  ')"
+              error_reason="worker command failed (exit status ${worker_status})${worker_detail:+: ${worker_detail}}"
+            fi
+          else
+            worker_exit_status="$worker_status"
+            if [ "${worker_exit_status}" -eq 0 ]; then worker_exit_status=1; fi
+            worker_status=1
+            echo "overall_conclusion=failure" >> "$GITHUB_OUTPUT"
+            error_reason="worker command failed before returning a valid result (exit status ${worker_exit_status})"
+            worker_detail="$( { tail -n 10 worker.stderr; tail -n 10 worker.json; } | tr '\r\n' ' ' )"
+            if [ -n "${worker_detail}" ]; then error_reason="${error_reason}: ${worker_detail}"; fi
+          fi
+          printf 'error_reason=%s\n' "$error_reason" >> "$GITHUB_OUTPUT"
+          if [ "$worker_status" -ne 0 ]; then exit "$worker_status"; fi
       - name: Append runner public network addresses to worker log
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        id: append_worker_network_addresses
+        if: ${{ always() && steps.init.outcome == 'success' }}
         run: |
           set -eo pipefail
-          worker_log_path=".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
+          worker_log_path="$(./src/pipeline_run.py handoff-worker-diagnostic-path --state-root . --batch-id "${{ needs.prepare_run.outputs.batch_id }}" --worker-id "${{ matrix.worker_id }}" --kind worker-log)"
           mkdir -p "$(dirname "${worker_log_path}")"
           {
             echo "=== Runner public network addresses ==="
@@ -391,32 +399,69 @@ jobs:
           } >> "${worker_log_path}"
       - name: Finalize worker aggregate handoff
         id: finalize_handoff
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        if: ${{ always() && steps.init.outcome == 'success' }}
         continue-on-error: true
         run: |
           set -eo pipefail
+          handoff_status=0
           ./src/pipeline_run.py finalize-worker-aggregate-handoff \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
-            | tee worker-handoff.json
-          echo "error_reason=$(jq -r '.error_reason // empty' worker-handoff.json)" >> "$GITHUB_OUTPUT"
+            > worker-handoff.json 2> worker-handoff.stderr || handoff_status=$?
+          cat worker-handoff.json
+          cat worker-handoff.stderr >&2
+          if [ -s worker-handoff.json ] && jq -e 'type == "object" and (.handoff_finalized == true or .handoff_finalized == false)' worker-handoff.json >/dev/null; then
+            echo "handoff_finalized=$(jq -r '.handoff_finalized' worker-handoff.json)" >> "$GITHUB_OUTPUT"
+            error_reason="$(jq -r '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == "string" and length > 0)) | join("; ")' worker-handoff.json | tr '\r\n' '  ')"
+            if [ "${handoff_status}" -ne 0 ] && [ -z "${error_reason}" ]; then
+              handoff_detail="$(tail -n 10 worker-handoff.stderr | tr '\r\n' '  ')"
+              error_reason="worker handoff finalization failed (exit status ${handoff_status})${handoff_detail:+: ${handoff_detail}}"
+            fi
+          else
+            handoff_exit_status="$handoff_status"
+            if [ "${handoff_exit_status}" -eq 0 ]; then handoff_exit_status=1; fi
+            handoff_status=1
+            echo "handoff_finalized=false" >> "$GITHUB_OUTPUT"
+            error_reason="worker handoff finalization failed before returning a valid result (exit status ${handoff_exit_status})"
+            handoff_detail="$( { tail -n 10 worker-handoff.stderr; tail -n 10 worker-handoff.json; } | tr '\r\n' ' ' )"
+            if [ -n "${handoff_detail}" ]; then error_reason="${error_reason}: ${handoff_detail}"; fi
+          fi
+          printf 'error_reason=%s\n' "$error_reason" >> "$GITHUB_OUTPUT"
+          if [ "$handoff_status" -ne 0 ]; then exit "$handoff_status"; fi
       - name: Finalize successful worker statuses
-        if: ${{ steps.init.outputs.participates == 'true' && steps.process.outputs.overall_conclusion == 'success' && steps.finalize_handoff.outcome == 'success' }}
+        id: finalize_success
+        if: ${{ always() && steps.init.outcome == 'success' && steps.init.outputs.overall_conclusion == 'success' && steps.process.outputs.overall_conclusion == 'success' && steps.process.outcome == 'success' && steps.finalize_handoff.outputs.handoff_finalized == 'true' && steps.finalize_handoff.outcome == 'success' }}
+        continue-on-error: true
         run: |
           set -eo pipefail
+          finalize_status=0
           ./src/pipeline_run.py finalize-worker-statuses \
             --source-root . \
             --state-root . \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
             --worker-id "${{ matrix.worker_id }}" \
             --output-commit-sha "" \
-            --push-retry-count 0
+            --push-retry-count 0 \
+            --fallback-conclusion success \
+            2>&1 | tee status-finalization.log || finalize_status=$?
+          if [ "${finalize_status}" -ne 0 ]; then
+            detail="$(tail -n 1 status-finalization.log | tr '\r\n' '  ')"
+            error_reason="worker success-status finalization failed (exit status ${finalize_status})"
+            if [ -n "${detail}" ]; then error_reason="${error_reason}: ${detail}"; fi
+            printf 'error_reason=%s\n' "${error_reason}" >> "$GITHUB_OUTPUT"
+            exit "${finalize_status}"
+          fi
       - name: Finalize failure worker statuses
-        if: ${{ steps.init.outputs.participates == 'true' && (steps.process.outputs.overall_conclusion != 'success' || steps.finalize_handoff.outcome != 'success') }}
+        id: finalize_failure
+        if: ${{ always() && (steps.init.outcome != 'success' || steps.init.outputs.overall_conclusion != 'success' || steps.process.outputs.overall_conclusion != 'success' || steps.process.outcome != 'success' || steps.finalize_handoff.outputs.handoff_finalized != 'true' || steps.finalize_handoff.outcome != 'success' || steps.finalize_success.outcome != 'success') }}
+        continue-on-error: true
+        env:
+          WORKER_FAILURE_REASON: ${{ steps.init.outputs.error_reason || steps.process.outputs.error_reason || steps.finalize_handoff.outputs.error_reason || steps.finalize_success.outputs.error_reason || (steps.process.outcome != 'success' && 'worker job failed before aggregate handoff was finalized') || 'worker handoff or status finalization failed' }}
         run: |
           set -eo pipefail
+          finalize_status=0
           ./src/pipeline_run.py finalize-worker-statuses \
             --source-root . \
             --state-root . \
@@ -425,71 +470,77 @@ jobs:
             --output-commit-sha "" \
             --push-retry-count 0 \
             --fallback-conclusion failure \
-            --fallback-failure-reason "${{ steps.process.outputs.error_reason || (steps.process.outcome != 'success' && 'worker job failed before aggregate handoff was finalized') || steps.finalize_handoff.outputs.error_reason || 'worker handoff finalization failed' }}"
+            --fallback-failure-reason "$WORKER_FAILURE_REASON" \
+            2>&1 | tee failure-status-finalization.log || finalize_status=$?
+          if [ "${finalize_status}" -ne 0 ]; then
+            detail="$(tail -n 1 failure-status-finalization.log | tr '\r\n' '  ')"
+            error_reason="worker failure-status finalization failed (exit status ${finalize_status})"
+            if [ -n "${detail}" ]; then error_reason="${error_reason}: ${detail}"; fi
+            printf 'error_reason=%s\n' "${error_reason}" >> "$GITHUB_OUTPUT"
+            exit "${finalize_status}"
+          fi
       - name: Stage worker artifact
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        id: stage_worker_bundle
+        if: ${{ always() && steps.init.outcome == 'success' }}
         run: |
           set -eo pipefail
-          rm -rf .tmp/worker_artifact_bundle
-          worker_handoff_path=".workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/worker-aggregate-manifest.json"
-          if [ -f "${worker_handoff_path}" ]; then
-            mkdir -p ".tmp/worker_artifact_bundle/.workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}"
-            mkdir -p ".tmp/worker_artifact_bundle/.workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}"
-            cp \
-              "${worker_handoff_path}" \
-              ".tmp/worker_artifact_bundle/.workflow_state/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/worker-aggregate-manifest.json"
-          fi
-          if [ -f ".workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" ]; then
-            mkdir -p ".tmp/worker_artifact_bundle/.workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}"
-            cp \
-              ".workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json" \
-              ".tmp/worker_artifact_bundle/.workflow_state/status/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}.json"
-          fi
-      - name: Upload worker artifact
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+          ./src/pipeline_run.py handoff-stage \
+            --state-root . --handoff worker-aggregate \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+            --worker-id "${{ matrix.worker_id }}" \
+            --destination .tmp/worker_artifact_bundle
+      - name: Upload worker bundle
+        id: upload_worker_bundle
+        if: ${{ always() && steps.stage_worker_bundle.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: workflow-internal-worker-bundle-${{ matrix.worker_id }}
+          name: workflow-internal-worker-bundle-${{ needs.prepare_run.outputs.batch_id }}-${{ matrix.worker_id }}
           path: .tmp/worker_artifact_bundle
           include-hidden-files: true
           if-no-files-found: error
-      - name: Stage worker debug artifact
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+      - name: Record worker artifact receipt
+        id: record_worker_artifact_receipt
+        if: ${{ always() && steps.upload_worker_bundle.outcome == 'success' }}
+        env:
+          BATCH_ID: ${{ needs.prepare_run.outputs.batch_id }}
+          WORKER_ID: ${{ matrix.worker_id }}
+          ARTIFACT_ID: ${{ steps.upload_worker_bundle.outputs.artifact-id }}
         run: |
-          set -eo pipefail
-          rm -rf .tmp/worker_debug_bundle
-          if [ -f ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" ]; then
-            mkdir -p ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs"
-            cp \
-              ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log" \
-              ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/worker.log"
+          set -euo pipefail
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::worker artifact upload did not return a valid artifact ID"
+            exit 1
           fi
-          if [ -f ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log" ]; then
-            mkdir -p ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs"
-            cp \
-              ".debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log" \
-              ".tmp/worker_debug_bundle/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${{ matrix.worker_id }}/logs/cache.log"
-          fi
-      - name: Upload worker debug artifact
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: debug-worker-log-${{ matrix.worker_id }}
-          path: .tmp/worker_debug_bundle
-          include-hidden-files: true
-          if-no-files-found: error
+          printf 'ARTIFACT_RECEIPT %s %s %s %s\n' "$GITHUB_RUN_ID" "$BATCH_ID" "$WORKER_ID" "$ARTIFACT_ID"
       - name: Fail worker when processing reported failure
-        if: ${{ always() && steps.init.outputs.participates == 'true' }}
+        id: fail_worker
+        if: ${{ always() }}
+        env:
+          WORKER_FAILURE_REASON: ${{ steps.init.outputs.error_reason || steps.process.outputs.error_reason || steps.finalize_handoff.outputs.error_reason || steps.finalize_success.outputs.error_reason || steps.finalize_failure.outputs.error_reason || 'worker stage failed; inspect the failed step logs for details' }}
+          STATUS_FINALIZATION_ERROR: ${{ steps.finalize_failure.outputs.error_reason }}
+          WORKER_ID: ${{ matrix.worker_id }}
+          STEPS_JSON: ${{ toJSON(steps) }}
         run: |
           set -eo pipefail
-          if [ "${{ steps.process.outputs.overall_conclusion }}" != "success" ] || [ "${{ steps.finalize_handoff.outcome }}" != "success" ]; then
-            echo "${{ matrix.worker_id }} reported terminal failure or handoff finalization failure"
+          failed_steps="$(jq -r 'to_entries | map(select(.value.outcome == "failure") | .key) | join(", ")' <<< "${STEPS_JSON}")"
+          if [ -n "${failed_steps}" ] || [ "${{ steps.init.outputs.overall_conclusion }}" != "success" ] || [ "${{ steps.process.outputs.overall_conclusion }}" != "success" ] || [ "${{ steps.process.outcome }}" != "success" ] || [ "${{ steps.finalize_handoff.outputs.handoff_finalized }}" != "true" ] || [ "${{ steps.finalize_handoff.outcome }}" != "success" ] || [ "${{ steps.finalize_success.outcome }}" != "success" ] || [ "${{ steps.finalize_failure.outcome }}" = "failure" ] || [ "${{ steps.stage_worker_bundle.outcome }}" = "failure" ] || [ "${{ steps.upload_worker_bundle.outcome }}" = "failure" ] || [ "${{ steps.record_worker_artifact_receipt.outcome }}" = "failure" ]; then
+            reason="${WORKER_FAILURE_REASON:-worker processing or handoff finalization failed}"
+            if [ -n "${failed_steps}" ]; then reason="${reason}; failed worker step(s): ${failed_steps}"; fi
+            if [ -n "${STATUS_FINALIZATION_ERROR}" ]; then
+              reason="${reason}; additionally, ${STATUS_FINALIZATION_ERROR}"
+            elif [ "${{ steps.finalize_failure.outcome }}" = "failure" ]; then
+              reason="${reason}; worker failure-status finalization failed (see the preceding step log)"
+            fi
+            escaped_reason="${reason//%/%25}"
+            escaped_reason="${escaped_reason//$'\r'/%0D}"
+            escaped_reason="${escaped_reason//$'\n'/%0A}"
+            echo "::error title=Worker ${WORKER_ID} failed::${escaped_reason}"
+            echo "${WORKER_ID} failed: ${reason}"
             exit 1
           fi
 
   aggregate_and_publish:
     name: Aggregate and publish
-    if: ${{ always() && needs.prepare_run.result == 'success' }}
     needs:
       - prepare_run
       - run_workers
@@ -511,6 +562,11 @@ jobs:
         run: |
           git remote set-url origin \
             "https://x-access-token:${PIPELINE_PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -543,10 +599,10 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-
-            domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-
+            domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-
+            domain-pipeline-runtime-cache-${{ inputs.config_name }}-
       - name: Log aggregate baseline cache restore
         run: |
           set -eo pipefail
@@ -576,8 +632,8 @@ jobs:
           done
           summary="$(IFS=,; echo "${summary_parts[*]}")"
           echo "aggregate baseline cache restore config=${{ inputs.config_name }} run_id=${{ github.run_id }} run_attempt=${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
-          echo "aggregate baseline cache primary_key=domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
-          echo "aggregate baseline cache restore_prefixes=domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache primary_key=domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache restore_prefixes=domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-,domain-pipeline-runtime-cache-${{ inputs.config_name }}-" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache cache-hit=${cache_hit}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache restore_result=${restore_result}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache restored_paths=${summary}" | tee -a "${CACHE_LOG_PATH}"
@@ -590,7 +646,7 @@ jobs:
           mkdir -p "$(dirname "${CACHE_LOG_PATH}")"
           cache_hit="${{ steps.restore_aggregate_baseline_cache.outputs.cache-hit }}"
           api_root="${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/caches"
-          key_prefix="domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-"
+          key_prefix="domain-pipeline-runtime-cache-${{ inputs.config_name }}-"
           response_path="$(mktemp)"
           trap 'rm -f "${response_path}"' EXIT
           curl -fsSL \
@@ -618,27 +674,34 @@ jobs:
           ./src/pipeline_run.py configure-git \
             --source-root . \
             --state-root .
-      - name: Download workflow artifacts
+      - name: Download prepared batch artifact
         uses: actions/download-artifact@v8
         with:
-          path: .tmp/downloads
+          name: workflow-internal-prepared-batch-${{ needs.prepare_run.outputs.batch_id }}
+          path: .tmp/downloads/prepared
+      - name: Select and download worker bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_IDS_JSON: ${{ needs.prepare_run.outputs.worker_ids_json }}
+        run: |
+          uv run src/worker_artifact_correlation.py \
+            --api-url "${{ github.api_url }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+            --worker-ids-json "$WORKER_IDS_JSON" \
+            --destination .tmp/downloads
       - name: Restore prepared and worker state
         run: |
           set -eo pipefail
-          mkdir -p .workflow_state
-          cp -R \
-            ".tmp/downloads/workflow-internal-prepared-batch/.workflow_state/." \
-            .workflow_state/
-          for worker_dir in .tmp/downloads/workflow-internal-worker-bundle-*; do
+          batch_id="${{ needs.prepare_run.outputs.batch_id }}"
+          ./src/pipeline_run.py handoff-restore --state-root . --handoff prepare-aggregate \
+            --batch-id "$batch_id" --config-name "${{ inputs.config_name }}" --archive .tmp/downloads/prepared
+          for worker_dir in ".tmp/downloads/workflow-internal-worker-bundle-${batch_id}-"*; do
             [ -d "${worker_dir}" ] || continue
-            if [ -d "${worker_dir}/.workflow_state/workers" ]; then
-              mkdir -p .workflow_state/workers
-              cp -R "${worker_dir}/.workflow_state/workers/." .workflow_state/workers/
-            fi
-            if [ -d "${worker_dir}/.workflow_state/status" ]; then
-              mkdir -p .workflow_state/status
-              cp -R "${worker_dir}/.workflow_state/status/." .workflow_state/status/
-            fi
+            worker_id="${worker_dir##*/workflow-internal-worker-bundle-${batch_id}-}"
+            ./src/pipeline_run.py handoff-restore --state-root . --handoff worker-aggregate \
+              --batch-id "$batch_id" --worker-id "$worker_id" --archive "$worker_dir"
           done
       - name: Initialize aggregate job log
         run: |
@@ -650,19 +713,6 @@ jobs:
             echo "batch_id=${{ needs.prepare_run.outputs.batch_id }}"
             echo "target_branch=${{ needs.prepare_run.outputs.target_branch }}"
           } | tee -a "${AGGREGATE_LOG_PATH}"
-      - name: Materialize incomplete worker statuses
-        run: |
-          set -eo pipefail
-          {
-            echo "=== Materialize incomplete worker statuses ==="
-            ./src/pipeline_run.py materialize-incomplete-statuses \
-              --source-root . \
-              --state-root . \
-              --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
-              --failure-reason "aggregate detected missing or incomplete worker artifacts" \
-              --log-level "${{ inputs.aggregate_log_level }}" \
-              | tee materialize.json
-          } 2>&1 | tee -a "${AGGREGATE_LOG_PATH}"
       - name: Validate aggregate barrier
         id: readiness
         run: |
@@ -725,18 +775,17 @@ jobs:
             mkdir -p "${artifact_root}/aggregate"
             cp "${failed_marker_path}" "${artifact_root}/aggregate/failed.json"
           fi
-          copy_if_present \
-            .tmp/downloads/debug-validation-settings/logs/settings.json \
-            "${artifact_root}/validation-settings/logs/settings.json"
-          copy_if_present \
-            .tmp/downloads/debug-validation-settings/logs/validate-settings.log \
-            "${artifact_root}/validation-settings/logs/validate-settings.log"
-          copy_if_present \
-            .tmp/downloads/debug-prepared-batch/logs/batch.json \
-            "${artifact_root}/prepared-batch/logs/batch.json"
-          copy_if_present \
-            .tmp/downloads/debug-prepared-batch/logs/prepare-batch.log \
-            "${artifact_root}/prepared-batch/logs/prepare-batch.log"
+          for diagnostic in settings validation-log batch batch-log; do
+            case "$diagnostic" in
+              settings) target="${artifact_root}/validation-settings/logs/settings.json" ;;
+              validation-log) target="${artifact_root}/validation-settings/logs/validate-settings.log" ;;
+              batch) target="${artifact_root}/prepared-batch/logs/batch.json" ;;
+              batch-log) target="${artifact_root}/prepared-batch/logs/prepare-batch.log" ;;
+            esac
+            ./src/pipeline_run.py handoff-export-diagnostic \
+              --handoff prepare-aggregate --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+              --archive .tmp/downloads/prepared --kind "$diagnostic" --destination "$target"
+          done
           copy_if_present \
             ".debug_artifacts/runtime/raw/${{ inputs.config_name }}.jsonl" \
             "${artifact_root}/jsonl-log/${{ inputs.config_name }}.jsonl"
@@ -749,18 +798,18 @@ jobs:
           copy_if_present \
             "${CACHE_LOG_PATH}" \
             "${artifact_root}/runtime-logs/${{ inputs.config_name }}--cache.log"
-          for worker_dir in .tmp/downloads/debug-worker-log-*; do
+          for worker_dir in .tmp/downloads/workflow-internal-worker-bundle-${{ needs.prepare_run.outputs.batch_id }}-*; do
             [ -d "${worker_dir}" ] || continue
             artifact_name="${worker_dir##*/}"
-            worker_id="${artifact_name#debug-worker-log-}"
-            worker_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/worker.log"
-            worker_cache_log_path="${worker_dir}/.debug_artifacts/workers/${{ needs.prepare_run.outputs.batch_id }}/${worker_id}/logs/cache.log"
-            if [ -f "${worker_log_path}" ]; then
-              cp "${worker_log_path}" "${artifact_root}/worker-logs/${worker_id}.log"
-            fi
-            if [ -f "${worker_cache_log_path}" ]; then
-              cp "${worker_cache_log_path}" "${artifact_root}/cache-logs/${worker_id}.log"
-            fi
+            worker_id="${artifact_name#workflow-internal-worker-bundle-${{ needs.prepare_run.outputs.batch_id }}-}"
+            ./src/pipeline_run.py handoff-export-diagnostic \
+              --handoff worker-aggregate --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+              --worker-id "$worker_id" --archive "$worker_dir" --kind worker-log \
+              --destination "${artifact_root}/worker-logs/${worker_id}.log"
+            ./src/pipeline_run.py handoff-export-diagnostic \
+              --handoff worker-aggregate --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
+              --worker-id "$worker_id" --archive "$worker_dir" --kind cache-log \
+              --destination "${artifact_root}/cache-logs/${worker_id}.log"
           done
           cp "${AGGREGATE_LOG_PATH}" "${artifact_root}/runtime-logs/${{ inputs.config_name }}--aggregate.log"
           cp "${CACHE_LOG_PATH}" "${artifact_root}/runtime-logs/${{ inputs.config_name }}--cache.log"
@@ -798,7 +847,7 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p "$(dirname "${CACHE_LOG_PATH}")"
-          echo "aggregate baseline cache save primary_key=domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
+          echo "aggregate baseline cache save primary_key=domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache save should_save=${{ steps.inspect_aggregate_cache_bundle.outputs.should_save }}" | tee -a "${CACHE_LOG_PATH}"
           echo "aggregate baseline cache save bundle_summary=${{ steps.inspect_aggregate_cache_bundle.outputs.bundle_summary }}" | tee -a "${CACHE_LOG_PATH}"
       - name: Save aggregate baseline cache
@@ -809,7 +858,7 @@ jobs:
             .workflow_state/runtime/cache/check-cache.sqlite3
             .workflow_state/runtime/cache/check-cache.sqlite3-shm
             .workflow_state/runtime/cache/check-cache.sqlite3-wal
-          key: domain-pipeline-runtime-cache-v3-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: domain-pipeline-runtime-cache-${{ inputs.config_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Validate publish candidate sizes
         if: ${{ steps.aggregate_state.outputs.state == 'aggregated' }}
         run: |
