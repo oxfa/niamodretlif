@@ -35,7 +35,7 @@ def review_output_path_for_source(source_context: WorkerSourceContext) -> Path:
     review_name = (
         f"{review_basename_for_source(source_context)}.{REVIEW_OUTPUT_EXTENSION}"
     )
-    return output_dir / "review" / review_name
+    return output_dir / "review-results-by-registrable-domain" / review_name
 
 
 def unactionable_output_path_for_source(source_context: WorkerSourceContext) -> Path:
@@ -43,7 +43,7 @@ def unactionable_output_path_for_source(source_context: WorkerSourceContext) -> 
     output_dir = Path(source_context.config["output"].get("directory", "."))
     return (
         output_dir
-        / "unactionable"
+        / "unactionable-registrable-domains"
         / f"{source_context.output_stem}.{TEXT_OUTPUT_EXTENSION}"
     )
 
@@ -67,7 +67,7 @@ def write_review_rows(review_path: Path, review_rows: list[dict[str, Any]]) -> N
     for row in review_rows:
         review_row = projector.project(row)
         input_route_code = str(row.get("route_code", ""))
-        input_reason = str(row.get("review_reason", "") or row.get("route_reason", ""))
+        input_reason = str(row.get("route_reason", ""))
         if (
             input_route_code
             and input_reason
@@ -107,8 +107,11 @@ def write_projected_review_rows(
 
 
 def txt_output_value(row: dict[str, Any]) -> str:
-    """Return the public TXT value for one output row."""
-    return str(row["host"])
+    """Return the registrable-domain value for one worker output row."""
+    registrable_domain = str(row.get("registrable_domain", "")).strip()
+    if not registrable_domain:
+        raise ValueError("worker domain output requires a registrable_domain value")
+    return registrable_domain
 
 
 def output_paths_for_source(source_context: WorkerSourceContext) -> dict[str, Path]:

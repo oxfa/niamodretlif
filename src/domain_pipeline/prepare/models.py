@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from domain_pipeline.prepare.sources.jobs import SourceJob
-from domain_pipeline.prepare.sources.parser import DomainEntry
+from domain_pipeline.prepare.sources.parser import DomainEntry, ParsedSourceFile
 
 MANUALLY_SELECTED_FOR_FILTERED_SOURCE_ID = "manually_selected_for_filtered"
 MANUALLY_ADDED_SOURCE_ID = "manually_added"
@@ -53,6 +53,10 @@ class PreparedInputSet:
     manual_routing_by_host: dict[str, PreparedManualRouting]
     root_plans: dict[str, PreparedRootPlan]
     preparation_outputs: PreparedOutputRows
+    excluded_source_hosts: set[str] = dataclasses.field(default_factory=set)
+    parsed_source_files: dict[str, ParsedSourceFile] = dataclasses.field(
+        default_factory=dict
+    )
 
     @property
     def preparation_review_rows(self) -> list[dict[str, Any]]:

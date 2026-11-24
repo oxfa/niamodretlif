@@ -26,15 +26,6 @@ from domain_pipeline.worker.runtime.constants import (
     IP_LOCATION_STAGE_CONCURRENCY,
 )
 
-MAPPING_DEFAULT_FIELDS = {
-    "fetch",
-    "dns_query",
-    "delegation",
-    "host_resolution",
-    "ip_location",
-}
-
-
 def _is_safe_relative_path(value: str, *, validate_characters: bool) -> bool:
     """Return whether a config path stays relative and inside the repository."""
     path_value = value.strip()
@@ -605,15 +596,6 @@ class DefaultsConfig(StrictModel):
     host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
     ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_null_defaults(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            for key in MAPPING_DEFAULT_FIELDS:
-                if value.get(key) is None:
-                    value[key] = {}
-        return value
-
 
 class SourceOverrideConfig(StrictModel):
     """User-specified source entry before default merging."""
@@ -621,11 +603,11 @@ class SourceOverrideConfig(StrictModel):
     id: str
     enabled: bool = True
     input: InputConfig
-    fetch: FetchConfig | None = None
-    dns_query: DNSQueryConfig | None = None
-    delegation: DelegationConfig | None = None
-    host_resolution: HostResolutionConfig | None = None
-    ip_location: IPLocationConfig | None = None
+    fetch: FetchConfig = Field(default_factory=FetchConfig)
+    dns_query: DNSQueryConfig = Field(default_factory=DNSQueryConfig)
+    delegation: DelegationConfig = Field(default_factory=DelegationConfig)
+    host_resolution: HostResolutionConfig = Field(default_factory=HostResolutionConfig)
+    ip_location: IPLocationConfig = Field(default_factory=IPLocationConfig)
 
     @field_validator("id", mode="after")
     @classmethod
@@ -634,15 +616,6 @@ class SourceOverrideConfig(StrictModel):
         if not stripped:
             raise ValueError("sources[].id must be a non-empty string")
         return stripped
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_null_source_overrides(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            for key in MAPPING_DEFAULT_FIELDS - {"input"}:
-                if value.get(key) is None:
-                    value[key] = {}
-        return value
 
 
 class EffectiveSourceConfig(StrictModel):

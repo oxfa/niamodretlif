@@ -9,30 +9,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
-    AggregateOutputSpec,
-)
-from domain_pipeline.prepare.prepare_to_worker_manifest import (
-    PrepareWorkerManifest,
-    PreparedDelegationRootMetadata,
-    PreparedRuntimeMetadata,
-    WorkerOutputSpec,
-    WorkerRuntimeSpec,
-)
-from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
+from domain_pipeline.paths.layout import PathLayout, WorkflowStatePathLayout
+from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.prepare.models import (
     PreparedInputSet,
     PreparedRootPlan,
 )
+from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
+    AggregateOutputSpec,
+)
+from domain_pipeline.prepare.prepare_to_worker_manifest import (
+    PreparedDelegationRootMetadata,
+    PreparedRuntimeMetadata,
+    PrepareWorkerManifest,
+    WorkerOutputSpec,
+    WorkerRuntimeSpec,
+)
 from domain_pipeline.prepare.sources.parser import DomainEntry
 
-PIPELINE_RUN_FORMAT_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
-def _workflow_paths() -> WorkflowPathLayout:
+def _workflow_paths() -> WorkflowStatePathLayout:
     """Return repo-relative workflow path ownership."""
-    return PathLayout(Path(".")).workflow
+    return PathLayout(Path(".")).workflow_state
 
 
 def _path_layout() -> PathLayout:
@@ -73,20 +73,6 @@ class WorkerManifestBuildRequest:
 def relative_path(path: Path) -> str:
     """Return the repo-relative path representation stored in manifests."""
     return path.as_posix()
-
-
-def prepare_aggregate_manifest_relative_path(*, batch_id: str) -> Path:
-    """Return the committed prepare-to-aggregate manifest path for one batch."""
-    return _path_layout().batch_paths(batch_id=batch_id).prepare_aggregate_manifest
-
-
-def prepare_worker_manifest_relative_path(*, batch_id: str, worker_id: str) -> Path:
-    """Return the committed prepare-to-worker manifest path for one worker."""
-    return (
-        _path_layout()
-        .batch_paths(batch_id=batch_id)
-        .prepare_worker_manifest(worker_id=worker_id)
-    )
 
 
 def _validate_publish_output_path(output_path: Path, *, field_name: str) -> str:

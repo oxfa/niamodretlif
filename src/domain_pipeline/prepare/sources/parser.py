@@ -36,23 +36,25 @@ Processing steps applied to each file:
 4. Lowercase and remove trailing dots.
 5. Encode IDN labels to Punycode (IDNA).
 6. Validate structural syntax (RFC 1035 label limits).
-7. Extract the DNS delegation target (ICANN eTLD+1) via ``publicsuffix2``.
+7. Extract the DNS delegation target (PSL eTLD+1, including PRIVATE rules).
 8. Deduplicate normalized entries by host while preserving their registrable
    domain.
 
 Files that are mixed-format or unrecognized are skipped.
 
 Dependencies:
-    - ``publicsuffix2`` (mandatory) for accurate ICANN registrable-domain
-      extraction, including complex suffixes like ``.co.uk``.
+    - ``publicsuffix2`` (mandatory) for accurate PSL registrable-domain
+      extraction, including complex suffixes like ``.co.uk`` and PRIVATE rules.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import ipaddress
+import json
 import logging
 import re
+import subprocess
 from collections.abc import MutableMapping
 from enum import Enum
 from functools import lru_cache
@@ -62,19 +64,75 @@ from typing import Iterable, Iterator, Optional, Set
 import publicsuffix2
 
 log = logging.getLogger(__name__)
-_PRIVATE_SUFFIX_SECTION_MARKER = "// ===BEGIN PRIVATE DOMAINS==="
+
+_ECMASCRIPT_REGEX_VALIDATOR = """
+let source = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { source += chunk; });
+process.stdin.on("end", () => {
+  const pattern = JSON.parse(source);
+  try {
+    new RegExp(pattern);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      process.stdout.write("invalid");
+      return;
+    }
+    throw error;
+  }
+  process.stdout.write("valid");
+});
+"""
+
+
+ECMASCRIPT_REGEX_VALIDATION_TIMEOUT_SECONDS = 10
+
+
+@lru_cache(maxsize=128)
+def _is_valid_ecmascript_regex(pattern: str) -> bool:
+    """Validate one regex using the hosted Node runtime's RegExp parser."""
+    try:
+        result = subprocess.run(
+            ["node", "-e", _ECMASCRIPT_REGEX_VALIDATOR],
+            input=json.dumps(pattern),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=ECMASCRIPT_REGEX_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Node.js ECMAScript regular-expression validator timed out after "
+            f"{ECMASCRIPT_REGEX_VALIDATION_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "unable to run Node.js ECMAScript regular-expression validator"
+        ) from exc
+
+    if result.returncode != 0:
+        details = result.stderr.strip()
+        detail_suffix = f": {details}" if details else ""
+        raise RuntimeError(
+            "Node.js ECMAScript regular-expression validator exited with "
+            f"status {result.returncode}{detail_suffix}"
+        )
+    if result.stdout == "valid":
+        return True
+    if result.stdout == "invalid":
+        return False
+    raise RuntimeError(
+        "Node.js ECMAScript regular-expression validator returned unexpected output"
+    )
 
 
 @lru_cache(maxsize=1)
-def _icann_public_suffix_list() -> publicsuffix2.PublicSuffixList:
-    """Return a cached PSL view excluding private delegated suffixes."""
-    suffix_list_path = Path(publicsuffix2.__file__).with_name("public_suffix_list.dat")
-    icann_lines: list[str] = []
-    for line in suffix_list_path.read_text(encoding="utf-8").splitlines():
-        if line.strip() == _PRIVATE_SUFFIX_SECTION_MARKER:
-            break
-        icann_lines.append(line)
-    return publicsuffix2.PublicSuffixList(icann_lines)
+def _full_public_suffix_list() -> publicsuffix2.PublicSuffixList:
+    """Return the project-owned full PSL snapshot, including PRIVATE rules."""
+    suffix_list_path = Path(__file__).with_name("public_suffix_list.dat")
+    return publicsuffix2.PublicSuffixList(
+        suffix_list_path.read_text(encoding="utf-8").splitlines()
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,6 +169,63 @@ class PreparedSourceLine:
 
     content: str
     entries: tuple[DomainEntry, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceTargetCandidate:
+    """One format-extracted domain target before PSL validation."""
+
+    host: str
+    role: str
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceItemSyntax:
+    """One format-valid item's structural parse before target validation."""
+
+    item_kind: str
+    targets: tuple[SourceTargetCandidate, ...] = ()
+    no_target_reason: str | None = None
+    is_metadata: bool = False
+    error_reason: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedSourceTarget:
+    """One normalized target and its strict-PSL outcome."""
+
+    host: str
+    registrable_domain: str | None
+    role: str
+    error_reason: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedSourceItem:
+    """Format-valid source item with target extraction kept separate."""
+
+    item_kind: str
+    targets: tuple[ParsedSourceTarget, ...] = ()
+    no_target_reason: str | None = None
+    is_metadata: bool = False
+    error_reason: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedSourceLine:
+    """One physical source line and its already-computed item parse."""
+
+    line_number: int
+    raw_line: str
+    parsed_item: ParsedSourceItem | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ParsedSourceFile:
+    """Whole-file format and per-line parses shared by prepare consumers."""
+
+    file_format: InputFileFormat
+    lines: tuple[ParsedSourceLine, ...]
 
 
 class DomainSyntax:
@@ -191,49 +306,269 @@ class DnsmasqFormatHandler(SourceFormatHandler):
 
 
 class AdblockFormatHandler(SourceFormatHandler):
-    """Matcher and extractor for AdBlock domain targets and valid source rules."""
+    """Parse the bounded AdBlock syntax profile."""
 
     format = InputFileFormat.ADBLOCK
-    target_regex = re.compile(r"^\|\|(\*?\.[A-Za-z0-9._-]+|[A-Za-z0-9._-]+)\^")
+    metadata_header = "[Adblock Plus 2.0]"
+    cosmetic_markers = ("#@#", "##")
+    unsupported_cosmetic_markers = ("#@?#", "#?#", "#$#", "#%#")
+    _modifier_names = {"third-party", "dnstype", "denyallow", "domain"}
 
     def matches_line(self, line: str, syntax: DomainSyntax) -> bool:
         """Recognize a valid single-line AdBlock rule."""
-        _ = syntax
-        return self._is_valid_adblock_line(line)
+        parsed = self.parse_syntax(line, syntax)
+        return parsed is not None and parsed.error_reason is None
 
     def parse_line(self, line: str, syntax: DomainSyntax) -> ParsedFormatLine:
-        """Extract a concrete network-filter target, excluding exception rules."""
-        line = line.strip()
-        if line.startswith("@@"):
+        """Return the first concrete request-host target, when present."""
+        parsed = self.parse_syntax(line, syntax)
+        if parsed is None or not parsed.targets:
             return ParsedFormatLine("")
-        match = self.target_regex.match(line)
-        if match is None:
-            return ParsedFormatLine("")
-        host = match.group(1)
-        if host.startswith("*."):
-            host = host[2:]
-        normalized = syntax.normalize(host)
-        if not syntax.is_valid_syntax(normalized):
-            return ParsedFormatLine("")
-        return ParsedFormatLine(normalized)
+        return ParsedFormatLine(parsed.targets[0].host)
 
-    @staticmethod
-    def _is_valid_adblock_line(line: str) -> bool:
-        """Recognize source-rule shapes without rejecting valid non-domain rules."""
+    def parse_syntax(
+        self, line: str, syntax: DomainSyntax
+    ) -> SourceItemSyntax | None:
+        """Parse one rule without treating target extraction as validity."""
         value = line.strip()
         if not value or value.startswith("!"):
-            return False
-        if value.startswith("#") and not any(
-            marker in value for marker in ("##", "#@#", "#?#", "#$#", "#%#")
-        ):
-            return False
-        if value.startswith("[") and value.endswith("]"):
-            return True
-        if any(marker in value for marker in ("##", "#@#", "#?#", "#$#", "#%#")):
-            return True
-        if value.startswith("@@"):
-            value = value[2:]
-        return bool(value) and not any(char.isspace() for char in value)
+            return None
+        if value == self.metadata_header:
+            return SourceItemSyntax(
+                item_kind="metadata",
+                no_target_reason="format_metadata",
+                is_metadata=True,
+            )
+        if any(marker in value for marker in self.unsupported_cosmetic_markers):
+            return SourceItemSyntax(
+                item_kind="unsupported_cosmetic_filter",
+                error_reason="unsupported_cosmetic_filter_syntax",
+            )
+        for marker in self.cosmetic_markers:
+            if marker in value:
+                return self._parse_cosmetic(value, marker, syntax)
+
+        is_exception = value.startswith("@@")
+        pattern_and_options = value[2:] if is_exception else value
+        if not pattern_and_options or any(char.isspace() for char in pattern_and_options):
+            return SourceItemSyntax(
+                item_kind="invalid_network_filter",
+                error_reason="empty_or_whitespace_network_filter",
+            )
+
+        if pattern_and_options.startswith("/"):
+            closing = self._regex_closing_delimiter(pattern_and_options)
+            if closing is None:
+                return SourceItemSyntax(
+                    item_kind="invalid_regex_filter",
+                    error_reason="unterminated_regular_expression_filter",
+                )
+            pattern = pattern_and_options[: closing + 1]
+            trailing = pattern_and_options[closing + 1 :]
+            option_text: str | None = None
+            if trailing:
+                if not trailing.startswith("$") or len(trailing) == 1:
+                    return SourceItemSyntax(
+                        item_kind="invalid_regex_filter",
+                        error_reason="unexpected_text_after_regular_expression",
+                    )
+                option_text = trailing[1:]
+            option_error = self._validate_options(option_text)
+            if option_error:
+                return SourceItemSyntax(
+                    item_kind="invalid_regex_filter",
+                    error_reason=option_error,
+                )
+            regex_body = pattern[1:-1]
+            if not _is_valid_ecmascript_regex(regex_body):
+                return SourceItemSyntax(
+                    item_kind="invalid_regex_filter",
+                    error_reason="invalid_regular_expression_filter",
+                )
+            return SourceItemSyntax(
+                item_kind=("exception_regex_filter" if is_exception else "regex_filter"),
+                no_target_reason="regular_expression_has_no_literal_request_host",
+            )
+
+        pattern, option_text, option_error = self._split_options(pattern_and_options)
+        if option_error:
+            return SourceItemSyntax(
+                item_kind="invalid_network_filter",
+                error_reason=option_error,
+            )
+        option_error = self._validate_options(option_text)
+        if option_error:
+            return SourceItemSyntax(
+                item_kind="invalid_network_filter",
+                error_reason=option_error,
+            )
+
+        if not pattern:
+            return SourceItemSyntax(
+                item_kind="invalid_network_filter",
+                error_reason="empty_network_filter_pattern",
+            )
+        if len(pattern) < 4:
+            return SourceItemSyntax(
+                item_kind="invalid_network_filter",
+                error_reason="network_filter_pattern_too_short",
+            )
+        if pattern.startswith("||"):
+            anchored_host = self._anchored_host_pattern(pattern)
+            if not anchored_host:
+                return SourceItemSyntax(
+                    item_kind="invalid_network_filter",
+                    error_reason="host_anchored_filter_requires_host",
+                )
+            if "*" not in anchored_host and not syntax.looks_like_domain(
+                anchored_host
+            ):
+                return SourceItemSyntax(
+                    item_kind="invalid_network_filter",
+                    error_reason="invalid_host_anchored_request_host",
+                )
+        target = self._literal_request_host(pattern, syntax)
+        if target is not None:
+            return SourceItemSyntax(
+                item_kind=("exception_network_filter" if is_exception else "network_filter"),
+                targets=(target,),
+            )
+        return SourceItemSyntax(
+            item_kind=("exception_network_filter" if is_exception else "network_filter"),
+            no_target_reason=self._no_target_reason(pattern),
+        )
+
+    def _parse_cosmetic(
+        self, value: str, marker: str, syntax: DomainSyntax
+    ) -> SourceItemSyntax:
+        scope, selector = value.split(marker, 1)
+        if not selector:
+            return SourceItemSyntax(
+                item_kind="invalid_cosmetic_filter",
+                error_reason="cosmetic_filter_requires_selector",
+            )
+        if scope:
+            scopes = scope.split(",")
+            for item in scopes:
+                domain = item.removeprefix("~")
+                if not domain or not syntax.looks_like_domain(domain):
+                    return SourceItemSyntax(
+                        item_kind="invalid_cosmetic_filter",
+                        error_reason="invalid_cosmetic_filter_scope",
+                    )
+        return SourceItemSyntax(
+            item_kind=(
+                "cosmetic_exception_filter" if marker == "#@#" else "cosmetic_filter"
+            ),
+            no_target_reason="cosmetic_scope_is_context_not_request_host",
+        )
+
+    def _split_options(self, value: str) -> tuple[str, str | None, str | None]:
+        """Split modifier text at the first unescaped pattern dollar."""
+        for index, char in enumerate(value):
+            if char != "$":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and value[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2:
+                continue
+            pattern, options = value[:index], value[index + 1 :]
+            if not options:
+                return pattern, None, "empty_adblock_modifier_list"
+            return pattern, options, None
+        return value, None, None
+
+    def _validate_options(self, option_text: str | None) -> str | None:
+        if option_text is None:
+            return None
+        options = option_text.split(",")
+        if not options or any(not option for option in options):
+            return "empty_adblock_modifier"
+        seen: set[str] = set()
+        for option in options:
+            name, separator, value = option.partition("=")
+            normalized_name = name.removeprefix("~").lower()
+            if normalized_name not in self._modifier_names:
+                return f"unsupported_adblock_modifier:{name}"
+            if normalized_name in seen:
+                return f"duplicate_adblock_modifier:{normalized_name}"
+            seen.add(normalized_name)
+            if normalized_name == "third-party":
+                if separator:
+                    return "third_party_modifier_must_not_have_a_value"
+                continue
+            if not separator or not value:
+                return f"adblock_modifier_requires_value:{normalized_name}"
+            values = value.split("|") if normalized_name in {"domain", "denyallow"} else [value]
+            if any(not part for part in values):
+                return f"empty_adblock_modifier_value:{normalized_name}"
+            if normalized_name in {"domain", "denyallow"}:
+                for part in values:
+                    scope = part.removeprefix("~") if normalized_name == "domain" else part
+                    if not scope or not DomainSyntax().looks_like_domain(scope):
+                        return f"invalid_adblock_modifier_domain:{normalized_name}"
+            elif any(char.isspace() for char in value):
+                return f"invalid_adblock_modifier_value:{normalized_name}"
+        return None
+
+    @staticmethod
+    def _regex_closing_delimiter(pattern: str) -> int | None:
+        """Return the first unescaped slash after the regex opening slash."""
+        for index in range(1, len(pattern)):
+            if pattern[index] != "/":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and pattern[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                return index
+        return None
+
+    @staticmethod
+    def _literal_request_host(
+        pattern: str, syntax: DomainSyntax
+    ) -> SourceTargetCandidate | None:
+        if syntax.looks_like_domain(pattern):
+            return SourceTargetCandidate(host=pattern, role="request_host")
+        authority_pattern = AdblockFormatHandler._anchored_host_pattern(pattern)
+        if authority_pattern is None:
+            return None
+        host_end = len(authority_pattern)
+        for delimiter in ("^", "/", "|", "?", ":", "#"):
+            found = authority_pattern.find(delimiter)
+            if found >= 0:
+                host_end = min(host_end, found)
+        host = authority_pattern[:host_end]
+        if not host or "*" in host or not syntax.looks_like_domain(host):
+            return None
+        return SourceTargetCandidate(host=host, role="request_host")
+
+    @staticmethod
+    def _anchored_host_pattern(pattern: str) -> str | None:
+        """Return the host portion of a domain-anchored network pattern."""
+        if not pattern.startswith("||"):
+            return None
+        authority_pattern = pattern[2:]
+        host_end = len(authority_pattern)
+        for delimiter in ("^", "/", "|", "?", ":", "#"):
+            found = authority_pattern.find(delimiter)
+            if found >= 0:
+                host_end = min(host_end, found)
+        return authority_pattern[:host_end]
+
+    @staticmethod
+    def _no_target_reason(pattern: str) -> str:
+        if not pattern.startswith("||"):
+            return "network_filter_is_not_host_anchored"
+        host_pattern = re.split(r"[\^/|?:]", pattern[2:], maxsplit=1)[0]
+        if "*" in host_pattern:
+            return "wildcard_request_host_is_not_a_worker_target"
+        return "request_host_is_not_a_valid_domain_name"
 
 
 class HostsFormatHandler(SourceFormatHandler):
@@ -349,7 +684,7 @@ class DomainListParser:
     files, AdBlock network filters, and dnsmasq server rules. Auto-detected-only
     formats include supported Surge RULE-SET domain declarations and Surge
     DOMAIN-SET domain lists. Extracted hosts are normalized, validated,
-    converted to ICANN registrable domains with publicsuffix2, and deduplicated.
+    converted to PSL registrable domains with publicsuffix2, and deduplicated.
     """
 
     def __init__(self) -> None:
@@ -391,7 +726,8 @@ class DomainListParser:
         if not line or line.startswith("!"):
             return ""
         if line.startswith("#") and not any(
-            marker in line for marker in ("##", "#@#", "#?#", "#$#", "#%#")
+            marker in line
+            for marker in ("##", "#@#", "#@?#", "#?#", "#$#", "#%#")
         ):
             return ""
         return line
@@ -504,39 +840,73 @@ class DomainListParser:
         Yields:
             Unique normalized hosts with their registrable domain.
         """
-        lines = list(lines)
-        file_format = self._resolve_file_format(lines, forced_format)
+        parsed_source_file = self.parse_source_file(
+            lines,
+            source_name=source_name,
+            forced_format=forced_format,
+        )
+        file_format = parsed_source_file.file_format
         if stats is not None:
             stats[f"format_{file_format.value}"] = (
                 stats.get(f"format_{file_format.value}", 0) + 1
             )
+        yield from self.entries_from_parsed_source_file(parsed_source_file)
+
+    def parse_source_file(
+        self,
+        lines: Iterable[str],
+        *,
+        source_name: str = "<input>",
+        forced_format: InputFileFormat | str | None = None,
+    ) -> ParsedSourceFile:
+        """Parse every physical line once under the detected or forced format."""
+        source_lines = list(lines)
+        file_format = self._resolve_file_format(source_lines, forced_format)
         if file_format in {InputFileFormat.UNKNOWN, InputFileFormat.MIXED}:
             log.warning(
                 "Skipped input source %s: detected %s file format",
                 source_name,
                 file_format.value,
             )
-            return
+            parsed_lines = tuple(
+                ParsedSourceLine(line_number, raw_line, None)
+                for line_number, raw_line in enumerate(source_lines, start=1)
+            )
+            return ParsedSourceFile(file_format=file_format, lines=parsed_lines)
 
         log.info("Detected %s input format for %s", file_format.value, source_name)
+        parsed_lines = tuple(
+            ParsedSourceLine(
+                line_number=line_number,
+                raw_line=raw_line,
+                parsed_item=self.parse_source_item(raw_line, file_format=file_format),
+            )
+            for line_number, raw_line in enumerate(source_lines, start=1)
+        )
+        return ParsedSourceFile(file_format=file_format, lines=parsed_lines)
 
+    def entries_from_parsed_source_file(
+        self, parsed_source_file: ParsedSourceFile
+    ) -> Iterator[DomainEntry]:
+        """Yield unique worker entries from an existing per-line parse."""
+        if parsed_source_file.file_format in {
+            InputFileFormat.UNKNOWN,
+            InputFileFormat.MIXED,
+        }:
+            return
         seen_hosts: Set[str] = set()
-        for source_line in lines:
-            line = self._strip_comments_and_cosmetics(source_line)
-            if not line:
+        for source_line in parsed_source_file.lines:
+            parsed = source_line.parsed_item
+            if parsed is None or parsed.error_reason is not None:
                 continue
-            handler = self._handlers_by_format.get(file_format)
-            if handler is None or not handler.matches_line(line, self.syntax):
-                continue
-            for raw_host in handler.parse_hosts(line, self.syntax):
-                normalized = self.normalize(raw_host)
-                if not normalized or not self.is_valid_syntax(normalized):
+            for target in parsed.targets:
+                if target.error_reason is not None or target.host in seen_hosts:
                     continue
-                entry = self._entry_for_normalized_host(normalized)
-                if entry is None or entry.host in seen_hosts:
-                    continue
-                seen_hosts.add(entry.host)
-                yield entry
+                seen_hosts.add(target.host)
+                yield DomainEntry(
+                    host=target.host,
+                    registrable_domain=target.registrable_domain,
+                )
 
     def prepare_source_lines(
         self,
@@ -562,12 +932,19 @@ class DomainListParser:
 
         prepared_lines: list[PreparedSourceLine] = []
         for source_line in source_lines:
-            cleaned = self._strip_comments_and_cosmetics(source_line)
-            if not cleaned or not handler.matches_line(cleaned, self.syntax):
+            parsed = self.parse_source_item(source_line, file_format=file_format)
+            if parsed is None or parsed.error_reason is not None:
                 continue
-            entries = self.parse_source_line_entries(
-                source_line, file_format=file_format
-            )
+            entries = [
+                DomainEntry(
+                    host=target.host,
+                    registrable_domain=target.registrable_domain,
+                )
+                for target in parsed.targets
+                if target.error_reason is None
+            ]
+            if not parsed.is_metadata and not parsed.no_target_reason and not entries:
+                continue
             prepared_lines.append(
                 PreparedSourceLine(
                     content=source_line,
@@ -576,6 +953,99 @@ class DomainListParser:
             )
         return file_format, prepared_lines
 
+    def parse_source_item(
+        self,
+        source_line: str,
+        *,
+        file_format: InputFileFormat,
+    ) -> ParsedSourceItem | None:
+        """Parse one source item, keeping syntax, targets, and PSL validity apart.
+
+        Comments and blank lines return ``None``. A structurally invalid line or
+        a target that fails strict PSL matching carries an explicit error and is
+        not converted into a valid no-target item.
+        """
+        cleaned = self._strip_comments_and_cosmetics(source_line)
+        if not cleaned:
+            return None
+        handler = self._handlers_by_format.get(file_format)
+        if handler is None:
+            return ParsedSourceItem(
+                item_kind="unsupported_source_format",
+                error_reason=f"unsupported_source_format:{file_format.value}",
+            )
+
+        syntax_result: SourceItemSyntax | None = None
+        if isinstance(handler, AdblockFormatHandler):
+            syntax_result = handler.parse_syntax(cleaned, self.syntax)
+            if syntax_result is None:
+                return None
+            if syntax_result.error_reason is not None:
+                return ParsedSourceItem(
+                    item_kind=syntax_result.item_kind,
+                    error_reason=syntax_result.error_reason,
+                )
+            candidates = syntax_result.targets
+        else:
+            if not handler.matches_line(cleaned, self.syntax):
+                return ParsedSourceItem(
+                    item_kind="invalid_source_item",
+                    error_reason="line_not_valid_for_source_format",
+                )
+            candidates = tuple(
+                SourceTargetCandidate(host=host, role="domain_target")
+                for host in handler.parse_hosts(cleaned, self.syntax)
+            )
+
+        if not candidates:
+            if syntax_result is None:
+                return ParsedSourceItem(
+                    item_kind=file_format.value,
+                    error_reason="source_item_has_no_extractable_target",
+                )
+            return ParsedSourceItem(
+                item_kind=syntax_result.item_kind,
+                no_target_reason=syntax_result.no_target_reason,
+                is_metadata=syntax_result.is_metadata,
+            )
+
+        parsed_targets: list[ParsedSourceTarget] = []
+        for candidate in candidates:
+            normalized = self.normalize(candidate.host)
+            if not normalized or not self.is_valid_syntax(normalized):
+                parsed_targets.append(
+                    ParsedSourceTarget(
+                        host=normalized or candidate.host,
+                        registrable_domain=None,
+                        role=candidate.role,
+                        error_reason="invalid_target_domain_syntax",
+                    )
+                )
+                continue
+            public_suffix_parts = self._public_suffix_parts(normalized)
+            if public_suffix_parts is None:
+                parsed_targets.append(
+                    ParsedSourceTarget(
+                        host=normalized,
+                        registrable_domain=None,
+                        role=candidate.role,
+                        error_reason="no_strict_public_suffix_match",
+                    )
+                )
+                continue
+            _public_suffix, registrable_domain = public_suffix_parts
+            parsed_targets.append(
+                ParsedSourceTarget(
+                    host=normalized,
+                    registrable_domain=registrable_domain,
+                    role=candidate.role,
+                )
+            )
+        return ParsedSourceItem(
+            item_kind=(syntax_result.item_kind if syntax_result else file_format.value),
+            targets=tuple(parsed_targets),
+        )
+
     def parse_source_line_entries(
         self,
         source_line: str,
@@ -583,25 +1053,17 @@ class DomainListParser:
         file_format: InputFileFormat,
     ) -> list[DomainEntry]:
         """Return normalized domain targets carried by one valid source line."""
-        cleaned = self._strip_comments_and_cosmetics(source_line)
-        handler = self._handlers_by_format.get(file_format)
-        if not cleaned or handler is None or not handler.matches_line(
-            cleaned, self.syntax
-        ):
+        parsed = self.parse_source_item(source_line, file_format=file_format)
+        if parsed is None:
             return []
-
-        entries: list[DomainEntry] = []
-        seen_hosts: set[str] = set()
-        for raw_host in handler.parse_hosts(cleaned, self.syntax):
-            normalized = self.normalize(raw_host)
-            if not normalized or not self.is_valid_syntax(normalized):
-                continue
-            entry = self._entry_for_normalized_host(normalized)
-            if entry is None or entry.host in seen_hosts:
-                continue
-            seen_hosts.add(entry.host)
-            entries.append(entry)
-        return entries
+        return [
+            DomainEntry(
+                host=target.host,
+                registrable_domain=target.registrable_domain,
+            )
+            for target in parsed.targets
+            if target.error_reason is None
+        ]
 
     def _resolve_file_format(
         self,
@@ -643,10 +1105,10 @@ class DomainListParser:
             registrable_domain=None if normalized == public_suffix else root,
         )
 
-    def _public_suffix_parts(self, normalized: str) -> tuple[str, str] | None:
-        """Return the strict ICANN public suffix and registrable root."""
+    def _public_suffix_parts(self, normalized: str) -> tuple[str, str | None] | None:
+        """Return strict PSL suffix and nullable registrable domain."""
         try:
-            public_suffix_list = _icann_public_suffix_list()
+            public_suffix_list = _full_public_suffix_list()
             public_suffix = public_suffix_list.get_tld(normalized, strict=True)
             root = public_suffix_list.get_sld(normalized, strict=True)
         except (ValueError, TypeError) as exc:
@@ -656,4 +1118,6 @@ class DomainListParser:
         if public_suffix is None:
             log.debug("Skipped (no strict public suffix match): %s", normalized)
             return None
-        return str(public_suffix), str(root)
+        suffix = str(public_suffix)
+        registrable_domain = None if normalized == suffix else root
+        return suffix, None if registrable_domain is None else str(registrable_domain)

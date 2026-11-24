@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
 )
+from domain_pipeline.prepare.source_items import SourceItemHandoff
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     load_worker_aggregate_manifest,
     worker_aggregate_manifest_paths,
@@ -57,9 +58,11 @@ class AggregateReadinessChecker:
 
     def __init__(self, *, status_store: WorkerStatusStore | None = None) -> None:
         self.status_store = status_store or WorkerStatusStore()
+        self._validated_source_items: dict[str, SourceItemHandoff] = {}
 
     def validate(self, batch_id: str, *, state_root: Path) -> dict[str, Any]:
         """Return barrier readiness information for one batch."""
+        self._validated_source_items.pop(batch_id, None)
         prepare_manifest = load_prepare_aggregate_manifest_for_batch(
             batch_id=batch_id, state_root=state_root
         )
@@ -102,7 +105,9 @@ class AggregateReadinessChecker:
                 "prepare aggregate worker ids do not match restored worker aggregate manifests: "
                 f"missing={unresolved_missing_handoff_worker_ids}"
             )
-        handoffs_by_worker_id = self.handoffs_by_worker_id(manifest_paths)
+        handoffs_by_worker_id = self.handoffs_by_worker_id(
+            manifest_paths, batch_id=batch_id, state_root=state_root
+        )
         if any(
             payload["conclusion"] == STATUS_FAILURE
             for payload in status_barrier.status_payloads
@@ -129,6 +134,17 @@ class AggregateReadinessChecker:
                 "batch_id": batch_id,
                 "unfinalized_handoff_worker_ids": unfinalized_handoff_worker_ids,
             }
+        workflow_paths = PathLayout(state_root).workflow_state
+        self._validated_source_items[batch_id] = SourceItemHandoff.load(
+            batch_id=batch_id,
+            items_path=workflow_paths.batch_source_items_path(batch_id=batch_id),
+            index_path=workflow_paths.batch_source_item_index_path(batch_id=batch_id),
+            diagnostics_path=workflow_paths.batch_source_item_diagnostics_path(
+                batch_id=batch_id
+            ),
+            validate_semantics=True,
+            excluded_source_hosts=set(prepare_manifest.excluded_source_hosts),
+        )
         logger.info(
             "Aggregate readiness for batch %s resolved to ready_success with %d statuses",
             batch_id,
@@ -140,6 +156,15 @@ class AggregateReadinessChecker:
             "worker_ids": worker_ids,
             "status_payloads": status_barrier.status_payloads,
         }
+
+    def source_items_for_batch(self, batch_id: str) -> SourceItemHandoff:
+        """Return the source handoff already validated for this readiness result."""
+        try:
+            return self._validated_source_items[batch_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"source-item handoff was not validated for batch {batch_id}"
+            ) from exc
 
     def worker_manifest_paths(self, batch_id: str, *, state_root: Path) -> list[Path]:
         """Return restored worker aggregate manifest paths for one batch."""
@@ -197,15 +222,24 @@ class AggregateReadinessChecker:
         if not status_path.exists():
             builder.missing_status_paths.append(relative_status_path)
             return
-        payload = json.loads(status_path.read_text(encoding="utf-8"))
+        payload = self.status_store.read_status(
+            status_path, batch_id=batch_id, worker_id=worker_id
+        )
         builder.status_payloads.append(payload)
         if payload["conclusion"] == STATUS_IN_PROGRESS:
             builder.in_progress_status_paths.append(relative_status_path)
 
-    def handoffs_by_worker_id(self, manifest_paths: list[Path]) -> dict[str, Any]:
+    def handoffs_by_worker_id(
+        self, manifest_paths: list[Path], *, batch_id: str, state_root: Path
+    ) -> dict[str, Any]:
         """Return loaded worker aggregate handoffs keyed by worker id."""
         return {
-            manifest_path.parent.name: load_worker_aggregate_manifest(manifest_path)
+            manifest_path.parent.name: load_worker_aggregate_manifest(
+                manifest_path,
+                state_root=state_root,
+                batch_id=batch_id,
+                worker_id=manifest_path.parent.name,
+            )
             for manifest_path in manifest_paths
         }
 

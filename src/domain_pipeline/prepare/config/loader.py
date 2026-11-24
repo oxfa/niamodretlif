@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
 from domain_pipeline.prepare.config import models
 from domain_pipeline.prepare.config.normalizer import ConfigNormalizer
-
-CONFIG_NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 try:
     import yaml as YAML_MODULE

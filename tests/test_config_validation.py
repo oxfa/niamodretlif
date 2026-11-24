@@ -9,7 +9,9 @@ from pydantic import BaseModel
 
 from domain_pipeline.prepare.config.models import (
     DelegationTTLConfig,
+    DefaultsConfig,
     IPLocationConfig,
+    SourceOverrideConfig,
 )
 from domain_pipeline.prepare.config.loader import PipelineConfigLoader
 
@@ -42,3 +44,31 @@ def test_cache_ttl_days_must_not_be_negative(
     """Reject negative cache TTLs across cache configuration models."""
     with pytest.raises(ValueError, match=">= 0"):
         model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["fetch", "dns_query", "delegation", "host_resolution", "ip_location"],
+)
+def test_defaults_reject_explicit_null_mapping_sections(field_name: str) -> None:
+    """Defaults sections must be mappings when explicitly supplied."""
+    with pytest.raises(ValueError):
+        DefaultsConfig.model_validate({field_name: None})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["fetch", "dns_query", "delegation", "host_resolution", "ip_location"],
+)
+def test_source_overrides_reject_explicit_null_mapping_sections(
+    field_name: str,
+) -> None:
+    """Optional source override sections must be omitted or mappings."""
+    with pytest.raises(ValueError):
+        SourceOverrideConfig.model_validate(
+            {
+                "id": "source",
+                "input": {"type": "file", "location": "source.txt"},
+                field_name: None,
+            }
+        )

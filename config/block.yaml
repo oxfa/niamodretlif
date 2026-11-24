@@ -136,8 +136,12 @@ sources:
       type: url
       # location: https://is.gd/vQFXgT
       location: https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/refs/heads/master/anti-ad-easylist.txt
-      # Domain-only processing keeps exact blocking rules; exceptions and
-      # filters that cannot be represented as one domain are ignored.
+      # Literal request hosts, including standalone domains and exception-rule
+      # destinations, map to worker domains only when strict PSL lookup yields a
+      # registrable domain. PSL misses are invalid; suffix-only targets have no
+      # worker domain. Valid regex, wildcard-host, and cosmetic rules stay as
+      # source items without worker targets and are retained only for AdBlock
+      # output. Exception semantics are omitted from plain and hosts outputs.
       format: adblock
     ip_location:
       enabled: false

@@ -26,7 +26,11 @@ from domain_pipeline.prepare.models import (
     PreparedRootPlan,
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
-from domain_pipeline.prepare.sources.parser import DomainEntry, DomainListParser
+from domain_pipeline.prepare.sources.parser import (
+    DomainEntry,
+    DomainListParser,
+    ParsedSourceFile,
+)
 from domain_pipeline.routing import (
     InputValidationRoutingPolicy,
     ManualRoutingPolicy,
@@ -60,6 +64,9 @@ class PreparationCollections:
     terminal_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     matched_hosts: set[str] = dataclasses.field(default_factory=set)
     parsed_source_entry_count: int = 0
+    parsed_source_files: dict[str, ParsedSourceFile] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass
@@ -242,6 +249,10 @@ class PreparationPlanner:
                 review_rows=state.collections.review_rows,
                 terminal_rows=state.collections.terminal_rows,
             ),
+            excluded_source_hosts=set(
+                state.manual_inputs.manually_excluded_from_sources_entries
+            ),
+            parsed_source_files=dict(state.collections.parsed_source_files),
         )
 
     def _collect_configured_source_entries(self, state: PreparationState) -> None:
@@ -249,10 +260,14 @@ class PreparationPlanner:
         for job in state.jobs:
             configured_format = job.config.get("input", {}).get("format", "auto")
             forced_format = None if configured_format == "auto" else configured_format
-            for entry in state.parser.process_entries(
+            parsed_source_file = state.parser.parse_source_file(
                 job.lines,
                 source_name=job.input_label,
                 forced_format=forced_format,
+            )
+            state.collections.parsed_source_files[job.source_id] = parsed_source_file
+            for entry in state.parser.entries_from_parsed_source_file(
+                parsed_source_file
             ):
                 host = entry.host
                 state.collections.parsed_source_entry_count += 1

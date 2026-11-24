@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import dataclasses
 import hashlib
 import json
@@ -18,33 +16,29 @@ from domain_pipeline.aggregate.cache_merge import AggregateCacheMerger
 from domain_pipeline.aggregate.log_merge import AggregateLogMerger
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
 from domain_pipeline.aggregate.readiness import AggregateReadinessChecker
-from domain_pipeline.paths.layout import PathLayout, WorkflowPathLayout
+from domain_pipeline.paths.layout import PathLayout, WorkflowStatePathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     PrepareAggregateManifest,
     load_prepare_aggregate_manifest_for_batch,
 )
 from domain_pipeline.prepare.assignment import relative_path
-from domain_pipeline.prepare.source_line_index import (
-    SourceLineIndex,
-    load_source_line_index,
-)
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
     load_worker_aggregate_manifest_for_worker,
 )
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
 from domain_pipeline.worker.status.lifecycle import (
-    PIPELINE_RUN_FORMAT_VERSION,
     STATUS_FAILURE,
 )
+from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.status.store import WorkerStatusStore
 
 logger = logging.getLogger(__name__)
 
 
-def _relative_workflow_paths() -> WorkflowPathLayout:
+def _relative_workflow_paths() -> WorkflowStatePathLayout:
     """Return repo-relative workflow path ownership."""
-    return PathLayout(Path(".")).workflow
+    return PathLayout(Path(".")).workflow_state
 
 
 @dataclasses.dataclass
@@ -101,16 +95,27 @@ class AggregateBatchRunner:
         batch_id: str,
         state_root: Path,
     ) -> dict[str, Any]:
-        """Aggregate one fully completed batch from JSON handoff payloads."""
+        """Aggregate one fully completed batch from restored handoff files."""
         readiness = self.services.checker.validate(batch_id, state_root=state_root)
+        if readiness["state"] == "ready_failed":
+            failed_statuses = [
+                payload
+                for payload in readiness.get("status_payloads", [])
+                if payload.get("conclusion") == STATUS_FAILURE
+            ]
+            return {
+                "state": "failed",
+                "batch_id": batch_id,
+                "failed_statuses": failed_statuses,
+                "failure_reason": "one or more workers failed; aggregate was not run",
+            }
         prepare_manifest = load_prepare_aggregate_manifest_for_batch(
             batch_id=batch_id, state_root=state_root
         )
-        worker_ids = list(readiness.get("worker_ids", []))
         final_output_paths = prepare_manifest.resolve_paths(state_root)
         worker_manifests = self._worker_aggregate_manifests(
             batch_id=batch_id,
-            worker_ids=worker_ids,
+            worker_ids=list(readiness.get("worker_ids", [])),
             state_root=state_root,
             require_all=readiness["state"] == "ready_success",
         )
@@ -119,16 +124,6 @@ class AggregateBatchRunner:
             readiness=readiness,
             prepare_manifest=prepare_manifest,
         )
-        if readiness["state"] == "ready_failed":
-            return self.handle_failed_ready_batch(
-                context=AggregateFailureContext(
-                    batch_id=batch_id,
-                    state_root=state_root,
-                    final_output_paths=final_output_paths,
-                    worker_manifests=worker_manifests,
-                ),
-                readiness=readiness,
-            )
         if readiness["state"] != "ready_success":
             return readiness
         status_payloads = readiness["status_payloads"]
@@ -145,21 +140,15 @@ class AggregateBatchRunner:
                     ]
                 )
             )
-            source_contents, source_line_index = self._load_source_archive(
-                batch_id=batch_id,
-                state_root=state_root,
-            )
-            for (
-                filtered_path,
-                output_format,
-            ) in prepare_manifest.aggregate_output_spec.resolve_filtered(state_root):
-                self.services.output_merger.write_filtered_source_content(
-                    source_contents,
-                    source_line_index,
+            source_items = self.services.checker.source_items_for_batch(batch_id)
+            for filtered_output in (
+                prepare_manifest.aggregate_output_spec.resolve_filtered(state_root)
+            ):
+                self.services.output_merger.write_filtered_source_items(
+                    source_items,
                     unactionable_domains,
                     prepare_manifest.manually_added_domains,
-                    filtered_path,
-                    output_format=output_format,
+                    filtered_output,
                 )
             self.services.output_merger.merge_host_value_payloads(
                 [
@@ -254,71 +243,6 @@ class AggregateBatchRunner:
                 "raw_audit": prepare_manifest.aggregate_output_spec.audit,
                 "runtime_log": prepare_manifest.aggregate_output_spec.log,
             },
-        }
-
-    def _load_source_archive(
-        self, *, batch_id: str, state_root: Path
-    ) -> tuple[list[str], SourceLineIndex]:
-        """Load the prepared cleaned source files and their line index."""
-        workflow_paths = PathLayout(state_root).workflow
-        index = load_source_line_index(
-            workflow_paths.batch_source_line_index_path(batch_id=batch_id)
-        )
-        source_root = workflow_paths.batch_source_inputs_root(batch_id=batch_id)
-        contents: list[str] = []
-        for source_ordinal in range(len(index.source_formats)):
-            source_path = source_root / f"source-{source_ordinal:04d}.txt"
-            try:
-                contents.append(source_path.read_text(encoding="utf-8"))
-            except OSError as exc:
-                raise ValueError(
-                    f"unable to read prepared source input {source_path}: {exc}"
-                ) from exc
-        return contents, index
-
-    def handle_failed_ready_batch(
-        self,
-        *,
-        context: AggregateFailureContext,
-        readiness: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Materialize aggregate failure state for completed failed workers."""
-        logger.debug(
-            "Aggregate failed batch %s status payloads=%s",
-            context.batch_id,
-            json.dumps(readiness["status_payloads"], sort_keys=True),
-        )
-        cache_merge_summary = self.merge_cache(
-            batch_id=context.batch_id,
-            source_paths=self._materialize_worker_cache_payloads(
-                batch_id=context.batch_id,
-                state_root=context.state_root,
-                worker_manifests=context.worker_manifests,
-            ),
-            target_path=context.final_output_paths["cache"],
-        )
-        failed_statuses = [
-            payload
-            for payload in readiness["status_payloads"]
-            if payload["conclusion"] == STATUS_FAILURE
-        ]
-        failure_payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
-            "batch_id": context.batch_id,
-            "failed_status_count": len(failed_statuses),
-            "written_at": utc_now(),
-        }
-        self._write_json(
-            context.state_root
-            / _relative_workflow_paths()
-            .aggregate_failed_marker_path(batch_id=context.batch_id)
-            .relative_to(Path(".")),
-            failure_payload,
-        )
-        return {
-            "state": "failed",
-            "failed_statuses": failed_statuses,
-            "cache_merge_summary": cache_merge_summary,
         }
 
     def handle_duplicate_output(
@@ -459,7 +383,7 @@ class AggregateBatchRunner:
     ) -> list[Path]:
         cache_root = (
             PathLayout(state_root)
-            .workflow.aggregate_marker_root(batch_id=batch_id)
+            .workflow_state.aggregate_marker_root(batch_id=batch_id)
             .joinpath("worker_cache_payloads")
         )
         if cache_root.exists():
@@ -471,29 +395,24 @@ class AggregateBatchRunner:
             source_paths.append(cache_path)
             if (
                 not manifest.handoff_finalized
-                or manifest.cache_snapshot_mode == "missing"
-                or manifest.cache_sqlite_base64 is None
+                or manifest.cache_path is None
+                or not manifest.cache_path.is_file()
             ):
                 continue
-            try:
-                payload = base64.b64decode(
-                    manifest.cache_sqlite_base64.encode("ascii"),
-                    validate=True,
-                )
-                if manifest.cache_sha256 is not None:
-                    digest = hashlib.sha256(payload).hexdigest()
-                    if digest != manifest.cache_sha256:
-                        payload = b"invalid cache payload checksum"
-            except (binascii.Error, ValueError, TypeError):
-                payload = b"invalid cache payload base64"
+            payload = manifest.cache_path.read_bytes()
+            if manifest.cache_sha256 is not None:
+                digest = hashlib.sha256(payload).hexdigest()
+                if digest != manifest.cache_sha256:
+                    payload = b"invalid cache payload checksum"
             cache_path.write_bytes(payload)
         return source_paths
 
     def _cleanup_worker_state(self, *, batch_id: str, state_root: Path) -> None:
-        workflow_paths = PathLayout(state_root).workflow
+        workflow_paths = PathLayout(state_root).workflow_state
         cleanup_paths = [
             workflow_paths.batch_root(batch_id=batch_id),
             workflow_paths.worker_state_batch_root(batch_id=batch_id),
+            workflow_paths.worker_result_batch_root(batch_id=batch_id),
             workflow_paths.worker_status_batch_root(batch_id=batch_id),
         ]
         for cleanup_path in cleanup_paths:

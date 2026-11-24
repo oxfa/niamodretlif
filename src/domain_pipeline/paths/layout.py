@@ -11,22 +11,6 @@ DEBUG_ARTIFACTS_DIR = Path(".debug_artifacts")
 
 
 @dataclass(frozen=True)
-class BatchPathSpec:
-    """Repo path locations for one prepared pipeline-run batch."""
-
-    prepare_aggregate_manifest: Path
-    prepare_worker_manifest_root: Path
-
-    def prepare_worker_manifest(self, *, worker_id: str) -> Path:
-        """Return the persisted prepare-to-worker manifest path for one worker."""
-        return (
-            self.prepare_worker_manifest_root
-            / worker_id
-            / "prepare-worker-manifest.json"
-        )
-
-
-@dataclass(frozen=True)
 class WorkerOutputPaths:
     """Publish-snapshot output paths for one worker execution."""
 
@@ -122,17 +106,20 @@ class OutputPathLayout:
     def worker_log_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the worker debug log path."""
         return (
-            self.debug_artifacts_root()
-            / "workers"
-            / batch_id
-            / worker_id
-            / "logs"
-            / "worker.log"
+            self.debug_artifacts_root() / "workers" / batch_id / worker_id / "logs" / "worker.log"
         )
+
+    def worker_cache_log_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker cache diagnostic path."""
+        return self.worker_log_path(batch_id=batch_id, worker_id=worker_id).with_name("cache.log")
+
+    def prepare_log_path(self, *, stage: str, filename: str) -> Path:
+        """Return a preparation diagnostic path."""
+        return self.debug_artifacts_root() / "prepare" / stage / "logs" / filename
 
 
 @dataclass(frozen=True)
-class WorkflowPathLayout:
+class WorkflowStateBasePaths:
     """Derive workflow-state paths for one workspace."""
 
     workspace_root: Path
@@ -153,13 +140,114 @@ class WorkflowPathLayout:
         """Return the fixed archive directory for cleaned source inputs."""
         return self.batch_root(batch_id=batch_id) / "source_inputs"
 
+    def batch_source_input_path(self, *, batch_id: str, source_ordinal: int) -> Path:
+        """Return the cleaned input path for one source ordinal."""
+        if source_ordinal < 0:
+            raise ValueError("source ordinal must be nonnegative")
+        return self.batch_source_inputs_root(batch_id=batch_id) / f"source-{source_ordinal:04d}.txt"
+
     def batch_source_line_index_path(self, *, batch_id: str) -> Path:
         """Return the fixed path for the source-to-registrable-domain line index."""
-        return self.batch_root(batch_id=batch_id) / "source-line-index.json"
+        return self.batch_root(batch_id=batch_id) / "source-line-index.csv"
+
+    def batch_source_items_path(self, *, batch_id: str) -> Path:
+        """Return the JSONL path for prepare-owned source-item records."""
+        return self.batch_root(batch_id=batch_id) / "source-items.jsonl"
+
+    def batch_source_item_index_path(self, *, batch_id: str) -> Path:
+        """Return the prepare-owned source-item collection index path."""
+        return self.batch_root(batch_id=batch_id) / "source-item-index.json"
+
+    def batch_source_item_diagnostics_path(self, *, batch_id: str) -> Path:
+        """Return the prepare-owned source-item diagnostics path."""
+        return self.batch_root(batch_id=batch_id) / "source-item-diagnostics.jsonl"
 
     def prepare_worker_manifest_root(self, *, batch_id: str) -> Path:
         """Return the workflow-state prepare-to-worker manifest root."""
         return self.batch_root(batch_id=batch_id) / "workers"
+
+
+@dataclass(frozen=True)
+class PrepareHandoffPaths(WorkflowStateBasePaths):
+    """Derive prepare handoff paths."""
+
+    def prepare_worker_config_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the prepare worker config path."""
+        return (
+            self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "runtime-config.yaml"
+        )
+
+    def prepare_worker_roots_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the prepare worker roots path."""
+        return (
+            self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "assigned-roots.csv"
+        )
+
+    def prepare_worker_identity_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the compact identity record for a hosted worker handoff."""
+        return (
+            self.prepare_worker_manifest_root(batch_id=batch_id)
+            / worker_id
+            / "worker-identity.json"
+        )
+
+    def prepare_aggregate_config_path(self, *, batch_id: str) -> Path:
+        """Return the prepare aggregate config path."""
+        return self.batch_root(batch_id=batch_id) / "output-config.yaml"
+
+    def batch_worker_ids_path(self, *, batch_id: str) -> Path:
+        """Return the batch worker ids path."""
+        return self.batch_root(batch_id=batch_id) / "worker-ids.csv"
+
+    def batch_manual_domains_path(self, *, batch_id: str) -> Path:
+        """Return the batch manual domains path."""
+        return self.batch_root(batch_id=batch_id) / "manual-domains.csv"
+
+    def batch_preparation_review_path(self, *, batch_id: str) -> Path:
+        """Return the batch preparation review path."""
+        return self.batch_root(batch_id=batch_id) / "preparation-review.csv"
+
+    def batch_preparation_terminal_path(self, *, batch_id: str) -> Path:
+        """Return the batch preparation terminal path."""
+        return self.batch_root(batch_id=batch_id) / "preparation-terminal.yaml"
+
+    def batch_source_formats_path(self, *, batch_id: str) -> Path:
+        """Return the batch source formats path."""
+        return self.batch_root(batch_id=batch_id) / "source-formats.csv"
+
+    def worker_result_batch_root(self, *, batch_id: str) -> Path:
+        """Return the worker result batch root."""
+        return self.workflow_state_root() / "worker-results" / batch_id
+
+    def worker_result_root(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker result root."""
+        return self.worker_result_batch_root(batch_id=batch_id) / worker_id
+
+    def worker_handoff_unactionable_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker handoff unactionable path."""
+        return (
+            self.worker_result_root(batch_id=batch_id, worker_id=worker_id)
+            / "unactionable-registrable-domains.txt"
+        )
+
+    def worker_handoff_review_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker handoff review path."""
+        return (
+            self.worker_result_root(batch_id=batch_id, worker_id=worker_id)
+            / "review-results-by-registrable-domain.csv"
+        )
+
+    def worker_handoff_terminal_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker handoff terminal path."""
+        return self.worker_result_root(batch_id=batch_id, worker_id=worker_id) / "terminal.yaml"
+
+    def worker_handoff_cache_path(self, *, batch_id: str, worker_id: str) -> Path:
+        """Return the worker handoff cache path."""
+        return self.worker_result_root(batch_id=batch_id, worker_id=worker_id) / "cache.sqlite3"
+
+@dataclass(frozen=True)
+class WorkflowStatePathLayout(PrepareHandoffPaths):
+    """Derive remaining workflow paths."""
 
     def worker_state_batch_root(self, *, batch_id: str) -> Path:
         """Return the workflow-state root for worker execution artifacts."""
@@ -173,21 +261,9 @@ class WorkflowPathLayout:
         """Return the workflow-state root for aggregate markers."""
         return self.workflow_state_root() / "aggregate" / batch_id
 
-    def prepare_aggregate_manifest_path(self, *, batch_id: str) -> Path:
-        """Return the workflow-state prepare-to-aggregate manifest path."""
-        return self.batch_root(batch_id=batch_id) / "prepare-aggregate-manifest.json"
-
-    def prepare_worker_manifest_path(self, *, batch_id: str, worker_id: str) -> Path:
-        """Return the workflow-state prepare-to-worker manifest path."""
-        return (
-            self.prepare_worker_manifest_root(batch_id=batch_id)
-            / worker_id
-            / "prepare-worker-manifest.json"
-        )
-
     def worker_status_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the workflow-state worker-status path."""
-        return self.worker_status_batch_root(batch_id=batch_id) / f"{worker_id}.json"
+        return self.worker_status_batch_root(batch_id=batch_id) / f"{worker_id}.yaml"
 
     def worker_state_root(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the workflow-state root for one worker execution."""
@@ -196,8 +272,7 @@ class WorkflowPathLayout:
     def worker_aggregate_manifest_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the worker-owned aggregate handoff manifest path."""
         return (
-            self.worker_state_root(batch_id=batch_id, worker_id=worker_id)
-            / "worker-aggregate-manifest.json"
+            self.worker_result_root(batch_id=batch_id, worker_id=worker_id) / "handoff-state.yaml"
         )
 
     def worker_publish_output_root(self, *, batch_id: str, worker_id: str) -> Path:
@@ -208,29 +283,23 @@ class WorkflowPathLayout:
             / "output"
         )
 
-    def worker_unactionable_path(
-        self, *, batch_id: str, worker_id: str, config_name: str
-    ) -> Path:
+    def worker_unactionable_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
         """Return the worker unactionable-output path."""
         return (
             self.worker_publish_output_root(batch_id=batch_id, worker_id=worker_id)
-            / "unactionable"
+            / "unactionable-registrable-domains"
             / f"{config_name}.txt"
         )
 
-    def worker_review_path(
-        self, *, batch_id: str, worker_id: str, config_name: str
-    ) -> Path:
+    def worker_review_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
         """Return the worker review-output path."""
         return (
             self.worker_publish_output_root(batch_id=batch_id, worker_id=worker_id)
-            / "review"
+            / "review-results-by-registrable-domain"
             / f"{config_name}.csv"
         )
 
-    def worker_terminal_rows_path(
-        self, *, batch_id: str, worker_id: str, config_name: str
-    ) -> Path:
+    def worker_terminal_rows_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
         """Return the worker workflow-internal terminal-row JSONL path."""
         return (
             self.worker_state_root(batch_id=batch_id, worker_id=worker_id)
@@ -252,64 +321,178 @@ class WorkflowPathLayout:
 
 
 @dataclass(frozen=True)
+class HandoffMember:
+    """A local source and its canonical archive-relative destination."""
+
+    source: Path
+    archive_path: Path
+    required: bool = False
+
+
+def _member(
+    root: Path, source: Path, destination: Path | None = None, *, required: bool = False
+) -> HandoffMember:
+    return HandoffMember(source, (destination or source).relative_to(root), required)
+
+
+@dataclass(frozen=True)
+class PrepareToWorkerPathLayout:
+    """Member paths for a single prepare-to-worker handoff."""
+
+    workspace_root: Path
+
+    def members(self, *, batch_id: str, worker_id: str) -> tuple[HandoffMember, ...]:
+        """Return the manifest needed by the designated worker."""
+        state = WorkflowStatePathLayout(self.workspace_root)
+        paths = (
+            state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id),
+            state.prepare_worker_roots_path(batch_id=batch_id, worker_id=worker_id),
+            state.prepare_worker_identity_path(batch_id=batch_id, worker_id=worker_id),
+        )
+        return tuple(_member(self.workspace_root, path, required=True) for path in paths)
+
+
+_PREPARE_DIAGNOSTICS = {
+    "settings": ("validation", "settings.yaml"),
+    "validation-log": ("validation", "validate-settings.log"),
+    "batch": ("batch", "batch.yaml"),
+    "batch-log": ("batch", "prepare-batch.log"),
+}
+
+
+@dataclass(frozen=True)
+class PrepareToAggregatorPathLayout:
+    """Member paths for the prepare-to-aggregator handoff."""
+
+    workspace_root: Path
+
+    def members(self, *, batch_id: str) -> tuple[HandoffMember, ...]:
+        """Return the shared inputs and diagnostics needed by aggregation."""
+        state = WorkflowStatePathLayout(self.workspace_root)
+        output = OutputPathLayout(self.workspace_root)
+        runtime = (
+            state.prepare_aggregate_config_path(batch_id=batch_id),
+            state.batch_worker_ids_path(batch_id=batch_id),
+            state.batch_manual_domains_path(batch_id=batch_id),
+            state.batch_preparation_review_path(batch_id=batch_id),
+            state.batch_preparation_terminal_path(batch_id=batch_id),
+            state.batch_source_formats_path(batch_id=batch_id),
+            state.batch_source_line_index_path(batch_id=batch_id),
+            state.batch_source_items_path(batch_id=batch_id),
+            state.batch_source_item_index_path(batch_id=batch_id),
+            state.batch_source_item_diagnostics_path(batch_id=batch_id),
+            state.batch_source_inputs_root(batch_id=batch_id),
+        )
+        diagnostics = _PREPARE_DIAGNOSTICS.values()
+        return tuple(
+            _member(
+                self.workspace_root,
+                path,
+                required=path != state.batch_source_inputs_root(batch_id=batch_id),
+            )
+            for path in runtime
+        ) + tuple(
+            _member(
+                self.workspace_root,
+                self.workspace_root
+                / (
+                    filename.removesuffix(".yaml") + ".json"
+                    if filename.endswith(".yaml")
+                    else filename
+                ),
+                output.prepare_log_path(stage=stage, filename=filename),
+            )
+            for stage, filename in diagnostics
+        )
+
+    def diagnostic_member(self, *, batch_id: str, kind: str) -> HandoffMember:
+        """Return a declared prepare diagnostic archive member."""
+        stage, filename = _PREPARE_DIAGNOSTICS[kind]
+        archive_path = OutputPathLayout(self.workspace_root).prepare_log_path(
+            stage=stage, filename=filename
+        ).relative_to(self.workspace_root)
+        return next(member for member in self.members(batch_id=batch_id)
+                    if member.archive_path == archive_path)
+
+
+@dataclass(frozen=True)
+class WorkerToAggregatorPathLayout:
+    """Member paths for a single worker-to-aggregator handoff."""
+
+    workspace_root: Path
+
+    def members(self, *, batch_id: str, worker_id: str) -> tuple[HandoffMember, ...]:
+        """Return the designated worker's aggregation outputs and logs."""
+        state = WorkflowStatePathLayout(self.workspace_root)
+        output = OutputPathLayout(self.workspace_root)
+        paths = (
+            state.worker_handoff_unactionable_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_handoff_review_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_handoff_terminal_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_handoff_cache_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_aggregate_manifest_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_status_path(batch_id=batch_id, worker_id=worker_id),
+            output.worker_log_path(batch_id=batch_id, worker_id=worker_id),
+            output.worker_cache_log_path(batch_id=batch_id, worker_id=worker_id),
+        )
+        return tuple(_member(self.workspace_root, path) for path in paths)
+
+    def diagnostic_member(self, *, batch_id: str, worker_id: str, kind: str) -> HandoffMember:
+        """Return a declared worker diagnostic archive member."""
+        output = OutputPathLayout(self.workspace_root)
+        paths = {"worker-log": output.worker_log_path, "cache-log": output.worker_cache_log_path}
+        archive_path = paths[kind](batch_id=batch_id, worker_id=worker_id).relative_to(
+            self.workspace_root
+        )
+        return next(member for member in self.members(batch_id=batch_id, worker_id=worker_id)
+                    if member.archive_path == archive_path)
+
+
+@dataclass(frozen=True)
 class PathLayout:
     """Workspace-root owner for all pipeline path derivation."""
 
     workspace_root: Path
 
     @property
-    def workflow(self) -> WorkflowPathLayout:
+    def workflow_state(self) -> WorkflowStatePathLayout:
         """Return workflow-state path derivation."""
-        return WorkflowPathLayout(self.workspace_root)
+        return WorkflowStatePathLayout(self.workspace_root)
 
     @property
     def output(self) -> OutputPathLayout:
         """Return publish/debug path derivation."""
         return OutputPathLayout(self.workspace_root)
 
-    def publish_worktree_root(self) -> Path:
-        """Return the dedicated publish worktree root."""
-        return self.output.publish_worktree_root()
+    @property
+    def prepare_to_worker(self) -> PrepareToWorkerPathLayout:
+        """Return prepare-to-worker handoff paths."""
+        return PrepareToWorkerPathLayout(self.workspace_root)
 
-    def workflow_state_root(self) -> Path:
-        """Return the workflow-internal state root."""
-        return self.workflow.workflow_state_root()
+    @property
+    def prepare_to_aggregator(self) -> PrepareToAggregatorPathLayout:
+        """Return prepare-to-aggregator handoff paths."""
+        return PrepareToAggregatorPathLayout(self.workspace_root)
 
-    def debug_artifacts_root(self) -> Path:
-        """Return the debug-artifact root."""
-        return self.output.debug_artifacts_root()
+    @property
+    def worker_to_aggregator(self) -> WorkerToAggregatorPathLayout:
+        """Return worker-to-aggregator handoff paths."""
+        return WorkerToAggregatorPathLayout(self.workspace_root)
 
-    def runtime_cache_path(self) -> Path:
-        """Return the shared runtime cache path."""
-        return self.workflow.runtime_cache_path()
-
-    def batch_paths(self, *, batch_id: str) -> BatchPathSpec:
-        """Return persisted prepare-owned handoff paths for one batch."""
-        return BatchPathSpec(
-            prepare_aggregate_manifest=self.workflow.prepare_aggregate_manifest_path(
-                batch_id=batch_id
-            ),
-            prepare_worker_manifest_root=self.workflow.prepare_worker_manifest_root(
-                batch_id=batch_id
-            ),
-        )
-
-    def worker_paths(
-        self, *, batch_id: str, worker_id: str, config_name: str
-    ) -> WorkerPathSpec:
+    def worker_paths(self, *, batch_id: str, worker_id: str, config_name: str) -> WorkerPathSpec:
         """Return persisted worker path values for one worker."""
         return WorkerPathSpec(
             state=WorkerStatePaths(
-                result_root=self.workflow.worker_state_root(
+                result_root=self.workflow_state.worker_state_root(
                     batch_id=batch_id,
                     worker_id=worker_id,
                 ),
-                terminal_rows=self.workflow.worker_terminal_rows_path(
+                terminal_rows=self.workflow_state.worker_terminal_rows_path(
                     batch_id=batch_id,
                     worker_id=worker_id,
                     config_name=config_name,
                 ),
-                cache=self.workflow.worker_cache_path(
+                cache=self.workflow_state.worker_cache_path(
                     batch_id=batch_id,
                     worker_id=worker_id,
                 ),
@@ -319,16 +502,16 @@ class PathLayout:
                 ),
             ),
             output=WorkerOutputPaths(
-                output_directory=self.workflow.worker_publish_output_root(
+                output_directory=self.workflow_state.worker_publish_output_root(
                     batch_id=batch_id,
                     worker_id=worker_id,
                 ),
-                unactionable=self.workflow.worker_unactionable_path(
+                unactionable=self.workflow_state.worker_unactionable_path(
                     batch_id=batch_id,
                     worker_id=worker_id,
                     config_name=config_name,
                 ),
-                review=self.workflow.worker_review_path(
+                review=self.workflow_state.worker_review_path(
                     batch_id=batch_id,
                     worker_id=worker_id,
                     config_name=config_name,
@@ -341,5 +524,5 @@ class PathLayout:
         return AggregatePathSpec(
             raw_audit=self.output.runtime_raw_audit_path(config_name=config_name),
             runtime_log=self.output.runtime_log_path(config_name=config_name),
-            cache=self.workflow.runtime_cache_path(),
+            cache=self.workflow_state.runtime_cache_path(),
         )

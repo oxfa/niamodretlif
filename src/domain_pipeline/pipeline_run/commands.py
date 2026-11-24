@@ -11,17 +11,27 @@ from typing import Any
 
 from domain_pipeline.aggregate.readiness import validate_aggregate_readiness
 from domain_pipeline.aggregate.runner import aggregate_batch
+from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.pipeline_run.cache_lifecycle import (
     CacheLifecycleInspectionRequest,
     inspect_cache_lifecycle,
     render_lifecycle_log_lines,
+)
+from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
+from domain_pipeline.pipeline_run.handoffs import (
+    HandoffRequest,
+    stage_handoff,
+    stage_worker_inputs,
+    validate_worker_inputs,
+    restore_handoff,
+    export_diagnostic,
+    worker_diagnostic_path,
 )
 from domain_pipeline.pipeline_run.settings import (
     batch_id_from_run,
     default_worker_ids,
     validate_run_settings,
 )
-from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.batch_writer import prepare_batch, write_prepared_batch
 from domain_pipeline.publish.git import (
     commit_paths,
@@ -31,16 +41,16 @@ from domain_pipeline.publish.git import (
     validate_publish_candidate_sizes,
 )
 from domain_pipeline.worker.runtime.runner import run_worker
-from domain_pipeline.worker.worker_to_aggregate_manifest import (
-    finalize_worker_aggregate_handoff,
-)
 from domain_pipeline.worker.status.lifecycle import (
+    WorkerStatusLifecycle,
+    WorkerStatusFailureRequest,
     WorkerStatusFinalizeRequest,
     WorkerStatusIdentity,
-    WorkerStatusMaterializeIncompleteRequest,
     finalize_worker_statuses,
     initialize_worker_statuses,
-    materialize_incomplete_statuses,
+)
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
+    finalize_worker_aggregate_handoff,
 )
 
 
@@ -85,10 +95,6 @@ def _resolve_state_root(args: argparse.Namespace, source_root: Path) -> Path:
     return Path(state_root).resolve() if state_root is not None else source_root
 
 
-def _publish_worktree_root(workspace_root: Path) -> Path:
-    return PathLayout(workspace_root).publish_worktree_root()
-
-
 def _handle_prepare_batch(
     args: argparse.Namespace,
     source_root: Path,
@@ -107,9 +113,7 @@ def _handle_prepare_batch(
         {
             "batch_id": batch_id,
             "committed_paths": committed_paths,
-            "expected_workers": [
-                manifest.worker_id for manifest in prepared.worker_manifests
-            ],
+            "expected_workers": [manifest.worker_id for manifest in prepared.worker_manifests],
         }
     )
     return 0
@@ -126,14 +130,22 @@ def _handle_validate_run_settings(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_initialize_worker_statuses(
-    args: argparse.Namespace, state_root: Path
-) -> int:
-    payload = initialize_worker_statuses(
-        batch_id=args.batch_id,
-        worker_id=args.worker_id,
-        state_root=state_root,
-    )
+def _handle_initialize_worker_statuses(args: argparse.Namespace, state_root: Path) -> int:
+    try:
+        payload = initialize_worker_statuses(
+            batch_id=args.batch_id,
+            worker_id=args.worker_id,
+            state_root=state_root,
+        )
+    except Exception as exc:
+        payload = {
+            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
+            "batch_id": args.batch_id,
+            "worker_id": args.worker_id,
+            "conclusion": "failure",
+            "failure_reason": str(exc).strip() or exc.__class__.__name__,
+            "status_path": None,
+        }
     _print_json(payload)
     return 0
 
@@ -152,7 +164,7 @@ def _handle_worker(
         max_runtime_seconds=args.max_runtime_seconds,
     )
     _print_json(payload)
-    return 0
+    return 0 if payload["overall_conclusion"] == "success" else 1
 
 
 def _handle_finalize_worker_statuses(
@@ -176,20 +188,47 @@ def _handle_finalize_worker_aggregate_handoff(
     args: argparse.Namespace,
     state_root: Path,
 ) -> int:
-    payload = finalize_worker_aggregate_handoff(
-        batch_id=args.batch_id,
-        worker_id=args.worker_id,
-        state_root=state_root,
-    )
+    try:
+        payload = finalize_worker_aggregate_handoff(
+            batch_id=args.batch_id,
+            worker_id=args.worker_id,
+            state_root=state_root,
+        )
+    except Exception as exc:
+        payload = {
+            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
+            "batch_id": args.batch_id,
+            "worker_id": args.worker_id,
+            "handoff_finalized": False,
+            "error_reason": str(exc).strip() or exc.__class__.__name__,
+        }
+    if payload.get("handoff_finalized") is not True:
+        failure_reason = str(
+            payload.get("error_reason") or "worker aggregate handoff was not finalized"
+        )
+        try:
+            status_path = WorkerStatusLifecycle().record_failure(
+                WorkerStatusFailureRequest(
+                    identity=WorkerStatusIdentity(
+                        args.batch_id, args.worker_id, state_root
+                    ),
+                    failure_reason=failure_reason,
+                )
+            )
+            payload["failure_status_path"] = status_path
+        except Exception as status_exc:
+            payload["status_recording_error"] = (
+                str(status_exc).strip() or status_exc.__class__.__name__
+            )
     _print_json(payload)
-    return 0
+    return 0 if payload.get("handoff_finalized") is True else 1
 
 
 def _handle_validate_aggregate(args: argparse.Namespace, state_root: Path) -> int:
     _configure_command_logging(args.log_level)
     readiness = validate_aggregate_readiness(args.batch_id, state_root=state_root)
     _print_json(readiness)
-    return 0
+    return 0 if readiness.get("state") == "ready_success" else 1
 
 
 def _handle_aggregate(args: argparse.Namespace, state_root: Path) -> int:
@@ -199,22 +238,7 @@ def _handle_aggregate(args: argparse.Namespace, state_root: Path) -> int:
         state_root=state_root,
     )
     _print_json(payload)
-    return 0
-
-
-def _handle_materialize_incomplete_statuses(
-    args: argparse.Namespace, state_root: Path
-) -> int:
-    _configure_command_logging(args.log_level)
-    payload = materialize_incomplete_statuses(
-        WorkerStatusMaterializeIncompleteRequest(
-            batch_id=args.batch_id,
-            state_root=state_root,
-            failure_reason=args.failure_reason,
-        )
-    )
-    _print_json(payload)
-    return 0
+    return 0 if payload.get("state") == "aggregated" else 1
 
 
 def _handle_inspect_cache_lifecycle(args: argparse.Namespace) -> int:
@@ -240,9 +264,7 @@ def _build_command_handlers(
     state_root: Path,
 ) -> dict[str, Any]:
     command_handlers = _build_git_command_handlers(args, source_root, state_root)
-    command_handlers.update(
-        _build_workflow_command_handlers(args, source_root, state_root)
-    )
+    command_handlers.update(_build_workflow_command_handlers(args, source_root, state_root))
     return command_handlers
 
 
@@ -251,7 +273,7 @@ def _build_git_command_handlers(
     source_root: Path,
     state_root: Path,
 ) -> dict[str, Any]:
-    publish_root = _publish_worktree_root(state_root)
+    publish_root = PathLayout(state_root).output.publish_worktree_root()
     return {
         "commit-paths": lambda: _configure_command_logging(args.log_level)
         or _print_json(
@@ -279,9 +301,7 @@ def _build_git_command_handlers(
             base_ref=args.base_ref,
         )
         or 0,
-        "validate-publish-candidate-sizes": lambda: _configure_command_logging(
-            args.log_level
-        )
+        "validate-publish-candidate-sizes": lambda: _configure_command_logging(args.log_level)
         or _print_json(
             validate_publish_candidate_sizes(
                 publish_root,
@@ -312,14 +332,57 @@ def _build_workflow_command_handlers(
 ) -> dict[str, Any]:
     return {
         "aggregate": lambda: _handle_aggregate(args, state_root),
+        "handoff-stage-worker-inputs": lambda: stage_worker_inputs(
+            state_root=state_root,
+            batch_id=args.batch_id,
+            worker_ids_json=args.worker_ids_json,
+            destination=Path(args.destination),
+        )
+        or 0,
+        "handoff-restore": lambda: restore_handoff(
+            state_root=state_root,
+            source=Path(args.archive),
+            request=HandoffRequest(handoff=args.handoff, batch_id=args.batch_id,
+                                   worker_id=args.worker_id, config_name=args.config_name),
+        )
+        or 0,
+        "handoff-validate-worker-inputs": lambda: validate_worker_inputs(
+            state_root=state_root,
+            batch_id=args.batch_id,
+            worker_ids_json=args.worker_ids_json,
+            destination=Path(args.destination),
+        )
+        or 0,
+        "handoff-worker-diagnostic-path": lambda: print(worker_diagnostic_path(
+            state_root=state_root, batch_id=args.batch_id, worker_id=args.worker_id,
+            kind=args.kind,
+        )) or 0,
+        "handoff-export-diagnostic": lambda: export_diagnostic(
+            archive=Path(args.archive), destination=Path(args.destination),
+            request=HandoffRequest(handoff=args.handoff, batch_id=args.batch_id,
+                                   worker_id=args.worker_id), kind=args.kind,
+        )
+        or 0,
+        "handoff-stage": lambda: _print_json(
+            {
+                "staged": stage_handoff(
+                    state_root=state_root,
+                    destination=Path(args.destination),
+                    request=HandoffRequest(
+                        handoff=args.handoff,
+                        batch_id=args.batch_id,
+                        worker_id=args.worker_id,
+                        require_runtime=args.require_runtime,
+                    ),
+                )
+            }
+        )
+        or 0,
         "initialize-worker-statuses": lambda: _handle_initialize_worker_statuses(
             args,
             state_root,
         ),
         "inspect-cache-lifecycle": lambda: _handle_inspect_cache_lifecycle(args),
-        "materialize-incomplete-statuses": lambda: (
-            _handle_materialize_incomplete_statuses(args, state_root)
-        ),
         "prepare-batch": lambda: _handle_prepare_batch(args, source_root, state_root),
         "validate-run-settings": lambda: _handle_validate_run_settings(args),
         "validate-aggregate": lambda: _handle_validate_aggregate(args, state_root),
@@ -327,9 +390,7 @@ def _build_workflow_command_handlers(
     }
 
 
-def _add_root_args(
-    parser: argparse.ArgumentParser, *, state_required: bool = False
-) -> None:
+def _add_root_args(parser: argparse.ArgumentParser, *, state_required: bool = False) -> None:
     parser.add_argument("--source-root", default=".")
     parser.add_argument("--state-root", required=state_required, default=None)
 
@@ -350,7 +411,82 @@ def _add_log_level_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_handoff_subcommands(subparsers: Any) -> None:
+    worker_spec_parser = subparsers.add_parser("handoff-stage-worker-inputs")
+    _add_root_args(worker_spec_parser)
+    _add_arguments(
+        worker_spec_parser,
+        [
+            ("--batch-id", {"required": True}),
+            ("--worker-ids-json", {"required": True}),
+            ("--destination", {"required": True}),
+        ],
+    )
+
+    validate_inputs_parser = subparsers.add_parser("handoff-validate-worker-inputs")
+    _add_root_args(validate_inputs_parser)
+    _add_arguments(
+        validate_inputs_parser,
+        [
+            ("--batch-id", {"required": True}),
+            ("--worker-ids-json", {"required": True}),
+            ("--destination", {"required": True}),
+        ],
+    )
+
+    restore_parser = subparsers.add_parser("handoff-restore")
+    _add_root_args(restore_parser)
+    _add_arguments(
+        restore_parser,
+        [
+            (
+                "--handoff",
+                {
+                    "choices": ["prepare-worker", "prepare-aggregate", "worker-aggregate"],
+                    "required": True,
+                },
+            ),
+            ("--batch-id", {"required": True}),
+            ("--worker-id", {"default": None}),
+            ("--archive", {"required": True}),
+            ("--config-name", {"default": None}),
+        ],
+    )
+    path_parser = subparsers.add_parser("handoff-worker-diagnostic-path")
+    _add_root_args(path_parser)
+    _add_arguments(path_parser, [
+        ("--batch-id", {"required": True}), ("--worker-id", {"required": True}),
+        ("--kind", {"choices": ["worker-log", "cache-log"], "required": True}),
+    ])
+
+    diagnostic_parser = subparsers.add_parser("handoff-export-diagnostic")
+    _add_root_args(diagnostic_parser)
+    _add_arguments(
+        diagnostic_parser,
+        [("--archive", {"required": True}), ("--destination", {"required": True}),
+         ("--handoff", {"choices": ["prepare-aggregate", "worker-aggregate"], "required": True}),
+         ("--batch-id", {"required": True}), ("--worker-id", {"default": None}),
+         ("--kind", {"choices": ["settings", "validation-log", "batch", "batch-log",
+                                  "worker-log", "cache-log"], "required": True})],
+    )
+
+    stage_parser = subparsers.add_parser("handoff-stage")
+    _add_root_args(stage_parser)
+    _add_arguments(
+        stage_parser,
+        [
+            ("--handoff", {"choices": ["prepare-aggregate", "worker-aggregate"], "required": True}),
+            ("--batch-id", {"required": True}),
+            ("--worker-id", {"default": None}),
+            ("--destination", {"required": True}),
+            ("--require-runtime", {"action": "store_true"}),
+        ],
+    )
+
+
+
 def _add_workflow_subcommands(subparsers: Any) -> None:
+    _add_handoff_subcommands(subparsers)
     validate_settings_parser = subparsers.add_parser("validate-run-settings")
     _add_arguments(
         validate_settings_parser,
@@ -441,17 +577,6 @@ def _add_workflow_subcommands(subparsers: Any) -> None:
         ],
     )
 
-    materialize_status_parser = subparsers.add_parser("materialize-incomplete-statuses")
-    _add_root_args(materialize_status_parser)
-    _add_log_level_argument(materialize_status_parser)
-    _add_arguments(
-        materialize_status_parser,
-        [
-            ("--batch-id", {"required": True}),
-            ("--failure-reason", {"required": True}),
-        ],
-    )
-
     inspect_cache_parser = subparsers.add_parser("inspect-cache-lifecycle")
     _add_arguments(
         inspect_cache_parser,
@@ -533,9 +658,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     source_root = _resolve_source_root(args)
     state_root = _resolve_state_root(args, source_root)
-    command_handler = _build_command_handlers(args, source_root, state_root).get(
-        args.command
-    )
+    command_handler = _build_command_handlers(args, source_root, state_root).get(args.command)
     if command_handler is not None:
         return command_handler()
     parser.error(f"unknown command {args.command}")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, Callable, Iterable, cast
 
 from domain_pipeline.worker.output.manager import (
     csv_row_signature,
@@ -15,11 +15,8 @@ from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantErr
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     ManuallyAddedDomain,
 )
-from domain_pipeline.prepare.source_line_index import SourceLineIndex
-from domain_pipeline.prepare.sources.parser import (
-    DomainListParser,
-    InputFileFormat,
-)
+from domain_pipeline.prepare.source_items import SourceItemHandoff
+from domain_pipeline.prepare.sources.parser import InputFileFormat
 
 
 class AggregateOutputMerger:
@@ -51,18 +48,17 @@ class AggregateOutputMerger:
                 ordered_hosts.append(host)
         return sorted(ordered_hosts)
 
-    def write_filtered_source_content(
+    def write_filtered_source_items(
         self,
-        source_contents: list[str],
-        source_line_index: SourceLineIndex,
+        source_items: SourceItemHandoff,
         unactionable_registrable_domains: Iterable[str],
         manually_added_domains: Iterable[ManuallyAddedDomain],
-        target_path: Path,
-        *,
-        output_format: str,
+        filtered_output: tuple[Path, str],
     ) -> None:
-        """Render retained sources and actionable manual additions in one format."""
-        formatters = {
+        """Render prepare-owned valid items according to the configured output format."""
+        source_items.validate()
+        target_path, output_format = filtered_output
+        formatters: dict[str, Callable[[str], str]] = {
             "plain": lambda host: host,
             "hosts": lambda host: f"0.0.0.0 {host}",
             "adblock": lambda host: f"||{host}^",
@@ -74,85 +70,84 @@ class AggregateOutputMerger:
                 f"unsupported filtered output format {output_format!r}"
             ) from exc
 
-        if len(source_contents) != len(source_line_index.source_formats):
-            raise ValueError(
-                "source archive count does not match source line index formats"
-            )
-
         unactionable = set(unactionable_registrable_domains)
-        roots_by_source_line: dict[tuple[int, int], set[str]] = {}
-        for root, references in source_line_index.registrable_domain_lines.items():
-            for reference in references:
-                roots_by_source_line.setdefault(
-                    (reference.source_ordinal, reference.line_number), set()
-                ).add(root)
-
-        source_lines = [
-            content.splitlines(keepends=True) for content in source_contents
-        ]
-        for source_ordinal, line_number in roots_by_source_line:
-            if source_ordinal >= len(source_lines) or line_number > len(
-                source_lines[source_ordinal]
-            ):
-                raise ValueError(
-                    "source line index references a missing archived source line "
-                    f"{source_ordinal}:{line_number}"
-                )
-
-        parser = DomainListParser()
-        rendered_lines: list[str] = []
-        for source_ordinal, (lines, source_format) in enumerate(
-            zip(source_lines, source_line_index.source_formats, strict=True)
-        ):
-            try:
-                input_format = InputFileFormat(source_format)
-            except ValueError as exc:
-                raise ValueError(
-                    f"source line index has unsupported format {source_format!r}"
-                ) from exc
-            for line_number, line in enumerate(lines, start=1):
-                entries = parser.parse_source_line_entries(
-                    line, file_format=input_format
-                )
-                indexed_roots = roots_by_source_line.get(
-                    (source_ordinal, line_number), set()
-                )
-                parsed_roots = {
-                    entry.registrable_domain
-                    for entry in entries
-                    if entry.registrable_domain is not None
-                }
-                if indexed_roots != parsed_roots:
-                    raise ValueError(
-                        "source line index does not match archived source line "
-                        f"{source_ordinal}:{line_number}"
-                    )
-
-                excluded_roots = indexed_roots & unactionable
-                retained_entries = [
-                    entry
-                    for entry in entries
-                    if entry.registrable_domain not in excluded_roots
-                ]
-                if output_format == "adblock" and input_format is InputFileFormat.ADBLOCK:
-                    if entries and not retained_entries:
-                        continue
-                    rendered_lines.append(
-                        line if line.endswith(("\n", "\r")) else f"{line}\n"
-                    )
-                    continue
-                rendered_lines.extend(
-                    f"{format_host(entry.host)}\n"
-                    for entry in retained_entries
-                )
-
-        for manual_domain in sorted(manually_added_domains, key=lambda item: item.host):
-            if (
-                manual_domain.registrable_domain is not None
-                and manual_domain.registrable_domain in unactionable
-            ):
+        index = source_items.index_payload
+        eligible_associations: set[str] = set()
+        for domain, references in index[
+            "valid_source_items_by_registrable_domain"
+        ].items():
+            if domain in unactionable:
                 continue
-            rendered_lines.append(f"{format_host(manual_domain.host)}\n")
+            eligible_associations.update(
+                reference["association_id"] for reference in references
+            )
+        eligible_associations.update(
+            reference["association_id"]
+            for reference in index[
+                "valid_source_items_without_extractable_registrable_domain"
+            ]
+            if reference["association_id"] is not None
+        )
+        valid_no_target_items = {
+            reference["item_id"]
+            for reference in index[
+                "valid_source_items_without_extractable_registrable_domain"
+            ]
+            if reference["association_id"] is None
+        }
+        metadata_items = {
+            reference["item_id"] for reference in index["adblock_metadata"]
+        }
+
+        rendered_lines: list[str] = []
+        seen_lines: set[str] = set()
+
+        def append_rendered(line: str) -> None:
+            normalized_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
+            if normalized_line not in seen_lines:
+                seen_lines.add(normalized_line)
+                rendered_lines.append(normalized_line)
+
+        for item in source_items.item_records:
+            item_id = item["item_id"]
+            is_adblock_item = item["input_format"] == InputFileFormat.ADBLOCK.value
+            if item_id in metadata_items:
+                if output_format == "adblock":
+                    append_rendered(item["original_text"])
+                continue
+
+            associations = [
+                association
+                for association in item["target_associations"]
+                if association["association_id"] in eligible_associations
+            ]
+            if not item["target_associations"]:
+                if (
+                    output_format == "adblock"
+                    and is_adblock_item
+                    and item_id in valid_no_target_items
+                ):
+                    append_rendered(item["original_text"])
+                continue
+            if not associations:
+                continue
+
+            if is_adblock_item:
+                if output_format == "adblock":
+                    if len(associations) == len(item["target_associations"]):
+                        append_rendered(item["original_text"])
+                    continue
+                if item["item_kind"].startswith("exception_"):
+                    continue
+            for association in associations:
+                append_rendered(format_host(association["host"]))
+
+        for item in sorted(manually_added_domains, key=lambda item: item.host):
+            if (
+                item.registrable_domain is None
+                or item.registrable_domain not in unactionable
+            ):
+                append_rendered(format_host(item.host))
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text("".join(rendered_lines), encoding="utf-8")
