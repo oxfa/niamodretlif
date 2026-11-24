@@ -272,6 +272,14 @@ class RequestsIPLocationProvider:
             return IP_LOCATION_FAILURE_REASON_RATE_LIMITED
         return IP_LOCATION_FAILURE_REASON_REQUEST_FAILED
 
+    def _redact_error_text(self, exc: requests.RequestException | ValueError) -> str:
+        """Remove provider credentials from exception text before logging."""
+        error_text = str(exc)
+        token = str(getattr(self, "token", "")).strip()
+        if token:
+            error_text = error_text.replace(token, "[REDACTED]")
+        return error_text
+
     def _raise_if_fatal_credential_error(
         self, _exc: requests.RequestException | ValueError
     ) -> None:
@@ -287,7 +295,8 @@ class RequestsIPLocationProvider:
     ) -> IPLocationResult:
         """Map one provider exception into the normalized IP-location result surface."""
         self._raise_if_fatal_credential_error(exc)
-        logger.warning("%s lookup failed for %s: %s", provider_label, ip, exc)
+        error_text = self._redact_error_text(exc)
+        logger.warning("%s lookup failed for %s: %s", provider_label, ip, error_text)
         response = getattr(exc, "response", None)
         if getattr(response, "status_code", None) == 429:
             return self._rate_limited_result(ip, response)
@@ -412,7 +421,9 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
             if getattr(response, "status_code", None) == 429:
                 return [self._rate_limited_result(ip, response) for ip in chunk]
             logger.warning(
-                "IPinfo Lite bulk lookup failed for %s: %s", ",".join(chunk), exc
+                "IPinfo Lite bulk lookup failed for %s: %s",
+                ",".join(chunk),
+                self._redact_error_text(exc),
             )
             failure_reason = self._failure_reason_for_exception(exc)
             return [
