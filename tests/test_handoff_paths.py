@@ -537,3 +537,36 @@ def test_restore_rejects_unexpected_source_member(tmp_path: Path) -> None:
             state_root=tmp_path / "restored", source=source,
             request=HandoffRequest("prepare-aggregate", BATCH, config_name="block"),
         )
+
+
+def test_prepare_stage_rejects_mismatched_config_batch_id(tmp_path: Path) -> None:
+    source, destination = tmp_path / "source", tmp_path / "staged"
+    _prepare_files(source)
+    config = PathLayout(source).workflow_state.prepare_aggregate_config_path(batch_id=BATCH)
+    config.write_text("batch_id: other-batch\nconfig_name: block\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="identity mismatch"):
+        stage_handoff(
+            state_root=source,
+            destination=destination,
+            request=HandoffRequest("prepare-aggregate", BATCH, require_runtime=True),
+        )
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("config_line", ["", "config_name: ../block\n"])
+def test_prepare_stage_requires_valid_config_identity(
+    tmp_path: Path, config_line: str
+) -> None:
+    source, destination = tmp_path / "source", tmp_path / "staged"
+    _prepare_files(source)
+    config = PathLayout(source).workflow_state.prepare_aggregate_config_path(
+        batch_id=BATCH
+    )
+    config.write_text(f"batch_id: {BATCH}\n{config_line}", encoding="utf-8")
+    with pytest.raises(ValueError, match="config name"):
+        stage_handoff(
+            state_root=source,
+            destination=destination,
+            request=HandoffRequest("prepare-aggregate", BATCH, require_runtime=True),
+        )
+    assert not destination.exists()

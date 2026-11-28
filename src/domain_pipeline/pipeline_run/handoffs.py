@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
 from domain_pipeline.handoff_io import read_strict_json, read_yaml
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 
@@ -116,6 +117,18 @@ def _validate_identity(
         raise ValueError(f"handoff identity mismatch: {path}")
 
 
+def _validate_prepare_aggregate_identity(
+    path: Path, *, batch_id: str, config_name: str | None
+) -> None:
+    payload = read_yaml(path)
+    _validate_identity(path, payload, batch_id=batch_id, config_name=config_name)
+    namespace = payload.get("config_name")
+    if not isinstance(namespace, str) or not CONFIG_NAMESPACE_PATTERN.fullmatch(
+        namespace
+    ):
+        raise ValueError(f"invalid prepare aggregate config name: {path}")
+
+
 def _source_paths(root: Path, *, batch_id: str) -> tuple[Path, Path, Path]:
     paths = PathLayout(root).workflow_state
     return (
@@ -207,9 +220,8 @@ def _validate_restored_identity(
             raise ValueError("aggregate config name is required")
         identity_path = state.prepare_aggregate_config_path(batch_id=batch_id)
         archived_identity = source / identity_path.relative_to(state_root)
-        _validate_identity(
+        _validate_prepare_aggregate_identity(
             archived_identity,
-            read_yaml(archived_identity),
             batch_id=batch_id,
             config_name=request.config_name,
         )
@@ -332,6 +344,15 @@ def stage_handoff(
             raise FileNotFoundError(f"required handoff member missing: {member.source}")
         _check_source_file(state_root, member.source)
     if request.handoff == "prepare-aggregate":
+        if request.require_runtime:
+            config = layout.workflow_state.prepare_aggregate_config_path(
+                batch_id=request.batch_id
+            )
+            _validate_prepare_aggregate_identity(
+                config,
+                batch_id=request.batch_id,
+                config_name=request.config_name,
+            )
         try:
             _validate_sources(state_root, batch_id=request.batch_id)
         except (ValueError, OSError, UnicodeError) as exc:

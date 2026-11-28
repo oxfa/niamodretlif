@@ -1094,3 +1094,21 @@ def test_aggregate_loads_worker_results_without_worker_input_manifest(
         "ads.example.com",
         "bad.example.net",
     ]
+
+
+def test_aggregate_rejects_overlapping_publish_destinations(tmp_path: Path) -> None:
+    """Restored output settings must preserve the config's unique destinations."""
+    _prepare_and_restore(tmp_path)
+    _finish_worker(tmp_path)
+    _correlate_and_restore(tmp_path)
+    aggregate_root = tmp_path / "aggregate"
+    layout = PathLayout(aggregate_root)
+    config_path = layout.workflow_state.prepare_aggregate_config_path(batch_id=BATCH)
+    payload = read_yaml(config_path)
+    payload["output"]["review"] = payload["output"]["filtered"][0]["path"]
+    write_yaml(config_path, payload)
+
+    with pytest.raises(ValueError, match="output paths must be unique"):
+        AggregateBatchRunner().run(batch_id=BATCH, state_root=aggregate_root)
+
+    assert not layout.output.publish_worktree_root().exists()

@@ -11,11 +11,13 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
 from domain_pipeline.handoff_io import read_csv, read_yaml, write_csv, write_yaml
 from domain_pipeline.paths.layout import PathLayout
+from domain_pipeline.prepare.config.models import validate_unique_output_paths
 
 
 def _validate_publish_path(value: str, *, field_name: str) -> str:
@@ -76,6 +78,13 @@ class AggregateOutputSpec(PrepareAggregateModel):
             value,
             field_name=f"output.{info.field_name}",
         )
+
+    @model_validator(mode="after")
+    def _validate_output_paths(self) -> "AggregateOutputSpec":
+        validate_unique_output_paths(
+            [*(item.path for item in self.filtered), self.review, self.unactionable]
+        )
+        return self
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved aggregate paths rooted at one pipeline-run workspace root."""

@@ -380,6 +380,12 @@ class FilteredOutputConfig(StrictModel):
         return Path(path).as_posix()
 
 
+def validate_unique_output_paths(paths: list[str]) -> None:
+    """Require a separate destination for each published output."""
+    if len(set(paths)) != len(paths):
+        raise ValueError("output paths must be unique")
+
+
 class OutputConfig(StrictModel):
     """Config-wide publish output settings."""
 
@@ -400,10 +406,9 @@ class OutputConfig(StrictModel):
 
     @model_validator(mode="after")
     def _validate_output_paths(self) -> "OutputConfig":
-        paths = [item.path for item in self.filtered]
-        paths.extend([self.review, self.unactionable])
-        if len(set(paths)) != len(paths):
-            raise ValueError("output paths must be unique")
+        validate_unique_output_paths(
+            [*(item.path for item in self.filtered), self.review, self.unactionable]
+        )
         return self
 
 
