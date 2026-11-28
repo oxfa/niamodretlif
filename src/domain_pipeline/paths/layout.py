@@ -136,20 +136,6 @@ class WorkflowStateBasePaths:
         """Return the workflow-state root for one prepared batch."""
         return self.workflow_state_root() / "batches" / batch_id
 
-    def batch_source_inputs_root(self, *, batch_id: str) -> Path:
-        """Return the fixed archive directory for cleaned source inputs."""
-        return self.batch_root(batch_id=batch_id) / "source_inputs"
-
-    def batch_source_input_path(self, *, batch_id: str, source_ordinal: int) -> Path:
-        """Return the cleaned input path for one source ordinal."""
-        if source_ordinal < 0:
-            raise ValueError("source ordinal must be nonnegative")
-        return self.batch_source_inputs_root(batch_id=batch_id) / f"source-{source_ordinal:04d}.txt"
-
-    def batch_source_line_index_path(self, *, batch_id: str) -> Path:
-        """Return the fixed path for the source-to-registrable-domain line index."""
-        return self.batch_root(batch_id=batch_id) / "source-line-index.csv"
-
     def batch_source_items_path(self, *, batch_id: str) -> Path:
         """Return the JSONL path for prepare-owned source-item records."""
         return self.batch_root(batch_id=batch_id) / "source-items.jsonl"
@@ -197,17 +183,9 @@ class PrepareHandoffPaths(WorkflowStateBasePaths):
         """Return the batch manual domains path."""
         return self.batch_root(batch_id=batch_id) / "manual-domains.csv"
 
-    def batch_preparation_review_path(self, *, batch_id: str) -> Path:
-        """Return the batch preparation review path."""
-        return self.batch_root(batch_id=batch_id) / "preparation-review.csv"
-
     def batch_preparation_terminal_path(self, *, batch_id: str) -> Path:
         """Return the batch preparation terminal path."""
         return self.batch_root(batch_id=batch_id) / "preparation-terminal.yaml"
-
-    def batch_source_formats_path(self, *, batch_id: str) -> Path:
-        """Return the batch source formats path."""
-        return self.batch_root(batch_id=batch_id) / "source-formats.csv"
 
     def worker_result_batch_root(self, *, batch_id: str) -> Path:
         """Return the worker result batch root."""
@@ -374,21 +352,17 @@ class PrepareToAggregatorPathLayout:
             state.prepare_aggregate_config_path(batch_id=batch_id),
             state.batch_worker_ids_path(batch_id=batch_id),
             state.batch_manual_domains_path(batch_id=batch_id),
-            state.batch_preparation_review_path(batch_id=batch_id),
             state.batch_preparation_terminal_path(batch_id=batch_id),
-            state.batch_source_formats_path(batch_id=batch_id),
-            state.batch_source_line_index_path(batch_id=batch_id),
             state.batch_source_items_path(batch_id=batch_id),
             state.batch_source_item_index_path(batch_id=batch_id),
             state.batch_source_item_diagnostics_path(batch_id=batch_id),
-            state.batch_source_inputs_root(batch_id=batch_id),
         )
         diagnostics = _PREPARE_DIAGNOSTICS.values()
         return tuple(
             _member(
                 self.workspace_root,
                 path,
-                required=path != state.batch_source_inputs_root(batch_id=batch_id),
+                required=True,
             )
             for path in runtime
         ) + tuple(

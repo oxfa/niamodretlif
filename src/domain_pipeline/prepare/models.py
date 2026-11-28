@@ -47,14 +47,6 @@ class PreparedManualRouting:
     manually_added: bool = False
 
 
-@dataclasses.dataclass(frozen=True)
-class PreparedOutputRows:
-    """Prepare-owned output rows emitted before worker runtime."""
-
-    review_rows: list[dict[str, Any]]
-    terminal_rows: list[dict[str, Any]]
-
-
 @dataclasses.dataclass
 class PreparedInputSet:
     """Prepared entries, root plans, and preparation-owned terminal rows."""
@@ -65,7 +57,7 @@ class PreparedInputSet:
     entries_by_source: dict[str, list[DomainEntry]]
     manual_routing_by_host: dict[str, PreparedManualRouting]
     root_plans: dict[str, PreparedRootPlan]
-    preparation_outputs: PreparedOutputRows
+    preparation_terminal_rows: list[dict[str, Any]]
     source_ids_by_host: dict[str, tuple[str, ...]] = dataclasses.field(
         default_factory=dict
     )
@@ -76,14 +68,3 @@ class PreparedInputSet:
     parsed_source_files: dict[str, ParsedSourceFile] = dataclasses.field(
         default_factory=dict
     )
-
-    @property
-    def preparation_review_rows(self) -> list[dict[str, Any]]:
-        """Return prepare-owned review rows."""
-        return self.preparation_outputs.review_rows
-
-    @property
-    def preparation_terminal_rows(self) -> list[dict[str, Any]]:
-        """Return prepare-owned terminal rows."""
-        return self.preparation_outputs.terminal_rows
-

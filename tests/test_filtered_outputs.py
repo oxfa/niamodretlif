@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
-from domain_pipeline.paths.layout import PathLayout
+from domain_pipeline.aggregate.readiness import validate_standalone_manual_additions
 from domain_pipeline.prepare.assignment import (
     PreparedBatchPlanningInputs,
     WorkerAssignmentPlanner,
@@ -29,7 +29,6 @@ from domain_pipeline.prepare.models import (
     PreparedInputDomainPlan,
     PreparedInputSet,
     PreparedManualRouting,
-    PreparedOutputRows,
     PreparedRootPlan,
 )
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
@@ -40,11 +39,6 @@ from domain_pipeline.prepare.delegation import (
     effective_delegation_profile,
     effective_host_resolution_profile,
     effective_ip_location_profile,
-)
-from domain_pipeline.prepare.source_line_index import (
-    SourceLineIndex,
-    SourceLineReference,
-    load_source_line_index,
 )
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 from domain_pipeline.prepare.sources.jobs import SourceJob
@@ -64,6 +58,7 @@ from domain_pipeline.worker.delegation.lookup import (
     DelegationResult,
     DelegationSoaEvidence,
 )
+from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
 from domain_pipeline.worker.output.writer import ResultOutputWriter
 from domain_pipeline.worker.runtime.contracts import (
     CompletedResultEvidence,
@@ -109,7 +104,7 @@ def _source_item_handoff(
         entries_by_source={},
         manual_routing_by_host={},
         root_plans={},
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        preparation_terminal_rows=[],
         excluded_source_hosts=set(excluded_hosts or ()),
         parsed_source_files=parsed_source_files,
     )
@@ -118,52 +113,32 @@ def _source_item_handoff(
     )
 
 
-def _all_filtered_input_routes(
-    source_items: SourceItemHandoff,
-    manually_added_domains: list[ManuallyAddedDomain],
-) -> dict[tuple[str, str], str]:
-    """Build explicit filtered input routes for focused renderer tests."""
-    routes: dict[tuple[str, str], str] = {}
-    associations = {
-        association["association_id"]: association
-        for item in source_items.item_records
-        for association in item["target_associations"]
-    }
-    for registrable_domain, references in source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
-    ].items():
-        for reference in references:
-            association = associations[reference["association_id"]]
-            routes[(registrable_domain, association["host"])] = "filtered"
-    for item in manually_added_domains:
-        if item.registrable_domain is not None:
-            routes[(item.registrable_domain, item.host)] = "filtered"
-    return routes
-
-
 def _render_filtered_output(
     source_items: SourceItemHandoff,
     unactionable_registrable_domains: list[str],
     manually_added_domains: list[ManuallyAddedDomain],
     filtered_output: tuple[Path, str],
     *,
-    input_domain_routes: dict[tuple[str, str], str] | None = None,
+    input_domain_routes: dict[str, str] | None = None,
 ) -> None:
     """Render with explicit per-input routes, defaulting test fixtures to filtered."""
-    routes = (
-        dict(input_domain_routes)
-        if input_domain_routes is not None
-        else _all_filtered_input_routes(source_items, manually_added_domains)
-    )
-    if unactionable_registrable_domains:
-        unactionable_roots = set(unactionable_registrable_domains)
-        for key in routes:
-            if key[0] in unactionable_roots:
-                routes[key] = "unactionable"
-    AggregateOutputMerger().write_filtered_source_items(
-        source_items,
-        routes,
-        manually_added_domains,
+    if input_domain_routes is None:
+        routes = {
+            association["host"]: "filtered"
+            for item in source_items.item_records
+            for association in item["target_associations"]
+            if association["registrable_domain"] not in unactionable_registrable_domains
+        }
+        routes.update(
+            {item.host: "filtered" for item in manually_added_domains
+             if item.registrable_domain not in unactionable_registrable_domains}
+        )
+    else:
+        routes = input_domain_routes
+    merger = AggregateOutputMerger()
+    merger.write_filtered_source_items(
+        merger.eligible_source_items(source_items, routes),
+        merger.eligible_manual_hosts(manually_added_domains, routes),
         filtered_output,
     )
 
@@ -362,7 +337,7 @@ def test_configured_adblock_unanchored_domain_is_retained_without_host_target(
 
     assert entries == []
     assert source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
+        "valid_source_items_by_input_domain"
     ] == {}
     assert no_target_items == [
         {
@@ -394,10 +369,12 @@ def test_adblock_host_modifiers_preserve_literal_target_and_rule_text(
     )
 
     assert source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
+        "valid_source_items_by_input_domain"
     ] == {
-        "example.com": [
+        "ads.example.com": [
             {"item_id": "source:1", "association_id": "source:1:target:1"},
+        ],
+        "cdn.example.com": [
             {"item_id": "source:2", "association_id": "source:2:target:1"},
         ]
     }
@@ -424,32 +401,34 @@ def test_adblock_exceptions_are_not_rendered_as_plain_or_hosts(
         (target_path, output_format),
     )
 
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"].keys() == {
-        "example.net"
-    }
+    assert source_items.index_payload["valid_source_items_by_input_domain"].keys() == {"allowed.example.net"}
     assert target_path.read_text(encoding="utf-8") == ""
 
 
-def test_adblock_host_path_rule_maps_and_renders_request_host(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("output_format", "expected"),
+    [("plain", ""), ("hosts", ""), ("adblock", "||ads.example.com/ads/*\n")],
+)
+def test_adblock_host_path_rule_has_worker_target_and_native_output(
+    tmp_path: Path, output_format: str, expected: str
 ) -> None:
-    """Use the literal request host from a supported host/path rule."""
     source_items = _source_item_handoff(
         ["||ads.example.com/ads/*\n"], file_format="adblock"
     )
+    assert source_items.item_records[0]["target_associations"][0]["host"] == "ads.example.com"
     target_path = tmp_path / "host-path.txt"
+    _render_filtered_output(source_items, [], [], (target_path, output_format))
+    assert target_path.read_text(encoding="utf-8") == expected
 
-    _render_filtered_output(
-        source_items,
-        [],
-        [],
-        (target_path, "plain"),
-    )
 
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"].keys() == {
-        "example.com"
-    }
-    assert target_path.read_text(encoding="utf-8") == "ads.example.com\n"
+def test_standalone_addition_cannot_duplicate_source_hostname() -> None:
+    items = _source_item_handoff(["||ads.example.com/path"], file_format="adblock")
+    with pytest.raises(ValueError, match="already occurs in source"):
+        validate_standalone_manual_additions(
+            items,
+            [ManuallyAddedDomain(host="ads.example.com", registrable_domain="example.com")],
+            (),
+        )
 
 
 @pytest.mark.parametrize(
@@ -465,9 +444,7 @@ def test_full_psl_maps_icann_and_private_suffixes(
     """Map registrable domains under both ICANN and PRIVATE PSL rules."""
     source_items = _source_item_handoff([f"{host}\n"], file_format="plain")
 
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"].keys() == {
-        registrable_domain
-    }
+    assert source_items.index_payload["valid_source_items_by_input_domain"].keys() == {host}
     assert source_items.item_records[0]["target_associations"][0][
         "registrable_domain"
     ] == registrable_domain
@@ -576,7 +553,7 @@ def test_adblock_regex_validator_unavailability_fails_preparation(
         (
             [
                 "||blocked.example.com^\n",
-                "plain.example.net\n",
+                "0.0.0.0 plain.example.net\n",
                 "#@?#.extended-exception\n",
             ],
             "mixed",
@@ -714,7 +691,7 @@ def test_adblock_source_exclusions_do_not_reappear_in_filtered_outputs(
         (target_path, "adblock"),
     )
 
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"] == {}
+    assert source_items.index_payload["valid_source_items_by_input_domain"] == {}
     assert target_path.read_text(encoding="utf-8") == ""
 
 
@@ -731,8 +708,8 @@ def test_source_item_semantics_reject_a_reintroduced_excluded_target(
     record = source_items.item_records[0]
     association = record["target_associations"][0]
     association["excluded_from_sources"] = False
-    source_items.index_payload["valid_source_items_by_registrable_domain"] = {
-        "example.com": [
+    source_items.index_payload["valid_source_items_by_input_domain"] = {
+        excluded_host: [
             {
                 "item_id": record["item_id"],
                 "association_id": association["association_id"],
@@ -814,8 +791,8 @@ def test_multi_target_line_preserves_physical_and_occurrence_provenance(
     assert [
         reference["association_id"]
         for reference in source_items.index_payload[
-            "valid_source_items_by_registrable_domain"
-        ]["example.com"]
+            "valid_source_items_by_input_domain"
+        ]["repeated.example.com"]
     ] == ["source:2:target:1", "source:2:target:2"]
     assert target_path.read_text(encoding="utf-8") == (
         "0.0.0.0 repeated.example.com\n"
@@ -847,7 +824,7 @@ def test_public_suffix_target_without_registrable_domain_is_kept(
     assert source_items.index_payload[
         "valid_source_items_without_extractable_registrable_domain"
     ][0]["reason"] == "public_suffix_only"
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"] == {}
+    assert source_items.index_payload["valid_source_items_by_input_domain"] == {}
     assert target_path.read_text(encoding="utf-8") == expected
 
 
@@ -866,7 +843,7 @@ def test_excluded_public_suffix_is_not_indexed_or_rendered(tmp_path: Path) -> No
     )
 
     assert source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
+        "valid_source_items_by_input_domain"
     ] == {}
     assert source_items.index_payload[
         "valid_source_items_without_extractable_registrable_domain"
@@ -883,7 +860,7 @@ def test_strict_psl_miss_is_invalid_and_never_rendered(tmp_path: Path) -> None:
     target_path = tmp_path / "filtered" / "invalid-psl-target.txt"
 
     assert source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
+        "valid_source_items_by_input_domain"
     ] == {}
     assert source_items.index_payload[
         "valid_source_items_without_extractable_registrable_domain"
@@ -919,7 +896,7 @@ def test_strict_psl_miss_adblock_rule_is_not_reemitted(tmp_path: Path) -> None:
         (target_path, "adblock"),
     )
 
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"] == {}
+    assert source_items.index_payload["valid_source_items_by_input_domain"] == {}
     assert source_items.index_payload[
         "valid_source_items_without_extractable_registrable_domain"
     ] == []
@@ -1005,8 +982,8 @@ def test_hosts_line_exclusion_removes_only_excluded_target_association(
         ("blocked.example.com", True),
         ("good.example.org", False),
     ]
-    assert source_items.index_payload["valid_source_items_by_registrable_domain"] == {
-        "example.org": [
+    assert source_items.index_payload["valid_source_items_by_input_domain"] == {
+        "good.example.org": [
             {
                 "item_id": source_items.item_records[0]["item_id"],
                 "association_id": associations[1]["association_id"],
@@ -1050,9 +1027,9 @@ def test_hosts_line_separates_excluded_invalid_and_eligible_targets(
         ("good.example.org", False, None),
     ]
     assert source_items.index_payload[
-        "valid_source_items_by_registrable_domain"
+        "valid_source_items_by_input_domain"
     ] == {
-        "example.org": [
+        "good.example.org": [
             {
                 "item_id": source_items.item_records[0]["item_id"],
                 "association_id": associations[2]["association_id"],
@@ -1067,94 +1044,15 @@ def test_hosts_line_separates_excluded_invalid_and_eligible_targets(
     )
 
 
-def test_source_archive_keeps_valid_non_domain_lines_and_indexes_targets() -> None:
-    """Clean comments and invalid lines without dropping valid AdBlock rules."""
-    source_job = SourceJob(
-        source_id="block",
-        input_label="fixture",
-        output_stem="block",
-        lines=[
-            "! comment\n",
-            "||blocked.example.com^\n",
-            "@@||allowed.example.net^\n",
-            "||*.wildcard.example.com^\n",
-            "##.global-ad\n",
-            "/^tracker\\./\n",
-            "not a valid rule\n",
-        ],
-        config={"input": {"format": "adblock"}},
+def test_source_corpus_counts_valid_lines_and_preserves_positions() -> None:
+    items = _source_item_handoff(
+        ["! comment", "||ads.example.com^", "##.banner", "not a valid rule"],
+        file_format="adblock",
     )
-    prepared_inputs = PreparedInputSet(
-        config={},
-        source_jobs_by_id={"block": source_job},
-        parsed_source_entry_count=0,
-        entries_by_source={},
-        manual_routing_by_host={},
-        root_plans={},
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
-        excluded_source_hosts={"source.example.com"},
-    )
-
-    contents, index, manually_added_domains = (
-        PreparedBatchWriter().prepare_source_archive(prepared_inputs)
-    )
-
-    assert contents == [
-        "||blocked.example.com^\n"
-        "@@||allowed.example.net^\n"
-        "||*.wildcard.example.com^\n"
-        "##.global-ad\n"
-        "/^tracker\\./\n"
-    ]
-    assert index.source_formats == ("adblock",)
-    assert index.registrable_domain_lines == {
-        "example.com": (SourceLineReference(0, 1),),
-        "example.net": (SourceLineReference(0, 2),),
-    }
-    assert manually_added_domains == []
-
-
-def test_source_archive_keeps_manual_additions_separate() -> None:
-    """Keep unmatched manual additions out of the configured-source archive."""
-    source_job = SourceJob(
-        source_id="block",
-        input_label="fixture",
-        output_stem="block",
-        lines=["||source.example.com^\n"],
-        config={"input": {"format": "adblock"}},
-    )
-    manual_entry = DomainEntry(
-        host="manual.example.net",
-        registrable_domain="example.net",
-    )
-    prepared_inputs = PreparedInputSet(
-        config={},
-        source_jobs_by_id={"block": source_job},
-        parsed_source_entry_count=1,
-        entries_by_source={"block": []},
-        manual_routing_by_host={
-            manual_entry.host: PreparedManualRouting(manually_added=True)
-        },
-        root_plans={},
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
-        manually_added_entries={manual_entry.host: manual_entry},
-    )
-
-    contents, index, manually_added_domains = (
-        PreparedBatchWriter().prepare_source_archive(prepared_inputs)
-    )
-
-    assert contents == ["||source.example.com^\n"]
-    assert index.source_formats == ("adblock",)
-    assert index.registrable_domain_lines == {
-        "example.com": (SourceLineReference(0, 1),)
-    }
-    assert manually_added_domains == [
-        ManuallyAddedDomain(
-            host="manual.example.net",
-            registrable_domain="example.net",
-        )
-    ]
+    assert items.retained_line_count == 2
+    assert [record["source_line_number"] for record in items.item_records] == [2, 3]
+    assert items.valid_source_hosts == {"ads.example.com"}
+    assert items.diagnostic_records[0]["source_line_number"] == 4
 
 
 @pytest.mark.parametrize(
@@ -1230,9 +1128,9 @@ def test_filtered_renderer_joins_each_target_to_its_input_domain_route(
         manual,
         (target_path, "plain"),
         input_domain_routes={
-            ("example.com", "review.example.com"): "review",
-            ("example.com", "filtered.example.com"): "filtered",
-            ("example.net", "manual.example.net"): "filtered",
+            "review.example.com": "review",
+            "filtered.example.com": "filtered",
+            "manual.example.net": "filtered",
         },
     )
 
@@ -1269,9 +1167,9 @@ def test_aggregate_validates_global_root_and_input_domain_coverage() -> None:
     routes = merger.validate_worker_results(source_items, manual, [results])
 
     assert routes == {
-        ("example.com", "ads.example.com"): "review",
-        ("example.com", "cdn.example.com"): "filtered",
-        ("example.net", "manual.example.net"): "unactionable",
+        "ads.example.com": "review",
+        "cdn.example.com": "filtered",
+        "manual.example.net": "unactionable",
     }
     assert merger.unactionable_input_domains(routes) == ["manual.example.net"]
 
@@ -1431,6 +1329,22 @@ def test_aggregate_review_projection_drops_prepare_source_details(
     assert rows[0]["host"] == "manual.example.net"
 
 
+def test_duplicate_review_rows_across_worker_and_prepare_are_rejected(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "review.csv"
+    destination.write_bytes(b"previous review\n")
+    review = {"host": "ads.example.com", "registrable_domain": "example.com"}
+    prepare_review = {**review, "source_id": "private-source"}
+    with pytest.raises(DuplicateOutputInvariantError) as raised:
+        AggregateOutputMerger().merge_review_payloads(
+            [("worker-1", [review]), ("prepare", [prepare_review])], destination
+        )
+    assert raised.value.output_kind == "aggregate_review_row"
+    assert raised.value.duplicate_key == review["host"]
+    assert destination.read_bytes() == b"previous review\n"
+
+
 def test_worker_writer_does_not_create_filtered_output(tmp_path: Path) -> None:
     """Keep input-domain results source-blind without a worker filtered file."""
     output_directory = tmp_path / "worker-output"
@@ -1556,7 +1470,7 @@ def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
         entries_by_source={"block": []},
         manual_routing_by_host={},
         root_plans={},
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        preparation_terminal_rows=[],
         manually_added_entries={manual_entry.host: manual_entry},
         excluded_source_hosts={"source.example.com"},
         parsed_source_files={source_job.source_id: parsed_source_file},
@@ -1574,7 +1488,7 @@ def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
         state_root=tmp_path,
     )
 
-    assert batch.source_input_contents == ["||source.example.com^\n"]
+    assert batch.source_item_handoff.item_records[0]["original_text"] == "||source.example.com^"
     assert persisted_manifest.manually_added_domains == [
         ManuallyAddedDomain(
             host="co.uk",
@@ -1609,7 +1523,7 @@ def test_batch_emits_empty_manifests_for_every_configured_worker(
         entries_by_source={},
         manual_routing_by_host={},
         root_plans={},
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        preparation_terminal_rows=[],
         parsed_source_files={source_job.source_id: parsed_source_file},
     )
 
@@ -1631,23 +1545,10 @@ def test_batch_emits_empty_manifests_for_every_configured_worker(
         for manifest in batch.worker_manifests
     )
     assert len(batch.prepare_aggregate_manifest.worker_ids) == 3
-    assert any("source-line-index.csv" in path for path in committed_paths)
-    assert any("source-formats.csv" in path for path in committed_paths)
-    workflow_paths = PathLayout(tmp_path).workflow_state
-    source_contents = [
-        workflow_paths.batch_source_input_path(
-            batch_id="batch", source_ordinal=source_ordinal
-        ).read_text(encoding="utf-8")
-        for source_ordinal in range(len(batch.source_line_index.source_formats))
-    ]
-    source_line_index = load_source_line_index(
-        workflow_paths.batch_source_line_index_path(batch_id="batch"),
-        workflow_paths.batch_source_formats_path(batch_id="batch"),
-    )
-    assert source_contents == ["||blocked.example.com^\n"]
-    assert source_line_index.registrable_domain_lines == {
-        "example.com": (SourceLineReference(0, 1),)
-    }
+    names = {Path(path).name for path in committed_paths}
+    assert {"source-items.jsonl", "source-item-index.json", "source-item-diagnostics.jsonl"} <= names
+    assert not {"source-line-index.csv", "source-formats.csv", "preparation-review.csv"} & names
+    assert all("source_inputs" not in Path(path).parts for path in committed_paths)
 
 
 def test_worker_assignment_balances_unique_input_domain_counts() -> None:
@@ -1832,3 +1733,51 @@ def test_output_paths_must_be_unique_and_safe() -> None:
                 "unactionable": "output/unactionable.txt",
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("lines", "file_format", "excluded", "expected_hosts"),
+    [
+        (["0.0.0.0 One.Example.com Two.Example.net # comment"], "hosts",
+         {"two.example.net"}, ["one.example.com"]),
+        (["server=/one.example.com/.two.example.net/bad.invalid/#"], "dnsmasq",
+         {"one.example.com"}, ["two.example.net"]),
+        (["DOMAIN,One.Example.com", "DOMAIN-SUFFIX,Two.Example.net"], "auto",
+         set(), ["one.example.com", "two.example.net"]),
+        (["One.Example.com", ".Two.Example.net"], "auto",
+         set(), ["one.example.com", "two.example.net"]),
+    ],
+)
+@pytest.mark.parametrize(
+    ("output_format", "template"),
+    [("plain", "{}"), ("hosts", "0.0.0.0 {}"), ("adblock", "||{}^")],
+)
+def test_non_adblock_projection_matrix(
+    tmp_path: Path, lines: list[str], file_format: str, excluded: set[str],
+    expected_hosts: list[str], output_format: str, template: str,
+) -> None:
+    items = _source_item_handoff(lines, file_format=file_format, excluded_hosts=excluded)
+    path = tmp_path / "filtered.txt"
+    _render_filtered_output(items, [], [], (path, output_format))
+    assert path.read_text(encoding="utf-8").splitlines() == [
+        template.format(host) for host in expected_hosts
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output_format", "expected"),
+    [
+        ("plain", "ads.example.com\n"),
+        ("hosts", "0.0.0.0 ads.example.com\n"),
+        ("adblock", "||ads.example.com/path\n  ||ADS.Example.COM^  \n"),
+    ],
+)
+def test_simple_adblock_occurrence_projects_normalized_host_and_replays_raw_text(
+    tmp_path: Path, output_format: str, expected: str,
+) -> None:
+    items = _source_item_handoff(
+        ["||ads.example.com/path", "  ||ADS.Example.COM^  "], file_format="adblock"
+    )
+    path = tmp_path / "filtered.txt"
+    _render_filtered_output(items, [], [], (path, output_format))
+    assert path.read_text(encoding="utf-8") == expected

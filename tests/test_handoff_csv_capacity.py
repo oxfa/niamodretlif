@@ -48,7 +48,7 @@ def test_public_suffix_item_preserves_provenance_without_review(
         result = load_prepare_aggregate_manifest_for_batch(
             batch_id="batch", state_root=tmp_path
         )
-        assert result.preparation_review_rows == []
+        assert result.preparation_terminal_rows == []
 
         paths = PathLayout(tmp_path).workflow_state
         source_items = SourceItemHandoff.load(

@@ -33,18 +33,13 @@ def _prepare_files(root: Path) -> dict[str, bytes]:
         ).encode(),
         f"{base}/worker-ids.csv": b"worker_id\nworker-01\nworker-02\n",
         f"{base}/manual-domains.csv": b"host,registrable_domain_present,registrable_domain\n",
-        f"{base}/preparation-review.csv": b"fixture\n",
         f"{base}/preparation-terminal.yaml": b"---\n[]\n",
-        f"{base}/source-formats.csv": b"source_ordinal,source_format\n",
-        f"{base}/source-line-index.csv": (
-            b"registrable_domain,source_ordinal,line_number\n"
-        ),
         f"{base}/source-items.jsonl": b"",
         f"{base}/source-item-index.json": json.dumps(
             {
                 "batch_id": BATCH,
                 "sources": [],
-                "valid_source_items_by_registrable_domain": {},
+                "valid_source_items_by_input_domain": {},
                 "valid_source_items_without_extractable_registrable_domain": [],
                 "adblock_metadata": [],
             }
@@ -109,14 +104,10 @@ def test_prepare_handoffs_preserve_canonical_members() -> None:
         f"{base}/output-config.yaml",
         f"{base}/worker-ids.csv",
         f"{base}/manual-domains.csv",
-        f"{base}/preparation-review.csv",
         f"{base}/preparation-terminal.yaml",
-        f"{base}/source-formats.csv",
-        f"{base}/source-line-index.csv",
         f"{base}/source-items.jsonl",
         f"{base}/source-item-index.json",
         f"{base}/source-item-diagnostics.jsonl",
-        f"{base}/source_inputs",
     ]
     diagnostics = [
         ("settings.json", ".debug_artifacts/prepare/validation/logs/settings.yaml"),
@@ -522,7 +513,7 @@ def test_restore_rejects_worker_status_identity_mismatch_before_copy(
     )
     status_path.parent.mkdir(parents=True)
     status_path.write_text(
-        f"batch_id: other-batch\nworker_id: worker-01\n",
+        "batch_id: other-batch\nworker_id: worker-01\n",
         encoding="utf-8",
     )
     restored = tmp_path / "restored"
@@ -537,18 +528,12 @@ def test_restore_rejects_worker_status_identity_mismatch_before_copy(
     assert not restored.exists()
 
 
-def test_staging_rejects_unindexed_source_member(tmp_path: Path) -> None:
-    """Staging rejects unindexed source member."""
+def test_restore_rejects_unexpected_source_member(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _prepare_files(source)
-    _write(
-        source,
-        f".workflow_state/batches/{BATCH}/source_inputs/source-0001.txt",
-        b"extra\n",
-    )
-    with pytest.raises(ValueError, match="source input set"):
-        stage_handoff(
-            state_root=source,
-            destination=tmp_path / "staged",
-            request=HandoffRequest("prepare-aggregate", BATCH, require_runtime=True),
+    _write(source, f".workflow_state/batches/{BATCH}/undeclared.json", b"{}")
+    with pytest.raises(ValueError, match="unexpected handoff file"):
+        restore_handoff(
+            state_root=tmp_path / "restored", source=source,
+            request=HandoffRequest("prepare-aggregate", BATCH, config_name="block"),
         )

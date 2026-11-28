@@ -5,9 +5,9 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
-from domain_pipeline.routing.route_codes import RouteCode, TerminalRouteTransition
 from domain_pipeline.prepare.sources.parser import DomainEntry
-from domain_pipeline.worker.output.rows import review_reason_for_row
+from domain_pipeline.routing.route_codes import RouteCode, TerminalRouteTransition
+from domain_pipeline.routing.types import ResultRoute
 from domain_pipeline.worker.delegation.lookup import (
     DelegationResult,
     DelegationSoaEvidence,
@@ -24,6 +24,7 @@ from domain_pipeline.worker.ip_location.providers import (
     IPLocationResult,
     LocationPolicyDecision,
 )
+from domain_pipeline.worker.output.rows import review_reason_for_row
 from domain_pipeline.worker.runtime.contracts import (
     CompletedInputDomainResult,
     CompletedResultEvidence,
@@ -62,10 +63,16 @@ def _representative_ip_location_result(
     return failed[0]
 
 
-def build_completed_result(request: CompletedResultRequest) -> CompletedInputDomainResult:
-    """Build one final source-blind result for the assigned input domain."""
-    transition = request.route_transition
-    evidence = request.evidence
+def build_worker_result_row(
+    *,
+    host: str,
+    registrable_domain: str | None,
+    route: ResultRoute,
+    route_code: RouteCode,
+    route_reason: str,
+    evidence: CompletedResultEvidence,
+) -> dict[str, Any]:
+    """Compute display fields for one terminal Worker result."""
     delegation_result = evidence.delegation_result
     host_result = evidence.host_resolution_result
     selected_ip_result = _representative_ip_location_result(
@@ -73,11 +80,11 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedInputDom
     )
     ip_policy: LocationPolicyDecision | None = evidence.ip_location_policy
     row: dict[str, Any] = {
-        "host": request.entry.host,
-        "registrable_domain": request.entry.registrable_domain or "",
-        "route": transition.route,
-        "route_code": transition.route_code.value,
-        "route_reason": transition.route_reason,
+        "host": host,
+        "registrable_domain": registrable_domain or "",
+        "route": route,
+        "route_code": route_code.value,
+        "route_reason": route_reason,
         "delegation_status": (
             delegation_result.status if delegation_result is not None else "skipped"
         ),
@@ -124,13 +131,27 @@ def build_completed_result(request: CompletedResultRequest) -> CompletedInputDom
         ),
     }
     row["review_reason"] = review_reason_for_row(row)
+    return row
+
+
+def build_completed_result(request: CompletedResultRequest) -> CompletedInputDomainResult:
+    """Build one final source-blind result for the assigned input domain."""
+    transition = request.route_transition
+    route_code = RouteCode(transition.route_code)
     return CompletedInputDomainResult(
         entry=request.entry,
         route=transition.route,
-        route_code=RouteCode(transition.route_code),
+        route_code=route_code,
         route_reason=transition.route_reason,
-        row=row,
-        evidence=evidence,
+        row=build_worker_result_row(
+            host=request.entry.host,
+            registrable_domain=request.entry.registrable_domain,
+            route=transition.route,
+            route_code=route_code,
+            route_reason=transition.route_reason,
+            evidence=request.evidence,
+        ),
+        evidence=request.evidence,
     )
 
 
@@ -180,6 +201,7 @@ def ip_location_result_from_cache_record(record: Any) -> IPLocationResult:
 __all__ = [
     "CompletedResultRequest",
     "build_completed_result",
+    "build_worker_result_row",
     "delegation_result_from_cache_record",
     "ip_location_result_from_cache_record",
     "host_resolution_result_from_cache_record",

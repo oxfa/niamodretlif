@@ -19,13 +19,13 @@ from domain_pipeline.aggregate.readiness import AggregateReadinessChecker
 from domain_pipeline.paths.layout import PathLayout, WorkflowStatePathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     PrepareAggregateManifest,
-    load_prepare_aggregate_manifest_for_batch,
 )
 from domain_pipeline.prepare.assignment import relative_path
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
-    load_worker_aggregate_manifest_for_worker,
+    project_worker_review_rows,
 )
+from domain_pipeline.worker.output.rows import ReviewRowProjector
 from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantError
 from domain_pipeline.worker.status.lifecycle import (
     STATUS_FAILURE,
@@ -95,7 +95,7 @@ class AggregateBatchRunner:
         state_root: Path,
     ) -> dict[str, Any]:
         """Aggregate one fully completed batch from restored handoff files."""
-        readiness = self.services.checker.validate(batch_id, state_root=state_root)
+        readiness, inputs = self.services.checker.check(batch_id, state_root=state_root)
         if readiness["state"] == "ready_failed":
             failed_statuses = [
                 payload
@@ -108,48 +108,38 @@ class AggregateBatchRunner:
                 "failed_statuses": failed_statuses,
                 "failure_reason": "one or more workers failed; aggregate was not run",
             }
-        prepare_manifest = load_prepare_aggregate_manifest_for_batch(
-            batch_id=batch_id, state_root=state_root
-        )
+        if inputs is None:
+            return readiness
+        prepare_manifest = inputs.prepare_manifest
         final_output_paths = prepare_manifest.resolve_paths(state_root)
-        worker_manifests = self._worker_aggregate_manifests(
-            batch_id=batch_id,
-            worker_ids=list(readiness.get("worker_ids", [])),
-            state_root=state_root,
-            require_all=readiness["state"] == "ready_success",
-        )
+        worker_manifests = inputs.worker_manifests
         self._log_start(
             batch_id=batch_id,
             readiness=readiness,
             prepare_manifest=prepare_manifest,
         )
-        if readiness["state"] != "ready_success":
-            return readiness
         status_payloads = readiness["status_payloads"]
+        output_merger = self.services.output_merger
         try:
-            source_items = self.services.checker.source_items_for_batch(batch_id)
-            input_domain_routes = self.services.output_merger.validate_worker_results(
-                source_items,
+            input_domain_routes = output_merger.validate_worker_results(
+                inputs.source_items,
                 prepare_manifest.manually_added_domains,
-                [
-                    manifest
-                    for manifest in worker_manifests
-                    if manifest.handoff_finalized
-                ],
+                worker_manifests,
             )
-            unactionable_domains = (
-                self.services.output_merger.unactionable_input_domains(
-                    input_domain_routes
-                )
+            unactionable_domains = output_merger.unactionable_input_domains(
+                input_domain_routes
             )
-            for filtered_output in (
-                prepare_manifest.aggregate_output_spec.resolve_filtered(state_root)
-            ):
-                self.services.output_merger.write_filtered_source_items(
-                    source_items,
-                    input_domain_routes,
-                    prepare_manifest.manually_added_domains,
-                    filtered_output,
+            eligible_items = output_merger.eligible_source_items(
+                inputs.source_items, input_domain_routes
+            )
+            eligible_manual_hosts = output_merger.eligible_manual_hosts(
+                prepare_manifest.manually_added_domains, input_domain_routes
+            )
+            for (
+                filtered_output
+            ) in prepare_manifest.aggregate_output_spec.resolve_filtered(state_root):
+                output_merger.write_filtered_source_items(
+                    eligible_items, eligible_manual_hosts, filtered_output
                 )
             self.services.output_merger.merge_host_value_payloads(
                 [("input_domain_results", unactionable_domains)],
@@ -175,11 +165,18 @@ class AggregateBatchRunner:
             self.services.output_merger.merge_review_payloads(
                 [
                     *[
-                        (manifest.worker_id, manifest.review_output_rows)
+                        (manifest.worker_id, project_worker_review_rows(manifest))
                         for manifest in worker_manifests
                         if manifest.handoff_finalized
                     ],
-                    ("prepare", prepare_manifest.preparation_review_rows),
+                    (
+                        "prepare",
+                        ReviewRowProjector().project_many(
+                            row
+                            for row in prepare_manifest.preparation_terminal_rows
+                            if row["route"] == "review"
+                        ),
+                    ),
                 ],
                 final_output_paths["review"],
             )
@@ -348,31 +345,6 @@ class AggregateBatchRunner:
             final_log_summary.get("bytes", 0),
         )
 
-    def _worker_aggregate_manifests(
-        self,
-        *,
-        batch_id: str,
-        worker_ids: list[str],
-        state_root: Path,
-        require_all: bool,
-    ) -> list[WorkerAggregateManifest]:
-        manifests: list[WorkerAggregateManifest] = []
-        for worker_id in worker_ids:
-            manifest = load_worker_aggregate_manifest_for_worker(
-                batch_id=batch_id,
-                worker_id=worker_id,
-                state_root=state_root,
-            )
-            if manifest is None:
-                if not require_all:
-                    continue
-                raise ValueError(
-                    "worker aggregate manifest is required before aggregate execution: "
-                    f"batch_id={batch_id} worker_id={worker_id}"
-                )
-            manifests.append(manifest)
-        return manifests
-
     def _materialize_worker_cache_payloads(
         self,
         *,
@@ -442,8 +414,9 @@ class AggregateBatchRunner:
                     "final_audit_path": prepare_manifest.aggregate_output_spec.audit,
                     "final_log_path": prepare_manifest.aggregate_output_spec.log,
                     "final_cache_path": prepare_manifest.aggregate_output_spec.cache,
-                    "preparation_review_row_count": len(
-                        prepare_manifest.preparation_review_rows
+                    "preparation_review_row_count": sum(
+                        row["route"] == "review"
+                        for row in prepare_manifest.preparation_terminal_rows
                     ),
                     "preparation_terminal_row_count": len(
                         prepare_manifest.preparation_terminal_rows

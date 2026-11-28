@@ -27,7 +27,6 @@ from domain_pipeline.prepare.models import (
     PreparedInputDomainPlan,
     PreparedInputSet,
     PreparedManualRouting,
-    PreparedOutputRows,
     PreparedRootPlan,
 )
 from domain_pipeline.prepare.sources.jobs import SourceJob, SourceJobFactory
@@ -65,7 +64,6 @@ class PreparationCollections:
     manual_routing_by_host: dict[str, PreparedManualRouting] = dataclasses.field(
         default_factory=dict
     )
-    review_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     terminal_rows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     matched_hosts: set[str] = dataclasses.field(default_factory=set)
     parsed_source_entry_count: int = 0
@@ -212,10 +210,7 @@ class PreparationPlanner:
             entries_by_source=dict(entries_by_source),
             manual_routing_by_host=dict(state.collections.manual_routing_by_host),
             root_plans=root_plans,
-            preparation_outputs=PreparedOutputRows(
-                review_rows=state.collections.review_rows,
-                terminal_rows=state.collections.terminal_rows,
-            ),
+            preparation_terminal_rows=state.collections.terminal_rows,
             source_ids_by_host={
                 host: tuple(sorted(source_ids))
                 for host, source_ids in state.collections.source_ids_by_host.items()
@@ -350,7 +345,6 @@ class PreparationPlanner:
                     ),
                 )
             )
-            state.collections.review_rows.append(row)
             state.collections.terminal_rows.append(
                 _preparation_terminal_row(
                     row=row,

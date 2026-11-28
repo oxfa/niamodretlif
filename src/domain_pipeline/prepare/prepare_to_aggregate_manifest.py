@@ -16,7 +16,6 @@ from pydantic import (
 from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
 from domain_pipeline.handoff_io import read_csv, read_yaml, write_csv, write_yaml
 from domain_pipeline.paths.layout import PathLayout
-from domain_pipeline.worker.output.rows import PREPARATION_REVIEW_COLUMNS
 
 
 def _validate_publish_path(value: str, *, field_name: str) -> str:
@@ -131,7 +130,6 @@ class PrepareAggregateManifest(PrepareAggregateModel):
     worker_ids: list[str]
     excluded_source_hosts: list[str]
     manually_added_domains: list[ManuallyAddedDomain]
-    preparation_review_rows: list[dict[str, str]]
     preparation_terminal_rows: list[dict[str, Any]]
 
     @field_validator("excluded_source_hosts")
@@ -141,26 +139,6 @@ class PrepareAggregateManifest(PrepareAggregateModel):
             raise ValueError("excluded source hosts must be non-empty trimmed values")
         if len(values) != len(set(values)):
             raise ValueError("excluded source hosts must not contain duplicates")
-        return values
-
-    @field_validator("preparation_review_rows", mode="before")
-    @classmethod
-    def _validate_preparation_review_rows(
-        cls, values: Any
-    ) -> list[dict[str, str]]:
-        if not isinstance(values, list):
-            raise ValueError("preparation_review_rows must be a list")
-        expected_fields = set(PREPARATION_REVIEW_COLUMNS)
-        for value in values:
-            if (
-                not isinstance(value, dict)
-                or set(value) != expected_fields
-                or any(
-                    not isinstance(value.get(field), str)
-                    for field in PREPARATION_REVIEW_COLUMNS
-                )
-            ):
-                raise ValueError("preparation review row has unsupported fields")
         return values
 
     @field_validator("preparation_terminal_rows", mode="after")
@@ -187,7 +165,6 @@ def write_prepare_aggregate_handoff(
     config = paths.prepare_aggregate_config_path(batch_id=batch_id)
     workers = paths.batch_worker_ids_path(batch_id=batch_id)
     manual = paths.batch_manual_domains_path(batch_id=batch_id)
-    review = paths.batch_preparation_review_path(batch_id=batch_id)
     terminal = paths.batch_preparation_terminal_path(batch_id=batch_id)
     output = manifest.aggregate_output_spec.model_dump(mode="json")
     for key in ("audit", "log", "cache"):
@@ -218,13 +195,8 @@ def write_prepare_aggregate_handoff(
             for item in manifest.manually_added_domains
         ],
     )
-    write_csv(
-        review,
-        PREPARATION_REVIEW_COLUMNS,
-        manifest.preparation_review_rows,
-    )
     write_yaml(terminal, manifest.preparation_terminal_rows)
-    return [config, workers, manual, review, terminal]
+    return [config, workers, manual, terminal]
 
 
 def load_prepare_aggregate_manifest_for_batch(
@@ -272,10 +244,6 @@ def load_prepare_aggregate_manifest_for_batch(
     if any(not worker for worker in workers) or len(workers) != len(set(workers)):
         raise ValueError("invalid or duplicate aggregate worker id")
     manual = _load_manual_domains(paths.batch_manual_domains_path(batch_id=batch_id))
-    review = read_csv(
-        paths.batch_preparation_review_path(batch_id=batch_id),
-        PREPARATION_REVIEW_COLUMNS,
-    )
     terminal = read_yaml(paths.batch_preparation_terminal_path(batch_id=batch_id))
     if not isinstance(terminal, list):
         raise ValueError("preparation terminal rows must be a YAML sequence")
@@ -288,7 +256,6 @@ def load_prepare_aggregate_manifest_for_batch(
                 "worker_ids": workers,
                 "excluded_source_hosts": payload["excluded_source_hosts"],
                 "manually_added_domains": manual,
-                "preparation_review_rows": review,
                 "preparation_terminal_rows": terminal,
             }
         )

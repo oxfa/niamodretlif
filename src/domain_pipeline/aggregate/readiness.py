@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
+    ManuallyAddedDomain,
+    PrepareAggregateManifest,
     load_prepare_aggregate_manifest_for_batch,
 )
 from domain_pipeline.prepare.source_items import SourceItemHandoff
+from domain_pipeline.prepare.sources.parser import DomainListParser, InputFileFormat
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
+    WorkerAggregateManifest,
     load_worker_aggregate_manifest,
     worker_aggregate_manifest_paths,
 )
@@ -21,6 +26,39 @@ from domain_pipeline.worker.status.store import WorkerStatusStore
 
 logger = logging.getLogger(__name__)
 
+
+def validate_standalone_manual_additions(
+    source_items: SourceItemHandoff,
+    manually_added_domains: Iterable[ManuallyAddedDomain],
+    excluded_source_hosts: Iterable[str],
+) -> None:
+    """Verify that standalone hosts are valid and disjoint from source targets."""
+    source_hosts = source_items.valid_source_hosts
+    excluded_hosts = set(excluded_source_hosts)
+    seen_manual_hosts: set[str] = set()
+    parser = DomainListParser()
+    for item in manually_added_domains:
+        if item.host in seen_manual_hosts or item.host in excluded_hosts:
+            raise ValueError(
+                f"duplicate or excluded standalone manual addition: {item.host!r}"
+            )
+        if item.host in source_hosts:
+            raise ValueError(
+                f"standalone manual addition already occurs in source: {item.host!r}"
+            )
+        parsed = parser.parse_source_item(
+            item.host, file_format=InputFileFormat.PLAIN
+        )
+        if (
+            parsed is None
+            or parsed.error_reason is not None
+            or len(parsed.targets) != 1
+            or parsed.targets[0].error_reason is not None
+            or parsed.targets[0].host != item.host
+            or parsed.targets[0].registrable_domain != item.registrable_domain
+        ):
+            raise ValueError(f"invalid standalone manual addition: {item.host!r}")
+        seen_manual_hosts.add(item.host)
 
 @dataclasses.dataclass(frozen=True)
 class AggregateStatusBarrier:
@@ -53,16 +91,23 @@ class AggregateStatusBarrierBuilder:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class VerifiedAggregateInputs:
+    prepare_manifest: PrepareAggregateManifest
+    source_items: SourceItemHandoff
+    worker_manifests: list[WorkerAggregateManifest]
+
+
 class AggregateReadinessChecker:
     """Validate whether one batch is ready for aggregate processing."""
 
     def __init__(self, *, status_store: WorkerStatusStore | None = None) -> None:
         self.status_store = status_store or WorkerStatusStore()
-        self._validated_source_items: dict[str, SourceItemHandoff] = {}
 
-    def validate(self, batch_id: str, *, state_root: Path) -> dict[str, Any]:
-        """Return barrier readiness information for one batch."""
-        self._validated_source_items.pop(batch_id, None)
+    def check(
+        self, batch_id: str, *, state_root: Path
+    ) -> tuple[dict[str, Any], VerifiedAggregateInputs | None]:
+        """Return readiness status and the exact inputs verified for this invocation."""
         prepare_manifest = load_prepare_aggregate_manifest_for_batch(
             batch_id=batch_id, state_root=state_root
         )
@@ -89,7 +134,7 @@ class AggregateReadinessChecker:
                 "batch_id": batch_id,
                 "missing_status_paths": status_barrier.missing_status_paths,
                 "in_progress_status_paths": status_barrier.in_progress_status_paths,
-            }
+            }, None
         status_by_worker_id = {
             str(payload["worker_id"]): payload
             for payload in status_barrier.status_payloads
@@ -122,7 +167,7 @@ class AggregateReadinessChecker:
                 "batch_id": batch_id,
                 "worker_ids": worker_ids,
                 "status_payloads": status_barrier.status_payloads,
-            }
+            }, None
         unfinalized_handoff_worker_ids = [
             worker_id
             for worker_id in worker_ids
@@ -133,9 +178,9 @@ class AggregateReadinessChecker:
                 "state": "not_ready",
                 "batch_id": batch_id,
                 "unfinalized_handoff_worker_ids": unfinalized_handoff_worker_ids,
-            }
+            }, None
         workflow_paths = PathLayout(state_root).workflow_state
-        self._validated_source_items[batch_id] = SourceItemHandoff.load(
+        source_items = SourceItemHandoff.load(
             batch_id=batch_id,
             items_path=workflow_paths.batch_source_items_path(batch_id=batch_id),
             index_path=workflow_paths.batch_source_item_index_path(batch_id=batch_id),
@@ -144,6 +189,11 @@ class AggregateReadinessChecker:
             ),
             validate_semantics=True,
             excluded_source_hosts=set(prepare_manifest.excluded_source_hosts),
+        )
+        validate_standalone_manual_additions(
+            source_items,
+            prepare_manifest.manually_added_domains,
+            prepare_manifest.excluded_source_hosts,
         )
         logger.info(
             "Aggregate readiness for batch %s resolved to ready_success with %d statuses",
@@ -155,16 +205,11 @@ class AggregateReadinessChecker:
             "batch_id": batch_id,
             "worker_ids": worker_ids,
             "status_payloads": status_barrier.status_payloads,
-        }
-
-    def source_items_for_batch(self, batch_id: str) -> SourceItemHandoff:
-        """Return the source handoff already validated for this readiness result."""
-        try:
-            return self._validated_source_items[batch_id]
-        except KeyError as exc:
-            raise ValueError(
-                f"source-item handoff was not validated for batch {batch_id}"
-            ) from exc
+        }, VerifiedAggregateInputs(
+            prepare_manifest,
+            source_items,
+            [handoffs_by_worker_id[worker_id] for worker_id in worker_ids],
+        )
 
     def worker_manifest_paths(self, batch_id: str, *, state_root: Path) -> list[Path]:
         """Return restored worker aggregate manifest paths for one batch."""
@@ -231,7 +276,7 @@ class AggregateReadinessChecker:
 
     def handoffs_by_worker_id(
         self, manifest_paths: list[Path], *, batch_id: str, state_root: Path
-    ) -> dict[str, Any]:
+    ) -> dict[str, WorkerAggregateManifest]:
         """Return loaded worker aggregate handoffs keyed by worker id."""
         return {
             manifest_path.parent.name: load_worker_aggregate_manifest(
@@ -246,4 +291,5 @@ class AggregateReadinessChecker:
 
 def validate_aggregate_readiness(batch_id: str, *, state_root: Path) -> dict[str, Any]:
     """Validate whether a batch is ready for aggregate execution."""
-    return AggregateReadinessChecker().validate(batch_id, state_root=state_root)
+    status, _ = AggregateReadinessChecker().check(batch_id, state_root=state_root)
+    return status

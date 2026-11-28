@@ -7,7 +7,6 @@ import pytest
 
 from domain_pipeline.handoff_io import write_csv, write_json, write_yaml
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 
 
 def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
@@ -34,22 +33,7 @@ def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
         ("host", "registrable_domain_present", "registrable_domain"),
         [],
     )
-    write_csv(
-        state.batch_preparation_review_path(batch_id=batch_id),
-        REVIEW_OUTPUT_COLUMNS,
-        [],
-    )
     write_yaml(state.batch_preparation_terminal_path(batch_id=batch_id), [])
-    write_csv(
-        state.batch_source_formats_path(batch_id=batch_id),
-        ("source_ordinal", "source_format"),
-        [],
-    )
-    write_csv(
-        state.batch_source_line_index_path(batch_id=batch_id),
-        ("registrable_domain", "source_ordinal", "line_number"),
-        [],
-    )
     source_items = state.batch_source_items_path(batch_id=batch_id)
     source_items.parent.mkdir(parents=True, exist_ok=True)
     source_items.write_text("", encoding="utf-8")
@@ -58,7 +42,7 @@ def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
         {
             "batch_id": batch_id,
             "sources": [],
-            "valid_source_items_by_registrable_domain": {},
+            "valid_source_items_by_input_domain": {},
             "valid_source_items_without_extractable_registrable_domain": [],
             "adblock_metadata": [],
         },

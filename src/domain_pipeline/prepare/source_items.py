@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
-from domain_pipeline.handoff_io import read_json, write_json
+from domain_pipeline.handoff_io import read_strict_json, write_json
 from domain_pipeline.prepare.models import PreparedInputSet
 from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import (
     DomainListParser,
     InputFileFormat,
+    ParsedSourceItem,
 )
+
+_BY_INPUT_DOMAIN = "valid_source_items_by_input_domain"
+_WITHOUT_REGISTRABLE_DOMAIN = (
+    "valid_source_items_without_extractable_registrable_domain"
+)
+_ADBLOCK_METADATA = "adblock_metadata"
 
 
 @dataclass(frozen=True)
@@ -25,6 +34,30 @@ class SourceItemHandoff:
     item_records: tuple[dict[str, Any], ...]
     index_payload: dict[str, Any]
     diagnostic_records: tuple[dict[str, Any], ...]
+    parsed_items_by_id: Mapping[str, ParsedSourceItem] = field(default_factory=dict)
+
+    @property
+    def retained_line_count(self) -> int:
+        """Count original lines that carry metadata, a rule, or a valid target."""
+        return sum(
+            record["is_metadata"]
+            or record["no_target_reason"] is not None
+            or any(
+                association["error_reason"] is None
+                for association in record["target_associations"]
+            )
+            for record in self.item_records
+        )
+
+    @property
+    def valid_source_hosts(self) -> frozenset[str]:
+        """Return error-free source hosts, including suffixes and exclusions."""
+        return frozenset(
+            association["host"]
+            for record in self.item_records
+            for association in record["target_associations"]
+            if association["error_reason"] is None
+        )
 
     @classmethod
     def build(
@@ -32,15 +65,13 @@ class SourceItemHandoff:
         *,
         batch_id: str,
         prepared_inputs: PreparedInputSet,
-    ) -> "SourceItemHandoff":
+    ) -> SourceItemHandoff:
         """Build indexed source-item records from prepare's parsed source jobs."""
         excluded_hosts = prepared_inputs.excluded_source_hosts
         source_metadata: list[dict[str, Any]] = []
         records: list[dict[str, Any]] = []
+        parsed_items: dict[str, ParsedSourceItem] = {}
         diagnostics: list[dict[str, Any]] = []
-        by_domain: dict[str, list[dict[str, str]]] = {}
-        without_domain: list[dict[str, Any]] = []
-        adblock_metadata: list[dict[str, Any]] = []
 
         for source_ordinal, job in enumerate(prepared_inputs.source_jobs_by_id.values()):
             parsed_source_file = prepared_inputs.parsed_source_files.get(job.source_id)
@@ -62,7 +93,7 @@ class SourceItemHandoff:
                 for source_line in parsed_source_file.lines:
                     line_number = source_line.line_number
                     raw_line = source_line.raw_line
-                    if _is_ignored_line(raw_line):
+                    if source_line.is_ignored:
                         continue
                     diagnostics.append(
                         _diagnostic(
@@ -71,7 +102,7 @@ class SourceItemHandoff:
                             job=job,
                             line_number=line_number,
                             input_format=input_format,
-                            raw_text=_source_text(raw_line),
+                            raw_text=raw_line,
                             reason=f"source_file_format_{input_format.value}",
                         )
                     )
@@ -92,7 +123,7 @@ class SourceItemHandoff:
                             job=job,
                             line_number=line_number,
                             input_format=input_format,
-                            raw_text=_source_text(raw_line),
+                            raw_text=raw_line,
                             reason=parsed.error_reason,
                         )
                     )
@@ -100,18 +131,17 @@ class SourceItemHandoff:
 
                 target_associations: list[dict[str, Any]] = []
                 for target_ordinal, target in enumerate(parsed.targets, start=1):
-                    association_id = f"{item_id}:target:{target_ordinal}"
-                    excluded = target.host in excluded_hosts
-                    association = {
-                        "association_id": association_id,
-                        "target_ordinal": target_ordinal,
-                        "host": target.host,
-                        "registrable_domain": target.registrable_domain,
-                        "role": target.role,
-                        "error_reason": target.error_reason,
-                        "excluded_from_sources": excluded,
-                    }
-                    target_associations.append(association)
+                    target_associations.append(
+                        {
+                            "association_id": f"{item_id}:target:{target_ordinal}",
+                            "target_ordinal": target_ordinal,
+                            "host": target.host,
+                            "registrable_domain": target.registrable_domain,
+                            "role": target.role,
+                            "error_reason": target.error_reason,
+                            "excluded_from_sources": target.host in excluded_hosts,
+                        }
+                    )
                     if target.error_reason is not None:
                         diagnostics.append(
                             _diagnostic(
@@ -120,25 +150,10 @@ class SourceItemHandoff:
                                 job=job,
                                 line_number=line_number,
                                 input_format=input_format,
-                                raw_text=_source_text(raw_line),
+                                raw_text=raw_line,
                                 reason=target.error_reason,
                                 target_ordinal=target_ordinal,
                             )
-                        )
-                        continue
-                    if excluded:
-                        continue
-                    reference = {
-                        "item_id": item_id,
-                        "association_id": association_id,
-                    }
-                    if target.registrable_domain is None:
-                        without_domain.append(
-                            {**reference, "reason": "public_suffix_only"}
-                        )
-                    else:
-                        by_domain.setdefault(target.registrable_domain, []).append(
-                            reference
                         )
 
                 is_metadata = parsed.is_metadata
@@ -152,54 +167,29 @@ class SourceItemHandoff:
                     "source_label": job.input_label,
                     "source_line_number": line_number,
                     "input_format": input_format.value,
-                    "original_text": _source_text(raw_line),
+                    "original_text": raw_line,
                     "item_kind": parsed.item_kind,
                     "target_associations": target_associations,
                     "no_target_reason": no_target_reason,
                     "is_metadata": is_metadata,
                 }
                 records.append(record)
-                if is_metadata:
-                    adblock_metadata.append(
-                        {"item_id": item_id, "association_id": None}
-                    )
-                elif not target_associations and no_target_reason:
-                    without_domain.append(
-                        {
-                            "item_id": item_id,
-                            "association_id": None,
-                            "reason": no_target_reason,
-                        }
-                    )
+                parsed_items[item_id] = parsed
 
-        records.sort(key=lambda item: (item["source_ordinal"], item["source_line_number"]))
+        by_domain, without_domain, adblock_metadata = _index_occurrences(records)
         index_payload = {
             "batch_id": batch_id,
             "sources": source_metadata,
-            "valid_source_items_by_registrable_domain": {
-                domain: sorted(
-                    references,
-                    key=lambda item: (item["item_id"], item["association_id"]),
-                )
-                for domain, references in sorted(by_domain.items())
-            },
-            "valid_source_items_without_extractable_registrable_domain": sorted(
-                without_domain,
-                key=lambda item: (
-                    item["item_id"],
-                    item["association_id"] or "",
-                    item["reason"],
-                ),
-            ),
-            "adblock_metadata": sorted(
-                adblock_metadata, key=lambda item: item["item_id"]
-            ),
+            _BY_INPUT_DOMAIN: dict(sorted(by_domain.items())),
+            _WITHOUT_REGISTRABLE_DOMAIN: without_domain,
+            _ADBLOCK_METADATA: adblock_metadata,
         }
         handoff = cls(
             batch_id=batch_id,
             item_records=tuple(records),
             index_payload=index_payload,
             diagnostic_records=tuple(diagnostics),
+            parsed_items_by_id=parsed_items,
         )
         handoff.validate()
         return handoff
@@ -214,7 +204,7 @@ class SourceItemHandoff:
         diagnostics_path: Path,
         validate_semantics: bool = False,
         excluded_source_hosts: set[str] | None = None,
-    ) -> "SourceItemHandoff":
+    ) -> SourceItemHandoff:
         """Load the prepare-owned aggregate source handoff.
 
         Semantic reparsing is optional because staging also loads this handoff
@@ -229,18 +219,31 @@ class SourceItemHandoff:
         handoff = cls(
             batch_id=batch_id,
             item_records=item_records,
-            index_payload=read_json(index_path),
+            index_payload=read_strict_json(index_path),
             diagnostic_records=diagnostic_records,
         )
         handoff.validate()
+        handoff = replace(
+            handoff,
+            item_records=tuple(
+                sorted(
+                    handoff.item_records,
+                    key=lambda item: (
+                        item["source_ordinal"],
+                        item["source_line_number"],
+                    ),
+                )
+            ),
+        )
         if validate_semantics:
             if excluded_source_hosts is None:
                 raise ValueError(
                     "source-item semantic validation requires prepare exclusions"
                 )
-            handoff.validate_source_semantics(
+            parsed_items = handoff.validate_source_semantics(
                 excluded_source_hosts=excluded_source_hosts
             )
+            handoff = replace(handoff, parsed_items_by_id=parsed_items)
         return handoff
 
     def write(
@@ -251,10 +254,23 @@ class SourceItemHandoff:
         diagnostics_path: Path,
     ) -> tuple[Path, Path, Path]:
         """Write the three declared prepare-to-aggregate source artifacts."""
+        # The final diagnostics path marks completion of all three files.
+        diagnostics_path.unlink(missing_ok=True)
         self.validate()
         _write_jsonl(items_path, self.item_records)
         write_json(index_path, self.index_payload)
-        _write_jsonl(diagnostics_path, self.diagnostic_records)
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(
+            dir=diagnostics_path.parent,
+            prefix=f".{diagnostics_path.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_diagnostics = Path(temporary_file.name)
+        try:
+            _write_jsonl(temporary_diagnostics, self.diagnostic_records)
+            temporary_diagnostics.replace(diagnostics_path)
+        finally:
+            temporary_diagnostics.unlink(missing_ok=True)
         return items_path, index_path, diagnostics_path
 
     def validate(self) -> None:
@@ -263,9 +279,9 @@ class SourceItemHandoff:
         expected_keys = {
             "batch_id",
             "sources",
-            "valid_source_items_by_registrable_domain",
-            "valid_source_items_without_extractable_registrable_domain",
-            "adblock_metadata",
+            _BY_INPUT_DOMAIN,
+            _WITHOUT_REGISTRABLE_DOMAIN,
+            _ADBLOCK_METADATA,
         }
         if not isinstance(payload, dict) or set(payload) != expected_keys:
             raise ValueError("source-item index has unsupported or missing fields")
@@ -274,113 +290,61 @@ class SourceItemHandoff:
         sources = payload["sources"]
         if not isinstance(sources, list):
             raise ValueError("source-item index sources must be a list")
+        source_ids: set[str] = set()
         for ordinal, source in enumerate(sources):
             if (
                 not isinstance(source, dict)
                 or set(source)
                 != {"source_ordinal", "source_id", "source_label", "input_format"}
-                or source.get("source_ordinal") != ordinal
+                or type(source["source_ordinal"]) is not int
+                or source["source_ordinal"] != ordinal
                 or any(
                     not isinstance(source.get(key), str) or not source[key]
                     for key in ("source_id", "source_label", "input_format")
                 )
             ):
                 raise ValueError("source-item index contains invalid source metadata")
+            source_id = source["source_id"]
+            if source_id in source_ids:
+                raise ValueError(
+                    f"source-item index contains duplicate source ID: {source_id}"
+                )
+            source_ids.add(source_id)
             try:
                 InputFileFormat(source["input_format"])
             except ValueError as exc:
                 raise ValueError("source-item index contains unknown format") from exc
 
-        records_by_id: dict[str, dict[str, Any]] = {}
-        associations_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
-        expected_by_domain: dict[str, list[dict[str, str]]] = {}
-        expected_without_domain: list[dict[str, Any]] = []
-        expected_metadata: list[dict[str, Any]] = []
+        item_ids: set[str] = set()
         for record in self.item_records:
-            _validate_item_record(record, self.batch_id, sources)
+            _validate_item_record(record, sources)
             item_id = record["item_id"]
-            if item_id in records_by_id:
+            if item_id in item_ids:
                 raise ValueError(f"duplicate source item identity: {item_id}")
-            records_by_id[item_id] = record
-            for association in record["target_associations"]:
-                association_id = association["association_id"]
-                if association_id in associations_by_id:
-                    raise ValueError(f"duplicate target association: {association_id}")
-                associations_by_id[association_id] = (record, association)
-                if (
-                    association["error_reason"] is not None
-                    or association["excluded_from_sources"]
-                ):
-                    continue
-                reference = {"item_id": item_id, "association_id": association_id}
-                domain = association["registrable_domain"]
-                if domain is None:
-                    expected_without_domain.append(
-                        {**reference, "reason": "public_suffix_only"}
-                    )
-                else:
-                    expected_by_domain.setdefault(domain, []).append(reference)
-            if record["is_metadata"]:
-                expected_metadata.append({"item_id": item_id, "association_id": None})
-            elif not record["target_associations"]:
-                expected_without_domain.append(
-                    {
-                        "item_id": item_id,
-                        "association_id": None,
-                        "reason": record["no_target_reason"],
-                    }
-                )
+            item_ids.add(item_id)
 
-        actual_by_domain = payload["valid_source_items_by_registrable_domain"]
-        if not isinstance(actual_by_domain, dict):
-            raise ValueError("valid_source_items_by_registrable_domain must be an object")
-        normalized_by_domain: dict[str, list[dict[str, str]]] = {}
-        for domain, references in actual_by_domain.items():
-            if not isinstance(domain, str) or not domain or not isinstance(references, list):
-                raise ValueError("source-item domain collection is invalid")
-            normalized_by_domain[domain] = [
-                _validate_association_reference(
-                    reference,
-                    records_by_id=records_by_id,
-                    associations_by_id=associations_by_id,
-                    expected_domain=domain,
-                )
-                for reference in references
-            ]
-        if _sort_refs(normalized_by_domain) != _sort_refs(expected_by_domain):
-            raise ValueError("source-item domain index does not match item associations")
-
-        actual_without_domain = payload[
-            "valid_source_items_without_extractable_registrable_domain"
-        ]
-        if not isinstance(actual_without_domain, list):
+        expected_by_domain, expected_without_domain, expected_metadata = (
+            _index_occurrences(self.item_records)
+        )
+        actual_by_domain = payload[_BY_INPUT_DOMAIN]
+        if not isinstance(actual_by_domain, dict) or (
+            actual_by_domain.keys() != expected_by_domain.keys()
+        ):
             raise ValueError(
-                "valid_source_items_without_extractable_registrable_domain must be a list"
+                "source-item domain index does not match item associations"
             )
-        normalized_without_domain = [
-            _validate_no_domain_reference(
-                reference,
-                records_by_id=records_by_id,
-                associations_by_id=associations_by_id,
+        for domain, references in actual_by_domain.items():
+            _validate_reference_membership(
+                references, expected_by_domain[domain], collection=f"domain {domain}"
             )
-            for reference in actual_without_domain
-        ]
-        if _sort_no_domain(normalized_without_domain) != _sort_no_domain(
-            expected_without_domain
-        ):
-            raise ValueError("source-item no-domain index does not match item records")
-
-        actual_metadata = payload["adblock_metadata"]
-        if not isinstance(actual_metadata, list):
-            raise ValueError("source-item AdBlock metadata index must be a list")
-        normalized_metadata = [
-            _validate_metadata_reference(reference, records_by_id)
-            for reference in actual_metadata
-        ]
-        if sorted(normalized_metadata, key=lambda item: item["item_id"]) != sorted(
-            expected_metadata, key=lambda item: item["item_id"]
-        ):
-            raise ValueError("source-item metadata index does not match item records")
+        _validate_reference_membership(
+            payload[_WITHOUT_REGISTRABLE_DOMAIN],
+            expected_without_domain,
+            collection="no-domain index",
+        )
+        _validate_reference_membership(
+            payload[_ADBLOCK_METADATA], expected_metadata, collection="metadata index"
+        )
 
         for diagnostic in self.diagnostic_records:
             _validate_diagnostic(diagnostic, self.batch_id, sources)
@@ -390,8 +354,8 @@ class SourceItemHandoff:
         *,
         excluded_source_hosts: set[str],
         parser: DomainListParser | None = None,
-    ) -> None:
-        """Reparse items and verify PSL results and prepare exclusion decisions."""
+    ) -> dict[str, ParsedSourceItem]:
+        """Verify the carried associations and return the validated parse facts."""
         parser = parser or DomainListParser()
         target_error_diagnostics = Counter(
             (
@@ -405,6 +369,7 @@ class SourceItemHandoff:
             if diagnostic["target_ordinal"] is not None
         )
         expected_target_error_diagnostics: list[tuple[int, int, int, str, str]] = []
+        parsed_items: dict[str, ParsedSourceItem] = {}
         for record in self.item_records:
             input_format = InputFileFormat(record["input_format"])
             parsed = parser.parse_source_item(
@@ -484,26 +449,82 @@ class SourceItemHandoff:
                 raise ValueError(
                     f"source-item no-target classification mismatch: {record['item_id']}"
                 )
+            parsed_items[record["item_id"]] = parsed
 
         if target_error_diagnostics != Counter(expected_target_error_diagnostics):
             raise ValueError(
                 "source-item target errors do not match target diagnostics"
             )
+        return parsed_items
 
 
-def _is_ignored_line(raw_line: str) -> bool:
-    value = raw_line.strip()
-    if not value or value.startswith("!"):
-        return True
-    if value.startswith("#") and not any(
-        marker in value for marker in ("##", "#@#", "#@?#", "#?#", "#$#", "#%#")
-    ):
-        return True
-    return False
+def _validate_physical_line(value: Any) -> None:
+    if not isinstance(value, str) or (value and value.splitlines() != [value]):
+        raise ValueError("source-item original text must be one physical line")
 
 
-def _source_text(raw_line: str) -> str:
-    return raw_line.rstrip("\r\n")
+def _index_occurrences(
+    records: Iterable[dict[str, Any]],
+) -> tuple[
+    dict[str, list[dict[str, str]]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    by_domain: dict[str, list[dict[str, str]]] = {}
+    without_domain: list[dict[str, Any]] = []
+    metadata: list[dict[str, Any]] = []
+    for record in records:
+        item_id = record["item_id"]
+        associations = record["target_associations"]
+        if record["is_metadata"]:
+            metadata.append({"item_id": item_id, "association_id": None})
+        elif not associations:
+            without_domain.append(
+                {
+                    "item_id": item_id,
+                    "association_id": None,
+                    "reason": record["no_target_reason"],
+                }
+            )
+        for association in associations:
+            if (
+                association["error_reason"] is not None
+                or association["excluded_from_sources"]
+            ):
+                continue
+            reference = {
+                "item_id": item_id,
+                "association_id": association["association_id"],
+            }
+            if association["registrable_domain"] is None:
+                without_domain.append({**reference, "reason": "public_suffix_only"})
+            else:
+                by_domain.setdefault(association["host"], []).append(reference)
+    return by_domain, without_domain, metadata
+
+
+def _validate_reference_membership(
+    actual: Any,
+    expected: Sequence[Mapping[str, Any]],
+    *,
+    collection: str,
+) -> None:
+    message = f"source-item {collection} references do not match item records"
+    if not isinstance(actual, list) or len(actual) != len(expected):
+        raise ValueError(message)
+    if not expected:
+        return
+    fields = expected[0].keys()
+    remaining = {tuple(reference[field] for field in fields) for reference in expected}
+    for reference in actual:
+        if not isinstance(reference, dict) or reference.keys() != fields:
+            raise ValueError(message)
+        values = tuple(reference[field] for field in fields)
+        if any(value is not None and not isinstance(value, str) for value in values):
+            raise ValueError(message)
+        if values not in remaining:
+            raise ValueError(message)
+        remaining.remove(values)
 
 
 def _diagnostic(
@@ -530,9 +551,7 @@ def _diagnostic(
     }
 
 
-def _validate_item_record(
-    record: Any, batch_id: str, sources: list[dict[str, Any]]
-) -> None:
+def _validate_item_record(record: Any, sources: list[dict[str, Any]]) -> None:
     fields = {
         "item_id",
         "source_ordinal",
@@ -571,7 +590,6 @@ def _validate_item_record(
             not isinstance(record[key], str) or not record[key]
             for key in ("source_id", "source_label", "input_format", "item_kind")
         )
-        or not isinstance(record["original_text"], str)
         or not isinstance(record["target_associations"], list)
         or not isinstance(record["is_metadata"], bool)
         or (
@@ -580,6 +598,7 @@ def _validate_item_record(
         )
     ):
         raise ValueError("source-item record has invalid values")
+    _validate_physical_line(record["original_text"])
     if record["is_metadata"]:
         if (
             record["input_format"] != InputFileFormat.ADBLOCK.value
@@ -639,94 +658,6 @@ def _validate_item_record(
         target_ordinals.add(target_ordinal)
 
 
-def _validate_association_reference(
-    reference: Any,
-    *,
-    records_by_id: dict[str, dict[str, Any]],
-    associations_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]],
-    expected_domain: str,
-) -> dict[str, str]:
-    if (
-        not isinstance(reference, dict)
-        or set(reference) != {"item_id", "association_id"}
-        or not all(isinstance(reference.get(key), str) for key in ("item_id", "association_id"))
-    ):
-        raise ValueError("source-item domain reference is invalid")
-    if reference["item_id"] not in records_by_id:
-        raise ValueError("source-item domain reference targets an unknown item")
-    pair = associations_by_id.get(reference["association_id"])
-    if (
-        pair is None
-        or pair[0]["item_id"] != reference["item_id"]
-        or pair[1]["registrable_domain"] != expected_domain
-        or pair[1]["error_reason"] is not None
-        or pair[1]["excluded_from_sources"]
-    ):
-        raise ValueError("source-item domain reference does not match a valid association")
-    return {"item_id": reference["item_id"], "association_id": reference["association_id"]}
-
-
-def _validate_no_domain_reference(
-    reference: Any,
-    *,
-    records_by_id: dict[str, dict[str, Any]],
-    associations_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]],
-) -> dict[str, Any]:
-    fields = {"item_id", "association_id", "reason"}
-    if (
-        not isinstance(reference, dict)
-        or set(reference) != fields
-        or not isinstance(reference.get("item_id"), str)
-        or not reference["item_id"]
-        or not isinstance(reference.get("reason"), str)
-        or not reference["reason"]
-        or reference["item_id"] not in records_by_id
-    ):
-        raise ValueError("source-item no-domain reference is invalid")
-    association_id = reference["association_id"]
-    if association_id is None:
-        record = records_by_id[reference["item_id"]]
-        if (
-            record["is_metadata"]
-            or record["target_associations"]
-            or record["no_target_reason"] != reference["reason"]
-        ):
-            raise ValueError("source-item no-target reference does not match an item")
-    elif isinstance(association_id, str):
-        pair = associations_by_id.get(association_id)
-        if (
-            pair is None
-            or pair[0]["item_id"] != reference["item_id"]
-            or pair[1]["registrable_domain"] is not None
-            or pair[1]["error_reason"] is not None
-            or pair[1]["excluded_from_sources"]
-            or reference["reason"] != "public_suffix_only"
-        ):
-            raise ValueError("source-item no-domain reference does not match an association")
-    else:
-        raise ValueError("source-item no-domain reference has invalid association identity")
-    return {
-        "item_id": reference["item_id"],
-        "association_id": association_id,
-        "reason": reference["reason"],
-    }
-
-
-def _validate_metadata_reference(
-    reference: Any, records_by_id: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
-    if (
-        not isinstance(reference, dict)
-        or set(reference) != {"item_id", "association_id"}
-        or not isinstance(reference.get("item_id"), str)
-        or reference.get("association_id") is not None
-        or reference["item_id"] not in records_by_id
-        or not records_by_id[reference["item_id"]]["is_metadata"]
-    ):
-        raise ValueError("source-item metadata reference is invalid")
-    return {"item_id": reference["item_id"], "association_id": None}
-
-
 def _validate_diagnostic(
     diagnostic: Any, batch_id: str, sources: list[dict[str, Any]]
 ) -> None:
@@ -756,7 +687,6 @@ def _validate_diagnostic(
         or not isinstance(diagnostic["source_line_number"], int)
         or isinstance(diagnostic["source_line_number"], bool)
         or diagnostic["source_line_number"] < 1
-        or not isinstance(diagnostic["original_text"], str)
         or not isinstance(diagnostic["reason"], str)
         or not diagnostic["reason"]
         or (
@@ -769,24 +699,7 @@ def _validate_diagnostic(
         )
     ):
         raise ValueError("source-item diagnostic identity or values are invalid")
-
-
-def _sort_refs(values: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
-    return {
-        domain: sorted(refs, key=lambda item: (item["item_id"], item["association_id"]))
-        for domain, refs in sorted(values.items())
-    }
-
-
-def _sort_no_domain(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        values,
-        key=lambda item: (
-            item["item_id"],
-            item["association_id"] or "",
-            item["reason"],
-        ),
-    )
+    _validate_physical_line(diagnostic["original_text"])
 
 
 def _write_jsonl(path: Path, records: tuple[dict[str, Any], ...]) -> None:

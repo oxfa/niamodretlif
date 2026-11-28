@@ -11,7 +11,6 @@ from pathlib import Path
 import yaml
 
 from domain_pipeline.handoff_io import read_strict_json, read_yaml
-from domain_pipeline.prepare.source_line_index import load_source_line_index
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 
 from domain_pipeline.paths import HandoffMember, PathLayout
@@ -117,43 +116,24 @@ def _validate_identity(
         raise ValueError(f"handoff identity mismatch: {path}")
 
 
-def _validate_sources(root: Path, *, batch_id: str) -> tuple[Path, ...]:
+def _source_paths(root: Path, *, batch_id: str) -> tuple[Path, Path, Path]:
     paths = PathLayout(root).workflow_state
-    index_path = paths.batch_source_line_index_path(batch_id=batch_id)
-    formats_path = paths.batch_source_formats_path(batch_id=batch_id)
-    _check_source_file(root, index_path)
-    _check_source_file(root, formats_path)
-    index = load_source_line_index(index_path, formats_path)
-    item_paths = (
+    return (
         paths.batch_source_items_path(batch_id=batch_id),
         paths.batch_source_item_index_path(batch_id=batch_id),
         paths.batch_source_item_diagnostics_path(batch_id=batch_id),
     )
-    for item_path in item_paths:
-        _check_source_file(root, item_path)
+
+
+def _validate_sources(root: Path, *, batch_id: str) -> None:
+    items, index, diagnostics = _source_paths(root, batch_id=batch_id)
+    for path in (items, index, diagnostics):
+        _check_source_file(root, path)
     SourceItemHandoff.load(
         batch_id=batch_id,
-        items_path=item_paths[0],
-        index_path=item_paths[1],
-        diagnostics_path=item_paths[2],
-    )
-    source_root = paths.batch_source_inputs_root(batch_id=batch_id)
-    _check_source_path(root, source_root)
-    expected = {
-        paths.batch_source_input_path(batch_id=batch_id, source_ordinal=ordinal).name
-        for ordinal in range(len(index.source_formats))
-    }
-    if not source_root.exists() and not source_root.is_symlink() and not expected:
-        return ()
-    if source_root.is_symlink():
-        raise ValueError("prepared source input root must not be a symlink")
-    if not source_root.is_dir() or {p.name for p in source_root.iterdir()} != expected:
-        raise ValueError("prepared source input set does not match source formats")
-    if any(p.is_symlink() or not p.is_file() for p in source_root.iterdir()):
-        raise ValueError("prepared source inputs must be regular files")
-    return tuple(
-        paths.batch_source_input_path(batch_id=batch_id, source_ordinal=ordinal)
-        for ordinal in range(len(index.source_formats))
+        items_path=items,
+        index_path=index,
+        diagnostics_path=diagnostics,
     )
 
 
@@ -175,21 +155,15 @@ def _validate_archive(source: Path, *, handoff: str, members: tuple[HandoffMembe
             item = source / member.archive_path
             if item.is_symlink():
                 raise ValueError(f"symlink in handoff: {item}")
-            if item.exists():
-                if member.archive_path.suffix and not item.is_file():
-                    raise ValueError(f"handoff file is not a regular file: {item}")
-                if not member.archive_path.suffix and not item.is_dir():
-                    raise ValueError(f"handoff directory is not a directory: {item}")
-        declared = {member.archive_path for member in members if member.archive_path.suffix}
-        directories = {member.archive_path for member in members if not member.archive_path.suffix}
+            if item.exists() and not item.is_file():
+                raise ValueError(f"handoff file is not a regular file: {item}")
+        declared = {member.archive_path for member in members}
         for item in source.rglob("*"):
             if item.is_symlink():
                 raise ValueError(f"symlink in handoff: {item}")
             if item.is_file():
                 relative = item.relative_to(source)
-                if relative not in declared and not any(
-                    directory in relative.parents for directory in directories
-                ):
+                if relative not in declared:
                     raise ValueError(f"unexpected handoff file: {relative}")
             elif not item.is_dir():
                 raise ValueError(f"invalid handoff entry: {item}")
@@ -328,22 +302,6 @@ def export_diagnostic(
         shutil.copy2(source, destination)
 
 
-def _source_members(
-    state_root: Path, *, source_root: Path, request: HandoffRequest
-) -> tuple[HandoffMember, ...]:
-    try:
-        _check_source_path(state_root, source_root)
-        if not request.require_runtime and not source_root.exists():
-            return ()
-        sources = _validate_sources(state_root, batch_id=request.batch_id)
-    except (ValueError, OSError, UnicodeError) as exc:
-        if request.require_runtime:
-            raise
-        print(f"Skipping unverified source inputs {source_root}: {exc}", file=sys.stderr)
-        return ()
-    return tuple(HandoffMember(path, path.relative_to(state_root)) for path in sources)
-
-
 def stage_handoff(
     *,
     state_root: Path,
@@ -374,9 +332,16 @@ def stage_handoff(
             raise FileNotFoundError(f"required handoff member missing: {member.source}")
         _check_source_file(state_root, member.source)
     if request.handoff == "prepare-aggregate":
-        source_root = layout.workflow_state.batch_source_inputs_root(batch_id=request.batch_id)
-        members = tuple(member for member in members if member.source != source_root)
-        members += _source_members(state_root, source_root=source_root, request=request)
+        try:
+            _validate_sources(state_root, batch_id=request.batch_id)
+        except (ValueError, OSError, UnicodeError) as exc:
+            if request.require_runtime:
+                raise
+            source_paths = set(_source_paths(state_root, batch_id=request.batch_id))
+            members = tuple(
+                member for member in members if member.source not in source_paths
+            )
+            print(f"Skipping unverified source items: {exc}", file=sys.stderr)
     if destination.exists() and any(destination.iterdir()):
         raise ValueError(f"handoff staging directory is not empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
@@ -413,8 +378,6 @@ def _stage_member(member: HandoffMember, destination: Path) -> bool:
             yaml.safe_dump(payload, sort_keys=True, default_flow_style=False, explicit_start=True),
             encoding="utf-8",
         )
-    elif member.source.is_dir():
-        shutil.copytree(member.source, target, dirs_exist_ok=True)
     else:
         shutil.copy2(member.source, target)
     return True

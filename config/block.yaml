@@ -136,12 +136,12 @@ sources:
       type: url
       # location: https://is.gd/vQFXgT
       location: https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/refs/heads/master/anti-ad-easylist.txt
-      # Literal request hosts, including standalone domains and exception-rule
-      # destinations, map to worker domains only when strict PSL lookup yields a
-      # registrable domain. PSL misses are invalid; suffix-only targets have no
-      # worker domain. Valid regex, wildcard-host, and cosmetic rules stay as
-      # source items without worker targets and are retained only for AdBlock
-      # output. Exception semantics are omitted from plain and hosts outputs.
+      # Literal anchored request hosts, including exception-rule destinations,
+      # map to Worker inputs when strict PSL lookup yields a registrable domain.
+      # PSL misses are invalid. Valid suffix-only targets have no Worker input.
+      # Bare hostnames are unanchored filters. They join regex, wildcard-host,
+      # and cosmetic filters as targetless records for native AdBlock output.
+      # Plain and hosts project only simple positive ||hostname^ rules.
       format: adblock
     ip_location:
       enabled: false

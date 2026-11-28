@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -20,6 +21,34 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
 )
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 from domain_pipeline.prepare.sources.parser import InputFileFormat
+
+
+_HOST_FORMATTERS: dict[str, Callable[[str], str]] = {
+    "plain": lambda host: host,
+    "hosts": lambda host: f"0.0.0.0 {host}",
+    "adblock": lambda host: f"||{host}^",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class EligibleSourceItem:
+    record: Mapping[str, Any]
+    hosts: tuple[str, ...]
+    simple_positive_adblock_rule: bool
+
+
+def render_source_item(item: EligibleSourceItem, output_format: str) -> tuple[str, ...]:
+    """Render a verified source occurrence according to the destination syntax."""
+    record = item.record
+    if record["input_format"] == InputFileFormat.ADBLOCK.value:
+        if output_format == "adblock":
+            if len(item.hosts) == len(record["target_associations"]):
+                return (record["original_text"],)
+            return ()
+        if not item.simple_positive_adblock_rule:
+            return ()
+    format_host = _HOST_FORMATTERS[output_format]
+    return tuple(format_host(host) for host in item.hosts)
 
 
 class AggregateOutputMerger:
@@ -51,138 +80,98 @@ class AggregateOutputMerger:
                 ordered_hosts.append(host)
         return sorted(ordered_hosts)
 
+    def eligible_source_items(
+        self, source_items: SourceItemHandoff, input_domain_routes: Mapping[str, str]
+    ) -> list[EligibleSourceItem]:
+        """Resolve eligibility from verified references, preserving corpus order."""
+        index = source_items.index_payload
+        eligible_associations = {
+            reference["association_id"]
+            for host, references in index["valid_source_items_by_input_domain"].items()
+            if input_domain_routes.get(host) == "filtered"
+            for reference in references
+        }
+        eligible_without_targets = {
+            reference["item_id"] for reference in index["adblock_metadata"]
+        }
+        for reference in index[
+            "valid_source_items_without_extractable_registrable_domain"
+        ]:
+            association_id = reference["association_id"]
+            if association_id is None:
+                eligible_without_targets.add(reference["item_id"])
+            else:
+                eligible_associations.add(association_id)
+        return [
+            EligibleSourceItem(
+                record=record,
+                hosts=tuple(
+                    association["host"]
+                    for association in record["target_associations"]
+                    if association["association_id"] in eligible_associations
+                ),
+                simple_positive_adblock_rule=source_items.parsed_items_by_id[
+                    record["item_id"]
+                ].is_simple_positive_adblock_rule,
+            )
+            for record in source_items.item_records
+            if record["target_associations"]
+            or record["item_id"] in eligible_without_targets
+        ]
+
+    def eligible_manual_hosts(
+        self,
+        manually_added_domains: Iterable[ManuallyAddedDomain],
+        input_domain_routes: Mapping[str, str],
+    ) -> list[str]:
+        return sorted(
+            item.host
+            for item in manually_added_domains
+            if item.registrable_domain is None
+            or input_domain_routes.get(item.host) == "filtered"
+        )
+
     def write_filtered_source_items(
         self,
-        source_items: SourceItemHandoff,
-        input_domain_routes: Mapping[tuple[str, str], str],
-        manually_added_domains: Iterable[ManuallyAddedDomain],
+        items: Iterable[EligibleSourceItem],
+        manual_hosts: Iterable[str],
         filtered_output: tuple[Path, str],
     ) -> None:
-        """Render prepare-owned valid items according to the configured output format."""
-        source_items.validate()
-        if not isinstance(input_domain_routes, Mapping):
-            raise TypeError("input-domain routes must be keyed by root and input domain")
+        """Write the first occurrence of each rendered UTF-8 line."""
         target_path, output_format = filtered_output
-        formatters: dict[str, Callable[[str], str]] = {
-            "plain": lambda host: host,
-            "hosts": lambda host: f"0.0.0.0 {host}",
-            "adblock": lambda host: f"||{host}^",
-        }
         try:
-            format_host = formatters[output_format]
+            format_host = _HOST_FORMATTERS[output_format]
         except KeyError as exc:
             raise ValueError(
                 f"unsupported filtered output format {output_format!r}"
             ) from exc
-
-        index = source_items.index_payload
-        eligible_associations: set[str] = set()
-        association_lookup = self._association_lookup(source_items)
-        for domain, references in index[
-            "valid_source_items_by_registrable_domain"
-        ].items():
-            for reference in references:
-                association = self._association_for_reference(
-                    association_lookup, reference
-                )
-                route = input_domain_routes.get((domain, association["host"]))
-                if route == "filtered":
-                    eligible_associations.add(reference["association_id"])
-        eligible_associations.update(
-            reference["association_id"]
-            for reference in index[
-                "valid_source_items_without_extractable_registrable_domain"
-            ]
-            if reference["association_id"] is not None
-            and reference["reason"] == "public_suffix_only"
+        lines = dict.fromkeys(
+            line for item in items for line in render_source_item(item, output_format)
         )
-        valid_no_target_items = {
-            reference["item_id"]
-            for reference in index[
-                "valid_source_items_without_extractable_registrable_domain"
-            ]
-            if reference["association_id"] is None
-        }
-        metadata_items = {
-            reference["item_id"] for reference in index["adblock_metadata"]
-        }
-
-        rendered_lines: list[str] = []
-        seen_lines: set[str] = set()
-
-        def append_rendered(line: str) -> None:
-            normalized_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
-            if normalized_line not in seen_lines:
-                seen_lines.add(normalized_line)
-                rendered_lines.append(normalized_line)
-
-        for item in source_items.item_records:
-            item_id = item["item_id"]
-            is_adblock_item = item["input_format"] == InputFileFormat.ADBLOCK.value
-            if item_id in metadata_items:
-                if output_format == "adblock":
-                    append_rendered(item["original_text"])
-                continue
-
-            associations = [
-                association
-                for association in item["target_associations"]
-                if association["association_id"] in eligible_associations
-            ]
-            if not item["target_associations"]:
-                if (
-                    output_format == "adblock"
-                    and is_adblock_item
-                    and item_id in valid_no_target_items
-                ):
-                    append_rendered(item["original_text"])
-                continue
-            if not associations:
-                continue
-
-            if is_adblock_item:
-                if output_format == "adblock":
-                    if len(associations) == len(item["target_associations"]):
-                        append_rendered(item["original_text"])
-                    continue
-                if item["item_kind"].startswith("exception_"):
-                    continue
-            for association in associations:
-                append_rendered(format_host(association["host"]))
-
-        for item in sorted(manually_added_domains, key=lambda item: item.host):
-            if (
-                item.registrable_domain is None
-                or input_domain_routes.get((item.registrable_domain, item.host))
-                == "filtered"
-            ):
-                append_rendered(format_host(item.host))
-
+        for host in manual_hosts:
+            lines.setdefault(format_host(host), None)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text("".join(rendered_lines), encoding="utf-8")
+        target_path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
 
     def expected_input_domains(
         self,
         source_items: SourceItemHandoff,
         manually_added_domains: Iterable[ManuallyAddedDomain],
     ) -> dict[str, set[str]]:
-        """Derive root and input-domain coverage from prepare-owned valid data."""
-        source_items.validate()
+        """Derive coverage from verified source associations and standalone hosts."""
+        domain_index = source_items.index_payload["valid_source_items_by_input_domain"]
+        association_lookup = {
+            association["association_id"]: association
+            for record in source_items.item_records
+            for association in record["target_associations"]
+        }
         expected: dict[str, set[str]] = {}
-        association_lookup = self._association_lookup(source_items)
-        for registrable_domain, references in source_items.index_payload[
-            "valid_source_items_by_registrable_domain"
-        ].items():
-            inputs = expected.setdefault(registrable_domain, set())
-            for reference in references:
-                association = self._association_for_reference(
-                    association_lookup, reference
-                )
-                if association["registrable_domain"] != registrable_domain:
-                    raise ValueError(
-                        "source-item association registrable domain does not match its index"
-                    )
-                inputs.add(association["host"])
+        for host, references in domain_index.items():
+            root = association_lookup[references[0]["association_id"]][
+                "registrable_domain"
+            ]
+            expected.setdefault(root, set()).add(host)
+
         for item in manually_added_domains:
             if item.registrable_domain is not None:
                 expected.setdefault(item.registrable_domain, set()).add(item.host)
@@ -193,7 +182,7 @@ class AggregateOutputMerger:
         source_items: SourceItemHandoff,
         manually_added_domains: Iterable[ManuallyAddedDomain],
         worker_manifests: Sequence[Any],
-    ) -> dict[tuple[str, str], str]:
+    ) -> dict[str, str]:
         """Require exact global root and input-domain result coverage."""
         expected_by_root = self.expected_input_domains(
             source_items, manually_added_domains
@@ -292,45 +281,11 @@ class AggregateOutputMerger:
                         "input-domain route does not match its terminal root outcome: "
                         f"{input_domain} under {registrable_domain}"
                     )
-        return input_routes
+        return {host: route for (_, host), route in input_routes.items()}
 
-    def unactionable_input_domains(
-        self, input_domain_routes: Mapping[tuple[str, str], str]
-    ) -> list[str]:
-        """Return the unique input-domain values routed unactionable."""
-        return sorted(
-            {
-                input_domain
-                for (_registrable_domain, input_domain), route in input_domain_routes.items()
-                if route == "unactionable"
-            }
-        )
-
-    def _association_lookup(
-        self, source_items: SourceItemHandoff
-    ) -> dict[tuple[str, str], dict[str, Any]]:
-        """Index associations by their item and association IDs."""
-        return {
-            (item["item_id"], association["association_id"]): association
-            for item in source_items.item_records
-            for association in item["target_associations"]
-        }
-
-    def _association_for_reference(
-        self,
-        association_lookup: Mapping[tuple[str, str], dict[str, Any]],
-        reference: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Resolve one indexed association while preserving its source-item owner."""
-        association = association_lookup.get(
-            (reference["item_id"], reference["association_id"])
-        )
-        if association is not None:
-            return association
-        raise ValueError(
-            "source-item index references an unknown target association: "
-            f"{reference['association_id']}"
-        )
+    def unactionable_input_domains(self, input_domain_routes: Mapping[str, str]) -> list[str]:
+        """Return the input domains routed unactionable in sorted order."""
+        return sorted(host for host, route in input_domain_routes.items() if route == "unactionable")
 
     def _validate_result_fields(
         self, row: Mapping[str, Any], expected_fields: set[str], row_kind: str
@@ -407,7 +362,7 @@ class AggregateOutputMerger:
 
     def merge_review_payloads(
         self,
-        source_payloads: Iterable[tuple[str, Iterable[dict[str, Any]]]],
+        source_payloads: Iterable[tuple[str, Iterable[Mapping[str, Any]]]],
         target_path: Path,
     ) -> None:
         """Merge embedded projected review rows in deterministic order."""
@@ -438,7 +393,9 @@ class AggregateOutputMerger:
     def _canonical_row_signature(self, row: dict[str, Any]) -> str:
         return json.dumps(row, sort_keys=True, separators=(",", ":"))
 
-    def _normalize_projected_review_row(self, row: dict[str, Any]) -> ReviewOutputRow:
+    def _normalize_projected_review_row(
+        self, row: Mapping[str, Any]
+    ) -> ReviewOutputRow:
         """Normalize one aggregate review CSV row without reprojecting values."""
         return cast(
             ReviewOutputRow,

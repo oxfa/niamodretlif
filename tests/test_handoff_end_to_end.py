@@ -29,7 +29,7 @@ from domain_pipeline.prepare.batch_writer import PreparedBatch, PreparedBatchWri
 from domain_pipeline.prepare.config.loader import (
     load_config_without_runtime_credentials,
 )
-from domain_pipeline.prepare.models import PreparedInputSet, PreparedOutputRows
+from domain_pipeline.prepare.models import PreparedInputSet
 from domain_pipeline.prepare.planner import PreparationPlanner
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
@@ -40,6 +40,8 @@ from domain_pipeline.prepare.prepare_to_worker_manifest import (
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import DomainListParser
+from domain_pipeline.routing.policies import ROUTE_REASON_TEXT
+from domain_pipeline.routing.route_codes import RouteCode
 from domain_pipeline.worker.cache.repository import CacheRepository
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 from domain_pipeline.worker.status.lifecycle import (
@@ -80,14 +82,19 @@ def _assert_json_artifacts_match_declared_members(
 def _write_prepared_batch(
     prepare_root: Path, *, config_name: str, worker_ids: list[str]
 ) -> PreparedBatch:
-    """Write preparation output for two local source lines."""
+    """Write preparation output for a local source and its Worker assignments."""
     config = load_config_without_runtime_credentials(Path("config") / f"{config_name}.yaml")
     source_config = config["sources"][0]
     source = SourceJob(
         source_id=source_config["id"],
         input_label="local fixture",
         output_stem=config_name,
-        lines=["||ads.example.com^\n", "||bad.example.net^\n"],
+        lines=[
+            "||ads.example.com^\n",
+            "||bad.example.net^\n",
+            "||co.uk^\n",
+            "/example.*/\n",
+        ],
         config=source_config,
     )
     parser = DomainListParser()
@@ -115,7 +122,7 @@ def _write_prepared_batch(
         entries_by_source=entries_by_source,
         manual_routing_by_host={},
         root_plans=root_plans,
-        preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        preparation_terminal_rows=[],
         parsed_source_files={source.source_id: parsed_source_file},
     )
     writer = PreparedBatchWriter()
@@ -428,7 +435,7 @@ def test_source_item_index_rejects_unknown_fields() -> None:
         index_payload={
             "batch_id": BATCH,
             "sources": [],
-            "valid_source_items_by_registrable_domain": {},
+            "valid_source_items_by_input_domain": {},
             "valid_source_items_without_extractable_registrable_domain": [],
             "adblock_metadata": [],
             "unexpected": True,
@@ -440,8 +447,11 @@ def test_source_item_index_rejects_unknown_fields() -> None:
         handoff.validate()
 
 
-def _finish_worker(tmp_path: Path) -> None:
+def _finish_worker(
+    tmp_path: Path, *, results: dict[str, list[dict]] | None = None
+) -> None:
     """Create deterministic worker outputs and finalize the handoff."""
+    results = results if results is not None else _domain_results_fixture()
     worker_root = tmp_path / "worker"
     assert initialize_worker_statuses(
         batch_id=BATCH, worker_id=WORKER, state_root=worker_root
@@ -462,13 +472,13 @@ def _finish_worker(tmp_path: Path) -> None:
             {
                 "host": "ads.example.com",
                 "registrable_domain": "example.com",
-                "route_code": "host_resolution_to_review_nxdomain",
+                "route_code": results["input_domain_results"][0]["route_code"],
                 "review_reason": "fixture reason",
             }
         )
     paths["domain_results"].parent.mkdir(parents=True, exist_ok=True)
     paths["domain_results"].write_text(
-        json.dumps(_domain_results_fixture(), separators=(",", ":")) + "\n",
+        json.dumps(results, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     worker_log = manifest.resolve_log_path(worker_root)
@@ -965,21 +975,62 @@ def _correlate_and_restore(tmp_path: Path) -> None:
 def _assert_aggregate(tmp_path: Path) -> None:
     """Run aggregation and verify published data, logs, and cache."""
     aggregate_root = tmp_path / "aggregate"
+    readiness_result = subprocess.run(
+        [
+            sys.executable,
+            "src/pipeline_run.py",
+            "validate-aggregate",
+            "--state-root",
+            str(aggregate_root),
+            "--batch-id",
+            BATCH,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert readiness_result.returncode == 0, readiness_result.stderr
+    readiness = json.loads(readiness_result.stdout)
+    assert set(readiness) == {"state", "batch_id", "worker_ids", "status_payloads"}
+    assert (readiness["state"], readiness["batch_id"], readiness["worker_ids"]) == (
+        "ready_success",
+        BATCH,
+        [WORKER],
+    )
     outcome = AggregateBatchRunner().run(batch_id=BATCH, state_root=aggregate_root)
     assert outcome["state"] == "aggregated"
     assert outcome["cache_merge_summary"]["merged_cache_count"] == 1
     publish_root = PathLayout(aggregate_root).output.publish_worktree_root()
-    assert (publish_root / "output/filtered/block.txt").read_text() == ""
+    assert (publish_root / "output/filtered/block.txt").read_bytes() == b"co.uk\n"
     assert (
         publish_root / "output/unactionable/block.txt"
-    ).read_text() == "bad.example.net\n"
-    assert (publish_root / "output/filtered/block_easylist.txt").read_text() == ""
-    with (publish_root / "output/review/block.csv").open(
-        newline="", encoding="utf-8"
-    ) as handle:
-        assert [
-            (row["host"], row["review_reason"]) for row in csv.DictReader(handle)
-        ] == [("ads.example.com", "fixture reason")]
+    ).read_bytes() == b"bad.example.net\n"
+    assert (publish_root / "output/filtered/block_easylist.txt").read_bytes() == (
+        b"||co.uk^\n/example.*/\n"
+    )
+    expected_review = io.StringIO(newline="")
+    review = csv.writer(expected_review, quoting=csv.QUOTE_ALL)
+    review.writerow(REVIEW_OUTPUT_COLUMNS)
+    review.writerow(
+        (
+            "ads.example.com",
+            "example.com",
+            RouteCode.HOST_RESOLUTION_TO_REVIEW_NXDOMAIN.value,
+            ROUTE_REASON_TEXT[RouteCode.HOST_RESOLUTION_TO_REVIEW_NXDOMAIN],
+            "ns_records_exist",
+            "ns_records_exist",
+            "nxdomain",
+            "host resolution returned NXDOMAIN",
+            "skipped",
+            "skipped",
+            "skipped",
+            "skipped",
+            "",
+        )
+    )
+    assert (publish_root / "output/review/block.csv").read_bytes() == (
+        expected_review.getvalue().encode("utf-8")
+    )
     audit = (aggregate_root / outcome["final_debug_paths"]["raw_audit"]).read_text(
         encoding="utf-8"
     )
@@ -991,8 +1042,7 @@ def _assert_aggregate(tmp_path: Path) -> None:
     ]
     assert len(audit_rows) == len(expected_audit_rows)
     assert {
-        json.dumps(row, sort_keys=True, separators=(",", ":"))
-        for row in audit_rows
+        json.dumps(row, sort_keys=True, separators=(",", ":")) for row in audit_rows
     } == {
         json.dumps(row, sort_keys=True, separators=(",", ":"))
         for row in expected_audit_rows

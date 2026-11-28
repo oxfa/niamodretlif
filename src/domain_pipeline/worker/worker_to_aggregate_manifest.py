@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,7 +37,23 @@ from domain_pipeline.worker.delegation.lookup import (
     DelegationResult,
     DelegationSoaEvidence,
 )
-from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
+from domain_pipeline.worker.host_resolution.lookup import (
+    HostResolutionAddressEvidence,
+    HostResolutionDnsEvidence,
+    HostResolutionResult,
+    combine_host_resolution_results,
+)
+from domain_pipeline.worker.ip_location.providers import (
+    IPLocationResult,
+    LocationPolicyDecision,
+)
+from domain_pipeline.worker.output.rows import (
+    REVIEW_OUTPUT_COLUMNS,
+    ReviewOutputRow,
+    ReviewRowProjector,
+)
+from domain_pipeline.worker.runtime.contracts import CompletedResultEvidence
+from domain_pipeline.worker.runtime.results import build_worker_result_row
 
 CacheSnapshotMode = Literal["sqlite_backup", "raw_file", "missing"]
 
@@ -76,6 +93,17 @@ class DelegationResultRow(WorkerAggregateModel):
     nameservers: list[StrictStr]
     from_cache: StrictBool
 
+    def to_evidence(self) -> DelegationResult:
+        """Restore the delegation evidence used by Worker routing and display."""
+        return DelegationResult(
+            domain=self.domain,
+            dns=DelegationDnsEvidence(**self.dns.model_dump()),
+            soa=DelegationSoaEvidence(**self.soa.model_dump()),
+            no_nameservers=self.no_nameservers,
+            nameservers=list(self.nameservers),
+            from_cache=self.from_cache,
+        )
+
 
 class RegistrableDomainResultRow(WorkerAggregateModel):
     """One root-level delegation disposition and its typed evidence."""
@@ -88,16 +116,9 @@ class RegistrableDomainResultRow(WorkerAggregateModel):
     def _validate_disposition(self) -> "RegistrableDomainResultRow":
         if self.delegation_result.domain != self.registrable_domain:
             raise ValueError("delegation result domain must equal its registrable root")
-        evidence = self.delegation_result
-        result = DelegationResult(
-            domain=evidence.domain,
-            dns=DelegationDnsEvidence(**evidence.dns.model_dump()),
-            soa=DelegationSoaEvidence(**evidence.soa.model_dump()),
-            no_nameservers=evidence.no_nameservers,
-            nameservers=list(evidence.nameservers),
-            from_cache=evidence.from_cache,
+        transition = DelegationRoutingPolicy().for_result(
+            self.delegation_result.to_evidence()
         )
-        transition = DelegationRoutingPolicy().for_result(result)
         expected = (
             "actionable"
             if not isinstance(transition, TerminalRouteTransition)
@@ -134,6 +155,16 @@ class HostResolutionResultRow(WorkerAggregateModel):
     addresses: HostResolutionAddressEvidenceRow
     from_cache: StrictBool
     detail: StrictStr
+
+    def to_evidence(self) -> HostResolutionResult:
+        """Restore the result of a single exact host-resolution lookup."""
+        return HostResolutionResult(
+            host=self.host,
+            dns=HostResolutionDnsEvidence(**self.dns.model_dump()),
+            addresses=HostResolutionAddressEvidence(**self.addresses.model_dump()),
+            from_cache=self.from_cache,
+            detail=self.detail,
+        )
 
 
 class IPLocationResultRow(WorkerAggregateModel):
@@ -217,8 +248,6 @@ class WorkerAggregateManifest(WorkerAggregateModel):
     handoff_finalized: bool
     registrable_domain_results: list[RegistrableDomainResultRow]
     input_domain_results: list[InputDomainResultRow]
-    unactionable_input_domains: list[str]
-    review_output_rows: list[dict[str, str]]
     log_text: str
     cache_path: Path | None
     cache_sha256: str | None
@@ -238,8 +267,6 @@ class WorkerAggregateManifest(WorkerAggregateModel):
             handoff_finalized=finalized,
             registrable_domain_results=[],
             input_domain_results=[],
-            unactionable_input_domains=[],
-            review_output_rows=[],
             log_text="",
             cache_path=None,
             cache_sha256=None,
@@ -254,6 +281,53 @@ class WorkerAggregateManifest(WorkerAggregateModel):
         return cls.empty(
             manifest.batch_id, manifest.worker_id
         )
+
+
+def project_worker_review_rows(manifest: WorkerAggregateManifest) -> list[ReviewOutputRow]:
+    """Build final review rows from a verified Worker's typed outcomes."""
+    delegation_by_root = {
+        root.registrable_domain: root.delegation_result.to_evidence()
+        for root in manifest.registrable_domain_results
+    }
+    projector = ReviewRowProjector()
+    projected: list[ReviewOutputRow] = []
+    for result in manifest.input_domain_results:
+        if result.route != "review":
+            continue
+        host_results = [
+            row.to_evidence() for row in result.host_resolution_results
+        ]
+        ip_policy = result.ip_location_policy
+        evidence = CompletedResultEvidence(
+            delegation_result=delegation_by_root[result.registrable_domain],
+            host_resolution_results=host_results,
+            host_resolution_result=(
+                combine_host_resolution_results(result.input_domain, host_results)
+                if host_results
+                else None
+            ),
+            ip_location_results=[
+                IPLocationResult(**row.model_dump()) for row in result.ip_location_results
+            ],
+            ip_location_policy=(
+                LocationPolicyDecision(**ip_policy.model_dump())
+                if ip_policy is not None
+                else None
+            ),
+        )
+        projected.append(
+            projector.project(
+                build_worker_result_row(
+                    host=result.input_domain,
+                    registrable_domain=result.registrable_domain,
+                    route=result.route,
+                    route_code=result.route_code,
+                    route_reason=result.route_reason,
+                    evidence=evidence,
+                )
+            )
+        )
+    return projected
 
 
 def _manifest_path(*, batch_id: str, worker_id: str, state_root: Path) -> Path:
@@ -347,6 +421,60 @@ def _psl_registrable_domain(input_domain: str) -> str | None:
     return target.registrable_domain
 
 
+def validate_worker_result_bundle(
+    *,
+    registrable_domain_results: Sequence[RegistrableDomainResultRow],
+    input_domain_results: Sequence[InputDomainResultRow],
+) -> None:
+    """Require unique results, same-bundle root coverage, and exact terminal fanout."""
+    policy = DelegationRoutingPolicy()
+    transitions = {
+        root.registrable_domain: policy.for_result(root.delegation_result.to_evidence())
+        for root in registrable_domain_results
+    }
+    if len(transitions) != len(registrable_domain_results):
+        raise ValueError("worker registrable-domain results contain duplicates")
+
+    seen_inputs: set[str] = set()
+    seen_roots: set[str] = set()
+    for result in input_domain_results:
+        if result.input_domain in seen_inputs:
+            raise ValueError("worker input-domain results contain duplicates")
+        seen_inputs.add(result.input_domain)
+        transition = transitions.get(result.registrable_domain)
+        if transition is None:
+            raise ValueError(
+                f"worker input domain {result.input_domain!r} has no delegation result "
+                f"in its worker bundle for {result.registrable_domain!r}"
+            )
+        seen_roots.add(result.registrable_domain)
+        if not isinstance(transition, TerminalRouteTransition):
+            continue
+        if (result.route, result.route_code, result.route_reason) != (
+            transition.route, transition.route_code, transition.route_reason
+        ):
+            raise ValueError(
+                "worker input-domain route does not follow its terminal root outcome: "
+                f"{result.input_domain!r} expected {transition.route_code.value!r}"
+            )
+        if (
+            result.host_resolution_results
+            or result.ip_location_results
+            or result.ip_location_policy is not None
+        ):
+            raise ValueError(
+                f"worker input domain {result.input_domain!r} has downstream evidence "
+                "after terminal delegation"
+            )
+
+    missing_inputs = sorted(transitions.keys() - seen_roots)
+    if missing_inputs:
+        raise ValueError(
+            "worker delegation result has no input-domain results in its worker bundle: "
+            f"{missing_inputs}"
+        )
+
+
 def validate_worker_domain_results(
     *,
     expected_input_domains_by_root: dict[str, set[str]],
@@ -355,12 +483,10 @@ def validate_worker_domain_results(
     """Require exact root/domain coverage, membership, route fanout, and PSL roots."""
     expected_roots = set(expected_input_domains_by_root)
     root_rows = envelope.registrable_domain_results
-    root_values = [row.registrable_domain for row in root_rows]
-    if len(root_values) != len(set(root_values)):
-        raise ValueError("worker registrable-domain results contain duplicates")
-    if set(root_values) != expected_roots:
-        missing = sorted(expected_roots - set(root_values))
-        unexpected = sorted(set(root_values) - expected_roots)
+    root_values = {row.registrable_domain for row in root_rows}
+    if root_values != expected_roots:
+        missing = sorted(expected_roots - root_values)
+        unexpected = sorted(root_values - expected_roots)
         raise ValueError(
             "worker registrable-domain results do not match assigned roots: "
             f"missing={missing} unexpected={unexpected}"
@@ -372,9 +498,6 @@ def validate_worker_domain_results(
             )
 
     input_rows = envelope.input_domain_results
-    input_values = [row.input_domain for row in input_rows]
-    if len(input_values) != len(set(input_values)):
-        raise ValueError("worker input-domain results contain duplicates")
     expected_pairs = {
         (root, domain)
         for root, domains in expected_input_domains_by_root.items()
@@ -383,7 +506,7 @@ def validate_worker_domain_results(
     returned_pairs = {
         (row.registrable_domain, row.input_domain) for row in input_rows
     }
-    if returned_pairs != expected_pairs or len(returned_pairs) != len(input_rows):
+    if returned_pairs != expected_pairs:
         missing = sorted(expected_pairs - returned_pairs)
         unexpected = sorted(returned_pairs - expected_pairs)
         raise ValueError(
@@ -391,20 +514,15 @@ def validate_worker_domain_results(
             f"missing={missing} unexpected={unexpected}"
         )
 
-    root_dispositions = {row.registrable_domain: row.disposition for row in root_rows}
+    validate_worker_result_bundle(
+        registrable_domain_results=root_rows, input_domain_results=input_rows
+    )
     for row in input_rows:
         psl_root = _psl_registrable_domain(row.input_domain)
         if psl_root != row.registrable_domain:
             raise ValueError(
                 "worker input-domain registrable root does not match the full PSL: "
                 f"{row.input_domain!r} -> {psl_root!r}, result={row.registrable_domain!r}"
-            )
-        root_disposition = root_dispositions[row.registrable_domain]
-        if root_disposition in {"review", "unactionable"} and row.route != root_disposition:
-            raise ValueError(
-                "worker input-domain route does not follow its terminal root outcome: "
-                f"{row.input_domain!r} route={row.route!r} "
-                f"root={root_disposition!r}"
             )
 
 
@@ -524,8 +642,6 @@ def load_worker_aggregate_manifest(
         envelope = WorkerDomainResultsEnvelope(
             registrable_domain_results=[], input_domain_results=[]
         )
-        unactionable_domains: list[str] = []
-        review_rows: list[dict[str, str]] = []
         if state["handoff_finalized"]:
             for data_path in (
                 state_paths.worker_handoff_unactionable_path(
@@ -544,6 +660,10 @@ def load_worker_aggregate_manifest(
                 state_paths.worker_handoff_domain_results_path(
                     batch_id=batch_id, worker_id=worker_id
                 )
+            )
+            validate_worker_result_bundle(
+                registrable_domain_results=envelope.registrable_domain_results,
+                input_domain_results=envelope.input_domain_results,
             )
             unactionable_domains = _read_text_values(
                 state_paths.worker_handoff_unactionable_path(
@@ -567,8 +687,6 @@ def load_worker_aggregate_manifest(
             handoff_finalized=state["handoff_finalized"],
             registrable_domain_results=envelope.registrable_domain_results,
             input_domain_results=envelope.input_domain_results,
-            unactionable_input_domains=unactionable_domains,
-            review_output_rows=review_rows,
             log_text=_read_optional_text(log_path),
             cache_path=cache if state["cache_present"] else None,
             cache_sha256=state["cache_sha256"],

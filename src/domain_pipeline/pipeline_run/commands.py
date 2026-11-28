@@ -101,6 +101,9 @@ def _handle_prepare_batch(
 ) -> int:
     worker_ids = default_worker_ids(args.worker_count)
     batch_id = batch_id_from_run(args.run_id, args.run_attempt)
+    PathLayout(state_root).workflow_state.batch_source_item_diagnostics_path(
+        batch_id=batch_id
+    ).unlink(missing_ok=True)
     prepared = prepare_batch(
         source_root=source_root,
         config_path=Path(args.config),

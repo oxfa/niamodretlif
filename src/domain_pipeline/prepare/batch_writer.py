@@ -24,18 +24,7 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     write_prepare_worker_handoff,
 )
-from domain_pipeline.prepare.source_line_index import (
-    SourceLineIndex,
-    SourceLineReference,
-    write_source_line_index,
-)
 from domain_pipeline.prepare.source_items import SourceItemHandoff
-from domain_pipeline.prepare.sources.parser import (
-    DomainEntry,
-    DomainListParser,
-    InputFileFormat,
-)
-from domain_pipeline.worker.output.rows import PreparationReviewRowProjector
 
 
 @dataclass
@@ -46,8 +35,6 @@ class PreparedBatch:
     config_name: str
     prepare_aggregate_manifest: PrepareAggregateManifest
     worker_manifests: list[PreparedWorkerManifest]
-    source_input_contents: list[str]
-    source_line_index: SourceLineIndex
     source_item_handoff: SourceItemHandoff
 
 
@@ -100,11 +87,12 @@ class PreparedBatchWriter:
             batch_id=batch_id,
             prepared_inputs=prepared_inputs,
         )
-        (
-            source_input_contents,
-            source_line_index,
-            manually_added_domains,
-        ) = self.prepare_source_archive(prepared_inputs)
+        valid_source_hosts = source_item_handoff.valid_source_hosts
+        manually_added_domains = [
+            ManuallyAddedDomain(host=host, registrable_domain=entry.registrable_domain)
+            for host, entry in sorted(prepared_inputs.manually_added_entries.items())
+            if host not in valid_source_hosts
+        ]
         planning_inputs = self.assignment_planner.planning_inputs_from_prepared(
             prepared_inputs
         )
@@ -113,15 +101,11 @@ class PreparedBatchWriter:
             prepared_inputs=prepared_inputs,
             worker_ids=worker_ids,
             batch_id=batch_id,
-            input_record_count=sum(
-                len(content.splitlines()) for content in source_input_contents
-            )
-            + len(manually_added_domains),
+            input_record_count=(
+                source_item_handoff.retained_line_count + len(manually_added_domains)
+            ),
         )
 
-        preparation_review_rows = prepared_inputs.preparation_review_rows
-        preparation_terminal_rows = prepared_inputs.preparation_terminal_rows
-        review_row_projector = PreparationReviewRowProjector()
         return PreparedBatch(
             batch_id=batch_id,
             config_name=config_name,
@@ -137,99 +121,11 @@ class PreparedBatchWriter:
                 ],
                 excluded_source_hosts=sorted(prepared_inputs.excluded_source_hosts),
                 manually_added_domains=manually_added_domains,
-                preparation_review_rows=[
-                    dict(review_row_projector.project(row))
-                    for row in preparation_review_rows
-                ],
-                preparation_terminal_rows=[
-                    dict(row) for row in preparation_terminal_rows
-                ],
+                preparation_terminal_rows=prepared_inputs.preparation_terminal_rows,
             ),
             worker_manifests=assignment_artifacts.worker_manifests,
-            source_input_contents=source_input_contents,
-            source_line_index=source_line_index,
             source_item_handoff=source_item_handoff,
         )
-
-    def prepare_source_archive(
-        self, prepared_inputs: PreparedInputSet
-    ) -> tuple[list[str], SourceLineIndex, list[ManuallyAddedDomain]]:
-        """Archive configured sources and return unmatched manual domains separately."""
-        parser = DomainListParser()
-        contents, source_formats, references_by_domain = self._collect_source_lines(
-            prepared_inputs, parser
-        )
-        source_hosts = {
-            entry.host
-            for content, source_format in zip(contents, source_formats, strict=True)
-            for line in content.splitlines(keepends=True)
-            for entry in parser.parse_source_line_entries(
-                line, file_format=InputFileFormat(source_format)
-            )
-        }
-        manually_added_entries = {
-            host: entry
-            for host, entry in prepared_inputs.manually_added_entries.items()
-            if host not in source_hosts
-        }
-        manually_added_hosts = sorted(manually_added_entries)
-        return (
-            contents,
-            SourceLineIndex(
-                source_formats=tuple(source_formats),
-                registrable_domain_lines={
-                    domain: tuple(references)
-                    for domain, references in references_by_domain.items()
-                },
-            ),
-            [
-                ManuallyAddedDomain(
-                    host=host,
-                    registrable_domain=manually_added_entries[host].registrable_domain,
-                )
-                for host in manually_added_hosts
-            ],
-        )
-
-    @staticmethod
-    def _collect_source_lines(
-        prepared_inputs: PreparedInputSet, parser: DomainListParser
-    ) -> tuple[list[str], list[str], dict[str, list[SourceLineReference]]]:
-        """Archive prepared source lines and index their registrable domains."""
-        contents: list[str] = []
-        source_formats: list[str] = []
-        references_by_domain: dict[str, list[SourceLineReference]] = {}
-        for source_ordinal, source_job in enumerate(
-            prepared_inputs.source_jobs_by_id.values()
-        ):
-            configured_format = source_job.config.get("input", {}).get("format", "auto")
-            forced_format = None if configured_format == "auto" else configured_format
-            file_format, prepared_lines = parser.prepare_source_lines(
-                source_job.lines,
-                source_name=source_job.input_label,
-                forced_format=forced_format,
-            )
-            source_formats.append(file_format.value)
-            retained_lines: list[str] = []
-            for prepared_line in prepared_lines:
-                retained_lines.append(prepared_line.content)
-                line_number = len(retained_lines)
-                for registrable_domain in sorted(
-                    {
-                        entry.registrable_domain
-                        for entry in prepared_line.entries
-                        if entry.registrable_domain
-                    }
-                ):
-                    references_by_domain.setdefault(str(registrable_domain), []).append(
-                        SourceLineReference(
-                            source_ordinal=source_ordinal,
-                            line_number=line_number,
-                        )
-                    )
-            contents.append("".join(retained_lines))
-
-        return contents, source_formats, references_by_domain
 
     def _build_worker_assignment_artifacts(
         self,
@@ -275,20 +171,6 @@ class PreparedBatchWriter:
             )
         ]
         paths = PathLayout(state_root).workflow_state
-        for source_ordinal, content in enumerate(prepared.source_input_contents):
-            source_path = paths.batch_source_input_path(
-                batch_id=prepared.batch_id, source_ordinal=source_ordinal
-            )
-            source_path.parent.mkdir(parents=True, exist_ok=True)
-            source_path.write_text(content, encoding="utf-8")
-            committed_paths.append(relative_path(source_path.relative_to(state_root)))
-        index_path = paths.batch_source_line_index_path(batch_id=prepared.batch_id)
-        formats_path = paths.batch_source_formats_path(batch_id=prepared.batch_id)
-        write_source_line_index(prepared.source_line_index, index_path, formats_path)
-        committed_paths.extend(
-            relative_path(path.relative_to(state_root))
-            for path in (index_path, formats_path)
-        )
         item_paths = prepared.source_item_handoff.write(
             items_path=paths.batch_source_items_path(batch_id=prepared.batch_id),
             index_path=paths.batch_source_item_index_path(batch_id=prepared.batch_id),

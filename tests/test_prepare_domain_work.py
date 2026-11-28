@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from domain_pipeline.aggregate.output_merge import AggregateOutputMerger
+from domain_pipeline.aggregate.readiness import validate_aggregate_readiness
+from domain_pipeline.aggregate.runner import AggregateBatchRunner
+from domain_pipeline.paths import PathLayout
+from domain_pipeline.pipeline_run.handoffs import HandoffRequest, restore_handoff, stage_handoff
 from domain_pipeline.prepare.batch_writer import PreparedBatchWriter
 from domain_pipeline.prepare.config.loader import PipelineConfigLoader
 from domain_pipeline.prepare.planner import PreparationPlanner
@@ -136,7 +142,6 @@ def test_valid_public_suffix_input_has_no_prepare_review_or_worker_route(
 
     assert prepared.root_plans == {}
     assert prepared.entries_by_source == {}
-    assert prepared.preparation_review_rows == []
     assert prepared.preparation_terminal_rows == []
 
 
@@ -146,17 +151,19 @@ def test_unmatched_public_suffix_manual_addition_stays_in_aggregate_inputs(
     """An unmatched no-root manual addition remains a separate aggregate record."""
     config = _config(
         tmp_path,
-        [{"id": "block", "content": "ads.example.com\n"}],
+        [{"id": "block", "content": "! comment\n"}],
     )
     manual_path = tmp_path / "manual_inputs" / "manually_added" / "fixture.txt"
     manual_path.parent.mkdir(parents=True)
     manual_path.write_text("co.uk\n", encoding="utf-8")
 
     prepared = PreparationPlanner(source_root=tmp_path).prepare_config(config)
-    _, _, manual_domains = PreparedBatchWriter().prepare_source_archive(prepared)
+    batch = PreparedBatchWriter().from_prepared_inputs(
+        prepared_inputs=prepared, worker_ids=[], batch_id="batch"
+    )
+    manual_domains = batch.prepare_aggregate_manifest.manually_added_domains
 
     assert manual_domains == [ManuallyAddedDomain(host="co.uk", registrable_domain=None)]
-    assert prepared.preparation_review_rows == []
     assert prepared.preparation_terminal_rows == []
 
 
@@ -164,7 +171,7 @@ def test_unmatched_manual_selection_remains_prepare_review(tmp_path: Path) -> No
     """An unmatched manual selection remains a prepare-owned review row."""
     config = _config(
         tmp_path,
-        [{"id": "block", "content": "ads.example.com\n"}],
+        [{"id": "block", "content": "! comment\n"}],
     )
     manual_path = (
         tmp_path
@@ -177,12 +184,49 @@ def test_unmatched_manual_selection_remains_prepare_review(tmp_path: Path) -> No
 
     prepared = PreparationPlanner(source_root=tmp_path).prepare_config(config)
 
-    assert [row["host"] for row in prepared.preparation_review_rows] == [
-        "manual.example.net"
-    ]
+    batch = PreparedBatchWriter().from_prepared_inputs(
+        prepared_inputs=prepared, worker_ids=[], batch_id="batch"
+    )
+    assert [
+        row["host"]
+        for row in batch.prepare_aggregate_manifest.preparation_terminal_rows
+    ] == ["manual.example.net"]
     assert [row["host"] for row in prepared.preparation_terminal_rows] == [
         "manual.example.net"
     ]
+
+
+def test_matched_manual_addition_keeps_the_source_conversion(tmp_path: Path) -> None:
+    host = "ads.example.com"
+    rule = f"||{host}/path"
+    config = _config(
+        tmp_path, [{"id": "block", "format": "adblock", "content": f"{rule}\n"}]
+    )
+    addition = tmp_path / "manual_inputs" / "manually_added" / "fixture.txt"
+    addition.parent.mkdir(parents=True)
+    addition.write_text(f"{host}\n", encoding="utf-8")
+    inputs = PreparationPlanner(source_root=tmp_path).prepare_config(config)
+    batch = PreparedBatchWriter().from_prepared_inputs(
+        prepared_inputs=inputs, worker_ids=["worker-1"], batch_id="batch"
+    )
+    assignment = batch.worker_manifests[0].manifest.prepared_metadata
+    root = assignment.delegation_roots["example.com"]
+    assert list(root.input_domains) == [host]
+    assert root.input_domains[host].manual_routing.manually_added is True
+    assert batch.prepare_aggregate_manifest.manually_added_domains == []
+
+    merger = AggregateOutputMerger()
+    routes = {host: "filtered"}
+    eligible = merger.eligible_source_items(batch.source_item_handoff, routes)
+    manual_hosts = merger.eligible_manual_hosts(
+        batch.prepare_aggregate_manifest.manually_added_domains, routes
+    )
+    for output_format, expected in (
+        ("plain", b""), ("hosts", b""), ("adblock", f"{rule}\n".encode())
+    ):
+        destination = tmp_path / output_format
+        merger.write_filtered_source_items(eligible, manual_hosts, (destination, output_format))
+        assert destination.read_bytes() == expected
 
 
 def test_delegation_profile_conflict_is_checked_before_host_dedup(
@@ -294,3 +338,108 @@ def test_manual_selection_and_exclusion_conflict_remains_rejected(
 
     with pytest.raises(ValueError, match="conflicts with manually excluded file"):
         PreparationPlanner(source_root=tmp_path).prepare_config(config)
+
+
+@pytest.mark.parametrize(
+    ("content", "retained_count"),
+    [("[Adblock Plus 2.0]\n", 1), ("/example.*/\n", 1), ("||fake.invalid^\n", 0)],
+)
+def test_prepare_batch_gate_uses_retained_records(
+    tmp_path: Path,
+    content: str,
+    retained_count: int,
+) -> None:
+    config = _config(
+        tmp_path, [{"id": "block", "format": "adblock", "content": content}]
+    )
+    inputs = PreparationPlanner(source_root=tmp_path).prepare_config(config)
+    assert inputs.root_plans == {}
+    writer = PreparedBatchWriter()
+    if not retained_count:
+        with pytest.raises(ValueError, match="no input lines"):
+            writer.from_prepared_inputs(
+                prepared_inputs=inputs, worker_ids=[], batch_id="batch"
+            )
+        return
+    batch = writer.from_prepared_inputs(
+        prepared_inputs=inputs, worker_ids=[], batch_id="batch"
+    )
+    assert batch.source_item_handoff.retained_line_count == retained_count
+
+
+@pytest.mark.parametrize("with_manual_review", [False, True])
+def test_prepare_only_batch_publishes_native_records_and_terminal_review(
+    tmp_path: Path,
+    with_manual_review: bool,
+) -> None:
+    config = _config(
+        tmp_path, [{"id": "block", "format": "adblock", "content": "/example.*/\n"}]
+    )
+    config["output"]["filtered"].append(
+        {"path": "output/filtered/native.txt", "format": "adblock"}
+    )
+    if with_manual_review:
+        selection = (
+            tmp_path
+            / "manual_inputs"
+            / "manually_selected_for_filtered"
+            / "fixture.txt"
+        )
+        selection.parent.mkdir(parents=True)
+        selection.write_text("manual.example.net\n", encoding="utf-8")
+    planner = PreparationPlanner(source_root=tmp_path)
+    writer = PreparedBatchWriter()
+    prepared = writer.from_prepared_inputs(
+        prepared_inputs=planner.prepare_config(config), worker_ids=[], batch_id="batch"
+    )
+    prepare_root = tmp_path / "prepare"
+    writer.write(prepared, state_root=prepare_root)
+    request = HandoffRequest(
+        "prepare-aggregate",
+        "batch",
+        require_runtime=True,
+        config_name="fixture",
+    )
+    archive = tmp_path / "staged"
+    stage_handoff(state_root=prepare_root, destination=archive, request=request)
+    aggregate_root = tmp_path / "aggregate"
+    restore_handoff(state_root=aggregate_root, source=archive, request=request)
+
+    outcome = AggregateBatchRunner().run(batch_id="batch", state_root=aggregate_root)
+
+    assert outcome["state"] == "aggregated"
+    publish = PathLayout(aggregate_root).output.publish_worktree_root()
+    assert (publish / "output/filtered/fixture.txt").read_bytes() == b""
+    assert (publish / "output/filtered/native.txt").read_bytes() == b"/example.*/\n"
+    assert outcome["final_output_paths"]["review"] == "output/review/fixture.csv"
+    review = publish / outcome["final_output_paths"]["review"]
+    if with_manual_review:
+        with review.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert [row["host"] for row in rows] == ["manual.example.net"]
+        assert "source_id" not in rows[0]
+        assert rows[0]["host_resolution_status"] == "skipped"
+    else:
+        assert not review.exists()
+
+
+def test_aggregate_readiness_checks_standalone_manual_domain(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path, [{"id": "block", "format": "adblock", "content": "/example.*/\n"}]
+    )
+    writer = PreparedBatchWriter()
+    batch = writer.from_prepared_inputs(
+        prepared_inputs=PreparationPlanner(source_root=tmp_path).prepare_config(config),
+        worker_ids=[],
+        batch_id="batch",
+    )
+    writer.write(batch, state_root=tmp_path)
+    manual_path = PathLayout(tmp_path).workflow_state.batch_manual_domains_path(
+        batch_id="batch"
+    )
+    manual_path.write_text(
+        "host,registrable_domain_present,registrable_domain\nexample.com,0,\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid standalone manual addition"):
+        validate_aggregate_readiness("batch", state_root=tmp_path)
