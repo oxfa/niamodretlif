@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
+    PreparedRuntimeMetadata,
+    PrepareWorkerManifest,
     load_prepare_worker_manifest_for_worker,
 )
 from domain_pipeline.worker.ip_location.providers import FatalIPLocationCredentialError
@@ -55,8 +57,8 @@ class WorkerRuntimeExecutionError(RuntimeError):
 def run_prepared_pipeline(
     runtime_config: dict[str, Any],
     *,
+    prepared_metadata: PreparedRuntimeMetadata,
     max_runtime_seconds: float | None = None,
-    prepared_metadata: dict[str, Any] | None = None,
 ) -> int:
     """Run one workflow-owned runtime payload from a prepared pipeline-run manifest."""
     return asyncio.run(
@@ -112,7 +114,7 @@ class WorkerBatchRunner:
         return self.run_manifest(request, prepare_manifest)
 
     def run_manifest(
-        self, request: WorkerRunRequest, prepare_manifest: Any
+        self, request: WorkerRunRequest, prepare_manifest: PrepareWorkerManifest
     ) -> dict[str, Any]:
         """Run one already-loaded worker manifest."""
         log_path: Path | None = None
@@ -212,7 +214,7 @@ class WorkerBatchRunner:
         self,
         *,
         request: WorkerRunRequest,
-        prepare_manifest: Any,
+        prepare_manifest: PrepareWorkerManifest,
         result_root: Path,
         log_path: Path,
     ) -> WorkerRunOutcome:
@@ -273,7 +275,7 @@ class WorkerBatchRunner:
         self,
         *,
         request: WorkerRunRequest,
-        prepare_manifest: Any,
+        prepare_manifest: PrepareWorkerManifest,
     ) -> None:
         """Run one manifest payload and surface expected runtime failures."""
         try:
@@ -287,7 +289,7 @@ class WorkerBatchRunner:
             exit_code = run_prepared_pipeline(
                 run_payload,
                 max_runtime_seconds=request.max_runtime_seconds,
-                prepared_metadata=prepare_manifest.prepared_metadata.to_runtime_payload(),
+                prepared_metadata=prepare_manifest.prepared_metadata,
             )
         except FatalIPLocationCredentialError as exc:
             raise WorkerRuntimeExecutionError(str(exc)) from exc

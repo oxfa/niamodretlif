@@ -18,13 +18,19 @@ from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     AggregateOutputSpec,
 )
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
+    PreparedDelegationProfile,
     PreparedDelegationRootWork,
     PreparedInputDomainWork,
     PreparedManualRoutingProfile,
     PreparedRuntimeMetadata,
+    PreparedRuntimeProfiles,
     PrepareWorkerManifest,
+    PrepareWorkerModel,
     WorkerOutputSpec,
+    WorkerRuntimeHostResolutionProfile,
+    WorkerRuntimeIpLocationProfile,
     WorkerRuntimeSpec,
+    profile_value_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +129,25 @@ def aggregate_output_spec_from_config(config: dict[str, Any]) -> AggregateOutput
         log=relative_path(aggregate_paths.runtime_log),
         cache=relative_path(aggregate_paths.cache),
     )
+
+
+class _ProfileTable[Profile: PrepareWorkerModel]:
+    """Assign indices by first occurrence of each normalized profile."""
+
+    def __init__(self, model: type[Profile]) -> None:
+        self.model = model
+        self.entries: list[Profile] = []
+        self._indices: dict[str, int] = {}
+
+    def index_for(self, value: dict[str, Any]) -> int:
+        profile = self.model.model_validate(value)
+        key = profile_value_key(profile)
+        index = self._indices.get(key)
+        if index is None:
+            index = len(self.entries)
+            self._indices[key] = index
+            self.entries.append(profile)
+        return index
 
 
 class WorkerAssignmentPlanner:
@@ -248,38 +273,40 @@ class WorkerAssignmentPlanner:
         *,
         root_plans: dict[str, PreparedRootPlan],
     ) -> PreparedRuntimeMetadata:
+        delegation = _ProfileTable(PreparedDelegationProfile)
+        host_resolution = _ProfileTable(WorkerRuntimeHostResolutionProfile)
+        ip_location = _ProfileTable(WorkerRuntimeIpLocationProfile)
+        roots: dict[str, PreparedDelegationRootWork] = {}
+        for registrable_domain, plan in sorted(root_plans.items()):
+            delegation_id = delegation.index_for(plan.delegation_profile)
+            inputs: dict[str, PreparedInputDomainWork] = {}
+            for input_domain, work in sorted(plan.input_domains.items()):
+                payload: dict[str, Any] = {
+                    "manual_routing": PreparedManualRoutingProfile(
+                        manually_selected_for_filtered=work.manual_routing.manually_selected_for_filtered,
+                        manually_added=work.manual_routing.manually_added,
+                    ),
+                }
+                if work.host_resolution_profile is not None:
+                    payload["host_resolution_profile_id"] = host_resolution.index_for(
+                        work.host_resolution_profile
+                    )
+                if work.ip_location_profile is not None:
+                    payload["ip_location_profile_id"] = ip_location.index_for(
+                        work.ip_location_profile
+                    )
+                inputs[input_domain] = PreparedInputDomainWork.model_validate(payload)
+            roots[registrable_domain] = PreparedDelegationRootWork(
+                delegation_profile_id=delegation_id,
+                input_domains=inputs,
+            )
         return PreparedRuntimeMetadata(
-            delegation_roots={
-                registrable_domain: PreparedDelegationRootWork(
-                    delegation_profile=plan.delegation_profile,
-                    input_domains={
-                        input_domain: PreparedInputDomainWork(
-                            manual_routing=PreparedManualRoutingProfile(
-                                manually_selected_for_filtered=(
-                                    input_plan.manual_routing.manually_selected_for_filtered
-                                ),
-                                manually_added=(
-                                    input_plan.manual_routing.manually_added
-                                ),
-                            ),
-                            **(
-                                {"host_resolution_profile": input_plan.host_resolution_profile}
-                                if input_plan.host_resolution_profile is not None
-                                else {}
-                            ),
-                            **(
-                                {"ip_location_profile": input_plan.ip_location_profile}
-                                if input_plan.ip_location_profile is not None
-                                else {}
-                            ),
-                        )
-                        for input_domain, input_plan in sorted(
-                            plan.input_domains.items()
-                        )
-                    },
-                )
-                for registrable_domain, plan in sorted(root_plans.items())
-            },
+            profiles=PreparedRuntimeProfiles(
+                delegation=delegation.entries,
+                host_resolution=host_resolution.entries,
+                ip_location=ip_location.entries,
+            ),
+            delegation_roots=roots,
         )
 
     def _log_summary(

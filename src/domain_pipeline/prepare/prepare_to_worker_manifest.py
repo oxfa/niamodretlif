@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import copy
+import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     ValidationError,
-    field_validator,
     model_validator,
 )
 
@@ -22,10 +22,9 @@ from domain_pipeline.prepare.config.models import (
     DNSResolverConfig,
 )
 from domain_pipeline.handoff_io import (
-    read_json,
-    read_yaml,
+    read_strict_json,
+    write_compact_json,
     write_json,
-    write_yaml,
 )
 from domain_pipeline.paths.layout import PathLayout
 from domain_pipeline.prepare.stage_concurrency import (
@@ -92,8 +91,8 @@ class PreparedDelegationProfile(PrepareWorkerModel):
 class PreparedManualRoutingProfile(PrepareWorkerModel):
     """Source-blind manual routing flags for one input domain."""
 
-    manually_selected_for_filtered: bool
-    manually_added: bool
+    manually_selected_for_filtered: StrictBool
+    manually_added: StrictBool
 
     @model_validator(mode="after")
     def _validate_mutually_exclusive_flags(self) -> "PreparedManualRoutingProfile":
@@ -143,33 +142,54 @@ class WorkerRuntimeIpLocationProfile(PrepareWorkerModel):
     ]
 
 
+class PreparedRuntimeProfiles(PrepareWorkerModel):
+    """Worker-local tables of distinct effective stage settings."""
+
+    delegation: list[PreparedDelegationProfile]
+    host_resolution: list[WorkerRuntimeHostResolutionProfile]
+    ip_location: list[WorkerRuntimeIpLocationProfile]
+
+
+def profile_value_key(profile: PrepareWorkerModel) -> str:
+    """Compare complete normalized profile values without reordering arrays."""
+    return json.dumps(
+        profile.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+ProfileId = Annotated[int, Field(strict=True, ge=0)]
+
+
 class PreparedInputDomainWork(PrepareWorkerModel):
     """One unique source-blind input domain and the routes it can execute."""
 
     manual_routing: PreparedManualRoutingProfile
-    host_resolution_profile: WorkerRuntimeHostResolutionProfile | None = None
-    ip_location_profile: WorkerRuntimeIpLocationProfile | None = None
+    host_resolution_profile_id: ProfileId | None = None
+    ip_location_profile_id: ProfileId | None = None
 
     @model_validator(mode="after")
     def _validate_stage_profiles(self) -> "PreparedInputDomainWork":
         if (
-            "host_resolution_profile" in self.model_fields_set
-            and self.host_resolution_profile is None
+            "host_resolution_profile_id" in self.model_fields_set
+            and self.host_resolution_profile_id is None
         ):
-            raise ValueError("host_resolution_profile must be omitted when disabled")
+            raise ValueError("host_resolution_profile_id must be omitted when disabled")
         if (
-            "ip_location_profile" in self.model_fields_set
-            and self.ip_location_profile is None
+            "ip_location_profile_id" in self.model_fields_set
+            and self.ip_location_profile_id is None
         ):
-            raise ValueError("ip_location_profile must be omitted when disabled")
-        if self.ip_location_profile is not None and self.host_resolution_profile is None:
-            raise ValueError("ip_location_profile requires host resolution")
+            raise ValueError("ip_location_profile_id must be omitted when disabled")
+        if self.ip_location_profile_id is not None and self.host_resolution_profile_id is None:
+            raise ValueError("ip_location_profile_id requires host resolution")
         if (
             self.manual_routing.manually_selected_for_filtered
             or self.manual_routing.manually_added
         ) and (
-            self.host_resolution_profile is not None
-            or self.ip_location_profile is not None
+            self.host_resolution_profile_id is not None
+            or self.ip_location_profile_id is not None
         ):
             raise ValueError("manual input domains cannot carry host/IP profiles")
         return self
@@ -178,7 +198,7 @@ class PreparedInputDomainWork(PrepareWorkerModel):
 class PreparedDelegationRootWork(PrepareWorkerModel):
     """One atomic root assignment with its unique input-domain work."""
 
-    delegation_profile: PreparedDelegationProfile
+    delegation_profile_id: ProfileId
     input_domains: dict[str, PreparedInputDomainWork]
 
     @model_validator(mode="after")
@@ -191,11 +211,24 @@ class PreparedDelegationRootWork(PrepareWorkerModel):
 class PreparedRuntimeMetadata(PrepareWorkerModel):
     """Canonical source-blind root-to-input-domain worker work manifest."""
 
+    profiles: PreparedRuntimeProfiles
     delegation_roots: dict[str, PreparedDelegationRootWork]
 
     @model_validator(mode="after")
-    def _validate_delegation_root_keys(self) -> "PreparedRuntimeMetadata":
+    def _validate_assignment(self) -> "PreparedRuntimeMetadata":
         parser = DomainListParser()
+        tables = {
+            "delegation": self.profiles.delegation,
+            "host_resolution": self.profiles.host_resolution,
+            "ip_location": self.profiles.ip_location,
+        }
+        used: dict[str, set[int]] = {stage: set() for stage in tables}
+
+        def record_profile(stage: str, index: int, owner: str) -> None:
+            if index >= len(tables[stage]):
+                raise ValueError(f"{owner!r}: {stage}_profile_id {index} is out of range")
+            used[stage].add(index)
+
         for root_key, root_work in self.delegation_roots.items():
             parsed_root = parser.parse_source_item(
                 root_key, file_format=InputFileFormat.PLAIN
@@ -211,7 +244,8 @@ class PreparedRuntimeMetadata(PrepareWorkerModel):
                 raise ValueError(
                     f"delegation_roots key is not a registrable domain: {root_key!r}"
                 )
-            for input_domain in root_work.input_domains:
+            record_profile("delegation", root_work.delegation_profile_id, root_key)
+            for input_domain, work in root_work.input_domains.items():
                 parsed_input = parser.parse_source_item(
                     input_domain, file_format=InputFileFormat.PLAIN
                 )
@@ -227,17 +261,27 @@ class PreparedRuntimeMetadata(PrepareWorkerModel):
                         "input domain does not match its registrable root: "
                         f"{input_domain!r} under {root_key!r}"
                     )
+                if work.host_resolution_profile_id is not None:
+                    record_profile("host_resolution", work.host_resolution_profile_id, input_domain)
+                if work.ip_location_profile_id is not None:
+                    record_profile("ip_location", work.ip_location_profile_id, input_domain)
+        for stage, table in tables.items():
+            if len({profile_value_key(profile) for profile in table}) != len(table):
+                raise ValueError(f"duplicate profile in {stage} table")
+            if len(used[stage]) != len(table):
+                unused = sorted(set(range(len(table))) - used[stage])
+                raise ValueError(f"unused profile IDs in {stage} table: {unused}")
         return self
 
-    def to_runtime_payload(self) -> dict[str, Any]:
-        """Return the canonical mutable root-to-domain work mapping."""
-        payload = copy.deepcopy(self.model_dump(mode="json"))
+    def to_manifest_payload(self) -> dict[str, Any]:
+        """Serialize the assignment, omitting only disabled stage references."""
+        payload = self.model_dump(mode="json")
         for root in payload["delegation_roots"].values():
             for domain in root["input_domains"].values():
-                if domain["host_resolution_profile"] is None:
-                    domain.pop("host_resolution_profile")
-                if domain["ip_location_profile"] is None:
-                    domain.pop("ip_location_profile")
+                if domain["host_resolution_profile_id"] is None:
+                    domain.pop("host_resolution_profile_id")
+                if domain["ip_location_profile_id"] is None:
+                    domain.pop("ip_location_profile_id")
         return payload
 
 
@@ -375,14 +419,14 @@ def write_prepare_worker_handoff(
     runtime.pop("debug_log_path")
     runtime["cache"].pop("cache_file")
     runtime["cache"].pop("baseline_cache_file")
-    write_yaml(
+    write_compact_json(
         config_path,
         {
             "batch_id": manifest.batch_id,
             "worker_id": manifest.worker_id,
             "config_name": manifest.runtime_spec.config_name,
             "runtime_spec": runtime,
-            "prepared_metadata": manifest.prepared_metadata.to_runtime_payload(),
+            "prepared_metadata": manifest.prepared_metadata.to_manifest_payload(),
         },
     )
     identity_path = paths.prepare_worker_identity_path(
@@ -404,7 +448,7 @@ def load_prepare_worker_manifest_for_worker(
     worker_id: str,
     state_root: Path,
 ) -> PrepareWorkerManifest:
-    """Load the designated worker's source-blind YAML work manifest."""
+    """Load the designated worker's source-blind JSON work manifest."""
     layout = PathLayout(state_root)
     paths = layout.workflow_state
     config_path = paths.prepare_worker_config_path(
@@ -414,7 +458,7 @@ def load_prepare_worker_manifest_for_worker(
         raise FileNotFoundError(
             f"prepare worker configuration is missing: {config_path}"
         )
-    payload = read_yaml(config_path)
+    payload = read_strict_json(config_path)
     if not isinstance(payload, dict) or set(payload) != {
         "batch_id",
         "worker_id",
@@ -425,7 +469,7 @@ def load_prepare_worker_manifest_for_worker(
         raise ValueError(f"invalid prepare worker configuration {config_path}")
     if payload["batch_id"] != batch_id or payload["worker_id"] != worker_id:
         raise ValueError("prepare worker configuration identity mismatch")
-    identity = read_json(
+    identity = read_strict_json(
         paths.prepare_worker_identity_path(batch_id=batch_id, worker_id=worker_id)
     )
     if (
@@ -449,7 +493,7 @@ def load_prepare_worker_manifest_for_worker(
         config_name=config_name,
     )
     try:
-        return PrepareWorkerManifest.model_validate(
+        manifest = PrepareWorkerManifest.model_validate(
             {
                 "batch_id": batch_id,
                 "worker_id": worker_id,
@@ -466,6 +510,24 @@ def load_prepare_worker_manifest_for_worker(
         raise ValueError(
             f"invalid prepare worker configuration {config_path}: {details}"
         ) from exc
+    _require_effective_fields(manifest.runtime_spec, "runtime_spec")
+    _require_effective_fields(
+        manifest.prepared_metadata.profiles, "prepared_metadata.profiles"
+    )
+    return manifest
+
+
+def _require_effective_fields(value: object, path: str) -> None:
+    """Reject omitted effective fields even when the model provides defaults."""
+    if isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            field_path = f"{path}.{name}"
+            if name not in value.model_fields_set:
+                raise ValueError(f"{field_path}: field is required")
+            _require_effective_fields(getattr(value, name), field_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _require_effective_fields(item, f"{path}.{index}")
 
 
 def _worker_runtime_with_paths(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import requests
@@ -62,7 +62,7 @@ class IpLocationCachePartition:
     missing_ips: list[str]
 
 
-def _ip_location_provider_token(ip_location_config: dict[str, Any]) -> str:
+def _ip_location_provider_token(ip_location_config: Mapping[str, Any]) -> str:
     """Return runtime-only IP-location token without persisting environment secrets."""
     if "token" in ip_location_config:
         raise ValueError("ip_location.token is unsupported; use the runtime environment")
@@ -221,7 +221,7 @@ class RuntimeIpLocationService:
     async def lookup_ip_location(
         self,
         *,
-        ip_location_config: dict[str, Any],
+        ip_location_config: Mapping[str, Any],
         host_resolution_result: HostResolutionResult,
     ) -> tuple[TerminalRouteTransition, list[IPLocationResult], Any | None]:
         """Run or cache-read the optional IP-location stage and evaluate its policy."""
@@ -304,7 +304,7 @@ class RuntimeIpLocationService:
         self,
         *,
         provider_name: str,
-        ip_location_config: dict[str, Any],
+        ip_location_config: Mapping[str, Any],
         missing_ips: list[str],
     ) -> list[IPLocationResult]:
         """Fetch IP-location rows for cache misses through the configured provider."""
@@ -321,7 +321,7 @@ class RuntimeIpLocationService:
         self,
         *,
         provider_name: str,
-        ip_location_config: dict[str, Any],
+        ip_location_config: Mapping[str, Any],
         checked_at: Any,
         fetched_results: list[IPLocationResult],
     ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,8 +40,8 @@ class ParsedInputDomain:
     entry: DomainEntry
     position: RuntimeItemPosition
     manual_routing: RuntimeManualRouting = field(default_factory=RuntimeManualRouting)
-    host_resolution_profile: dict[str, Any] | None = None
-    ip_location_profile: dict[str, Any] | None = None
+    host_resolution_profile: Mapping[str, Any] | None = None
+    ip_location_profile: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class DelegationRootWorkItem:
     """One root-level delegation lookup with input-domain fanout items."""
 
     registrable_domain: str
-    delegation_profile: dict[str, Any]
+    delegation_profile: Mapping[str, Any]
     items: tuple[ParsedInputDomain, ...]
 
 

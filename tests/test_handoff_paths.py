@@ -59,13 +59,20 @@ def _prepare_files(root: Path) -> dict[str, bytes]:
 def _worker_files(
     root: Path, worker: str, *, batch_id: str = BATCH
 ) -> dict[str, bytes]:
-    base = f".workflow_state/batches/{BATCH}/workers/{worker}"
+    state = PathLayout(root).workflow_state
+    runtime_path = state.prepare_worker_config_path(batch_id=BATCH, worker_id=worker)
+    identity_path = state.prepare_worker_identity_path(batch_id=BATCH, worker_id=worker)
     files = {
-        f"{base}/runtime-config.yaml": (
-            f"batch_id: {batch_id}\nworker_id: {worker}\n"
-            "config_name: block\nruntime_spec: {}\n"
+        runtime_path.relative_to(root).as_posix(): json.dumps(
+            {
+                "batch_id": batch_id,
+                "worker_id": worker,
+                "config_name": "block",
+                "runtime_spec": {},
+                "prepared_metadata": {},
+            }
         ).encode(),
-        f"{base}/worker-identity.json": json.dumps(
+        identity_path.relative_to(root).as_posix(): json.dumps(
             {
                 "batch_id": batch_id,
                 "worker_id": worker,
@@ -91,7 +98,7 @@ def test_prepare_handoffs_preserve_canonical_members() -> None:
     layout = PathLayout(root)
     base = f".workflow_state/batches/{BATCH}"
     worker_paths = [
-        f"{base}/workers/worker-01/runtime-config.yaml",
+        f"{base}/workers/worker-01/runtime-config.json",
         f"{base}/workers/worker-01/worker-identity.json",
     ]
     worker = layout.prepare_to_worker.members(batch_id=BATCH, worker_id="worker-01")
@@ -323,23 +330,98 @@ def test_restore_requires_worker_config_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "runtime_config",
+    "runtime_identity",
     [
-        "batch_id: other-batch\nworker_id: worker-01\n"
-        "config_name: block\nruntime_spec: {}\n",
-        f"batch_id: {BATCH}\nworker_id: worker-02\n"
-        "config_name: block\nruntime_spec: {}\n",
-        "worker_id: worker-01\nconfig_name: block\nruntime_spec: {}\n",
+        {"batch_id": "other-batch", "worker_id": "worker-01", "config_name": "block"},
+        {"batch_id": BATCH, "worker_id": "worker-02", "config_name": "block"},
+        {"worker_id": "worker-01", "config_name": "block"},
     ],
 )
 def test_restore_rejects_invalid_runtime_identity_before_copy(
+    tmp_path: Path, runtime_identity: dict[str, str]
+) -> None:
+    """Restore validates the JSON runtime identity before writing either member."""
+    source = tmp_path / "source"
+    _worker_files(source, "worker-01")
+    runtime_path = PathLayout(source).workflow_state.prepare_worker_config_path(
+        batch_id=BATCH, worker_id="worker-01"
+    )
+    runtime_path.write_text(json.dumps(runtime_identity), encoding="utf-8")
+    restored = tmp_path / "restored"
+    with pytest.raises(ValueError, match="identity mismatch"):
+        restore_handoff(
+            state_root=restored,
+            source=source,
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
+        )
+    assert not restored.exists()
+
+
+def test_restore_rejects_legacy_worker_member_before_copy(tmp_path: Path) -> None:
+    """A bundle containing only the former runtime file and identity fails restore."""
+    source = tmp_path / "source"
+    _worker_files(source, "worker-01")
+    runtime_path = PathLayout(source).workflow_state.prepare_worker_config_path(
+        batch_id=BATCH, worker_id="worker-01"
+    )
+    runtime_path.unlink()
+    runtime_path.with_name("runtime-config.yaml").write_text(
+        f"batch_id: {BATCH}\nworker_id: worker-01\nconfig_name: block\n",
+        encoding="utf-8",
+    )
+    restored = tmp_path / "restored"
+    with pytest.raises(
+        FileNotFoundError, match=r"required handoff member missing: .*runtime-config\.json"
+    ):
+        restore_handoff(
+            state_root=restored,
+            source=source,
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
+        )
+    assert not restored.exists()
+
+
+@pytest.mark.parametrize(
+    "runtime_config",
+    [
+        pytest.param(
+            f"batch_id: {BATCH}\nworker_id: worker-01\nconfig_name: block\n",
+            id="yaml",
+        ),
+        pytest.param(
+            f'{{"batch_id":"other-batch","batch_id":"{BATCH}",'
+            '"worker_id":"worker-01","config_name":"block"}',
+            id="duplicate-identity-key",
+        ),
+        pytest.param(
+            f'{{"batch_id":"{BATCH}","worker_id":"worker-01","config_name":"block",'
+            '"runtime_spec":{"cache":{"ttl":1,"ttl":2}}}',
+            id="nested-duplicate-key",
+        ),
+        *[
+            pytest.param(
+                f'{{"batch_id":"{BATCH}","worker_id":"worker-01","config_name":"block",'
+                f'"runtime_spec":{{"cache":{{"ttl":{value}}}}}}}',
+                id=value,
+            )
+            for value in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999")
+        ],
+    ],
+)
+def test_restore_rejects_invalid_worker_runtime_json_before_copy(
     tmp_path: Path, runtime_config: str
 ) -> None:
-    """Restore validates the YAML runtime identity before writing canonical members."""
+    """Decode the runtime document strictly before writing either member."""
     source = tmp_path / "source"
-    files = _worker_files(source, "worker-01")
-    runtime_path = next(name for name in files if name.endswith("/runtime-config.yaml"))
-    _write(source, runtime_path, runtime_config.encode())
+    _worker_files(source, "worker-01")
+    runtime_path = PathLayout(source).workflow_state.prepare_worker_config_path(
+        batch_id=BATCH, worker_id="worker-01"
+    )
+    runtime_path.write_text(runtime_config, encoding="utf-8")
     restored = tmp_path / "restored"
     with pytest.raises(ValueError, match="identity mismatch"):
         restore_handoff(
@@ -356,6 +438,10 @@ def test_restore_rejects_invalid_runtime_identity_before_copy(
     "identity_payload",
     [
         b"not-json\n",
+        pytest.param(
+            f'{{"batch_id":"other-batch","batch_id":"{BATCH}","worker_id":"worker-01"}}'.encode(),
+            id="duplicate-key",
+        ),
         json.dumps(
             {
                 "batch_id": BATCH,

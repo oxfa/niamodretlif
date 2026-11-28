@@ -174,7 +174,7 @@ class PrepareHandoffPaths(WorkflowStateBasePaths):
     def prepare_worker_config_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the prepare worker config path."""
         return (
-            self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "runtime-config.yaml"
+            self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "runtime-config.json"
         )
 
     def prepare_worker_identity_path(self, *, batch_id: str, worker_id: str) -> Path:

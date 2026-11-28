@@ -1,9 +1,10 @@
-"""Typed CSV and YAML primitives for prepare handoff data."""
+"""CSV, JSON, and YAML primitives for handoff data."""
 
 from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -75,18 +76,58 @@ def write_json(path: Path, value: Any) -> None:
     )
 
 
-def read_json(path: Path) -> Any:
-    """Read one strict JSON handoff value."""
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"invalid JSON constant {value}")
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant {value}")
 
+
+def read_json(path: Path) -> Any:
+    """Read one JSON handoff value."""
     try:
         value = json.loads(
-            path.read_text(encoding="utf-8"), parse_constant=reject_constant
+            path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant
         )
         validate_yaml_tree(value)
         return value
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"unable to read JSON handoff {path}: {exc}") from exc
+
+
+def write_compact_json(path: Path, value: Any) -> None:
+    """Write deterministic compact UTF-8 JSON with one trailing newline."""
+    validate_yaml_tree(value)
+    document = json.dumps(
+        value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(document + "\n", encoding="utf-8", newline="\n")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"nonfinite JSON number {value}")
+    return number
+
+
+def read_strict_json(path: Path) -> Any:
+    """Read UTF-8 JSON with unique object keys and finite numbers."""
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_float=_finite_json_float,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, RecursionError, ValueError) as exc:
         raise ValueError(f"unable to read JSON handoff {path}: {exc}") from exc
 
 

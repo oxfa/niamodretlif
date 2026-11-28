@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from domain_pipeline.worker.delegation.lookup import (
@@ -14,6 +15,15 @@ from domain_pipeline.worker.host_resolution.lookup import (
     HostResolutionChecker,
     HostResolutionCheckerRequest,
 )
+
+
+def _copy_dns_profile_settings(value: Any) -> Any:
+    """Copy shared settings into the dicts and lists used by DNS checkers."""
+    if isinstance(value, Mapping):
+        return {key: _copy_dns_profile_settings(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_copy_dns_profile_settings(item) for item in value]
+    return value
 
 
 class RuntimeDNSChecker:
@@ -133,35 +143,37 @@ class RuntimeDNSCheckerFactory:
 
     @staticmethod
     def config_for_delegation_profile(
-        delegation_profile: dict[str, Any],
+        delegation_profile: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Build the minimal checker config from one effective root profile."""
         return {
-            "dns_query": dict(delegation_profile["dns_query"]),
-            "delegation": dict(delegation_profile["delegation"]),
+            "dns_query": _copy_dns_profile_settings(delegation_profile["dns_query"]),
+            "delegation": _copy_dns_profile_settings(delegation_profile["delegation"]),
             "host_resolution": {},
         }
 
     @staticmethod
     def config_for_host_resolution_profile(
-        host_profile: dict[str, Any],
+        host_profile: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Build a checker config from one effective input-domain host profile."""
         dns_query = {
-            "default_resolvers": list(host_profile["resolvers"]),
+            "default_resolvers": _copy_dns_profile_settings(host_profile["resolvers"]),
             "timeout": host_profile["timeout"],
             "retry_backoff_base_seconds": host_profile[
                 "retry_backoff_base_seconds"
             ],
-            "query_rate_limit": dict(host_profile["query_rate_limit"]),
+            "query_rate_limit": _copy_dns_profile_settings(
+                host_profile["query_rate_limit"]
+            ),
         }
         host_resolution = {
-            "resolvers": list(host_profile["resolvers"]),
+            "resolvers": list(dns_query["default_resolvers"]),
             "timeout": host_profile["timeout"],
             "retry_backoff_base_seconds": host_profile[
                 "retry_backoff_base_seconds"
             ],
-            "query_rate_limit": dict(host_profile["query_rate_limit"]),
+            "query_rate_limit": dict(dns_query["query_rate_limit"]),
             "retry_attempts": host_profile["retry_attempts"],
             "ecs": dict(host_profile["ecs"]),
         }

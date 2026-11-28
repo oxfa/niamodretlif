@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from domain_pipeline.handoff_io import read_json, read_yaml
+from domain_pipeline.handoff_io import read_strict_json, read_yaml
 from domain_pipeline.prepare.source_line_index import load_source_line_index
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 
@@ -101,12 +101,12 @@ def validate_worker_inputs(
 
 def _validate_identity(
     path: Path,
+    payload: object,
     *,
     batch_id: str,
     worker_id: str | None = None,
     config_name: str | None = None,
 ) -> None:
-    payload = read_yaml(path)
     if not isinstance(payload, dict):
         raise ValueError(f"handoff identity mismatch: {path}")
     if (
@@ -205,38 +205,37 @@ def _validate_restored_identity(
             raise ValueError("worker ID is required for worker handoff")
         if request.config_name is None:
             raise ValueError("worker config name is required")
-        identity_path = state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id)
+        runtime_path = state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id)
+        archived_runtime = source / runtime_path.relative_to(state_root)
+        try:
+            runtime = read_strict_json(archived_runtime)
+        except ValueError as exc:
+            raise ValueError(f"handoff identity mismatch: {archived_runtime}") from exc
         _validate_identity(
-            source / identity_path.relative_to(state_root),
+            archived_runtime,
+            runtime,
             batch_id=batch_id,
             worker_id=worker_id,
             config_name=request.config_name,
         )
-        identity_json_path = state.prepare_worker_identity_path(
+        identity_path = state.prepare_worker_identity_path(
             batch_id=batch_id, worker_id=worker_id
         )
-        archived_identity_json = source / identity_json_path.relative_to(state_root)
+        archived_identity = source / identity_path.relative_to(state_root)
         try:
-            identity = read_json(archived_identity_json)
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise ValueError(
-                f"handoff identity mismatch: {identity_json_path}"
-            ) from exc
-        if (
-            not isinstance(identity, dict)
-            or identity
-            != {
-                "batch_id": batch_id,
-                "worker_id": worker_id,
-            }
-        ):
-            raise ValueError(f"handoff identity mismatch: {identity_json_path}")
+            identity = read_strict_json(archived_identity)
+        except ValueError as exc:
+            raise ValueError(f"handoff identity mismatch: {identity_path}") from exc
+        if identity != {"batch_id": batch_id, "worker_id": worker_id}:
+            raise ValueError(f"handoff identity mismatch: {identity_path}")
     elif handoff == "prepare-aggregate":
         if request.config_name is None:
             raise ValueError("aggregate config name is required")
         identity_path = state.prepare_aggregate_config_path(batch_id=batch_id)
+        archived_identity = source / identity_path.relative_to(state_root)
         _validate_identity(
-            source / identity_path.relative_to(state_root),
+            archived_identity,
+            read_yaml(archived_identity),
             batch_id=batch_id,
             config_name=request.config_name,
         )
@@ -250,7 +249,9 @@ def _validate_restored_identity(
         ):
             archived = source / identity_path.relative_to(state_root)
             if archived.exists():
-                _validate_identity(archived, batch_id=batch_id, worker_id=worker_id)
+                _validate_identity(
+                    archived, read_yaml(archived), batch_id=batch_id, worker_id=worker_id
+                )
 
 
 def restore_handoff(

@@ -6,10 +6,10 @@ import asyncio
 import dataclasses
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from domain_pipeline.routing import TerminalRouteTransition
 from domain_pipeline.worker.runtime.contracts import (
@@ -76,6 +76,11 @@ from domain_pipeline.worker.runtime.constants import (
     IP_LOCATION_STAGE_CONCURRENCY,
 )
 
+if TYPE_CHECKING:
+    from domain_pipeline.prepare.prepare_to_worker_manifest import (
+        PreparedRuntimeMetadata,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,10 +135,10 @@ class RuntimeStageConcurrencySettings:
 
 @dataclasses.dataclass(frozen=True)
 class RuntimeInputContext:
-    """Runtime config and optional prepared metadata for one worker."""
+    """Runtime config and validated assignment metadata for one worker."""
 
     config: dict[str, Any]
-    prepared_metadata: dict[str, Any] | None
+    prepared_metadata: PreparedRuntimeMetadata
 
 
 @dataclasses.dataclass(frozen=True)
@@ -308,48 +313,21 @@ def _runtime_stage_concurrency_settings(
     )
 
 
-def _runtime_dns_capacity_groups(
-    config: dict[str, Any],
-    *,
-    prepared_metadata: dict[str, Any] | None,
-) -> RuntimeDNSCapacityGroups:
-    """Return stage-specific DNS capacity groups for this runtime payload."""
-    return discover_dns_capacity_groups(
-        RuntimeItemLoader(config=config, prepared_metadata=prepared_metadata)
-    )
-
-
-def _runtime_host_resolution_stage_enabled(
-    config: dict[str, Any],
-    *,
-    prepared_metadata: dict[str, Any] | None,
-) -> bool:
-    """Return whether any assigned ordinary input domain enables host resolution."""
-    loader = RuntimeItemLoader(config=config, prepared_metadata=prepared_metadata)
-    return any(
-        item.host_resolution_profile is not None
-        for item in loader.all_input_domains()
-    )
-
-
 class PipelineExecutor:
-    """Worker-local async DAG for prepared and config-sourced runtime payloads."""
+    """Worker-local async DAG for validated prepared assignments."""
 
     def __init__(
         self,
         config: dict[str, Any],
         *,
-        prepared_metadata: dict[str, Any] | None = None,
+        prepared_metadata: PreparedRuntimeMetadata,
     ) -> None:
         validate_worker_runtime_payload(config)
         self._input_context = RuntimeInputContext(
             config=config,
             prepared_metadata=prepared_metadata,
         )
-        self._loader = RuntimeItemLoader(
-            config=config,
-            prepared_metadata=prepared_metadata,
-        )
+        self._loader = RuntimeItemLoader(prepared_metadata=prepared_metadata)
         cache_payload = runtime_cache_payload(config)
         cache_file = str(cache_payload.get("cache_file", "")).strip()
         cache_path = Path(cache_file)
@@ -376,13 +354,10 @@ class PipelineExecutor:
         self._stage_settings = RuntimeStageSettings(
             concurrency=stage_concurrency,
             adaptive=concurrency_settings,
-            dns_capacity_groups=_runtime_dns_capacity_groups(
-                config,
-                prepared_metadata=prepared_metadata,
-            ),
-            host_resolution_stage_enabled=_runtime_host_resolution_stage_enabled(
-                config,
-                prepared_metadata=prepared_metadata,
+            dns_capacity_groups=discover_dns_capacity_groups(self._loader),
+            host_resolution_stage_enabled=any(
+                item.host_resolution_profile is not None
+                for item in self._loader.all_input_domains()
             ),
         )
         self._dns_executors = RuntimeDNSExecutors(
@@ -418,8 +393,8 @@ class PipelineExecutor:
         return self._input_context.config
 
     @property
-    def prepared_metadata(self) -> dict[str, Any] | None:
-        """Return optional prepared worker metadata."""
+    def prepared_metadata(self) -> PreparedRuntimeMetadata:
+        """Return validated prepared worker metadata."""
         return self._input_context.prepared_metadata
 
     @property
@@ -452,7 +427,7 @@ class PipelineExecutor:
         cls,
         runtime_config: dict[str, Any],
         *,
-        prepared_metadata: dict[str, Any] | None = None,
+        prepared_metadata: PreparedRuntimeMetadata,
     ) -> "PipelineExecutor":
         """Build a runtime from a manifest-owned payload."""
         return cls(
@@ -469,7 +444,7 @@ class PipelineExecutor:
         self._dns_executors.close()
 
     async def lookup_delegation_root(
-        self, delegation_profile: dict[str, Any], registrable_domain: str
+        self, delegation_profile: Mapping[str, Any], registrable_domain: str
     ) -> DelegationResult:
         """Run or join one root-level delegation lookup."""
         checker_factory = RuntimeDNSCheckerFactory(
@@ -743,7 +718,7 @@ class PipelineExecutor:
             "host_resolution_concurrency=%d ip_location_concurrency=%d adaptive=%s "
             "delegation_cap=%d host_resolution_cap=%d "
             "supervisor_interval_seconds=%.3f pressure_window_seconds=%.3f "
-            "queue_pressure_ratio=%.3f prepared_metadata=%s",
+            "queue_pressure_ratio=%.3f",
             self.stage_concurrency.delegation,
             self.stage_concurrency.host_resolution,
             self.stage_concurrency.ip_location,
@@ -753,7 +728,6 @@ class PipelineExecutor:
             self.concurrency_settings.timing.supervisor_interval_seconds,
             self.concurrency_settings.timing.pressure_window_seconds,
             self.concurrency_settings.scale.queue_pressure_ratio,
-            self.prepared_metadata is not None,
         )
 
     async def _start_runtime_tasks(
@@ -964,7 +938,7 @@ class PipelineExecutor:
         await self._stop_cache_writers(self.cache_bundle, tasks.cache_tasks)
 
     async def run_async(self) -> int:
-        """Run the prepared or config-sourced pipeline through async stage queues."""
+        """Run the prepared assignments through async stage queues."""
         queue_bundle = RuntimeQueueSet.create()
         self._log_run_start()
         tasks = await self._start_runtime_tasks(queue_bundle)
@@ -990,8 +964,8 @@ class PipelineExecutor:
 async def run_prepared_pipeline_async(
     runtime_config: dict[str, Any],
     *,
+    prepared_metadata: PreparedRuntimeMetadata,
     max_runtime_seconds: float | None = None,
-    prepared_metadata: dict[str, Any] | None = None,
 ) -> int:
     """Run one workflow-owned runtime payload."""
     runtime = PipelineExecutor.from_runtime_payload(

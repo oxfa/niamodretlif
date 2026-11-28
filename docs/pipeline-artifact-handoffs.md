@@ -19,8 +19,7 @@ The existing `prepare_run` job creates all worker manifests and uploads the comb
 Create one artifact named `workflow-internal-combined-worker-inputs-<batch_id>`. Its successful-run contents include the exact worker-input members for every configured worker ID, including workers with empty assignments. Preserve each per-worker manifest at its canonical path:
 
 ```text
-.workflow_state/batches/<batch_id>/workers/<worker_id>/runtime-config.yaml
-.workflow_state/batches/<batch_id>/workers/<worker_id>/assigned-roots.csv
+.workflow_state/batches/<batch_id>/workers/<worker_id>/runtime-config.json
 .workflow_state/batches/<batch_id>/workers/<worker_id>/worker-identity.json
 ```
 
@@ -28,7 +27,7 @@ This archive is the prepare-to-workers handoff. Each runtime worker selects its 
 
 ### Prepare to workers: one artifact, N assignments
 
-Each runtime worker downloads `workflow-internal-combined-worker-inputs-<batch_id>`, then restores only `.tmp/combined-worker-inputs/<worker_id>`. The restore command checks the batch and worker identity from `worker-identity.json` and copies only that worker's three declared members to canonical paths. The runtime worker does not receive source-item mappings or another worker's runtime configuration as runtime inputs, even though those other worker directories are present in the downloaded archive. This is a runtime-routing boundary: the runner has downloaded the full archive, so artifact names do not provide per-worker authorization.
+Each runtime worker downloads `workflow-internal-combined-worker-inputs-<batch_id>` and restores its own payload from `.tmp/combined-worker-inputs/<worker_id>`. Before copying the two JSON members to their canonical paths, restore checks the batch and worker IDs in both files and the configuration name in `runtime-config.json`. The worker opens only its own assignment and effective profiles. The runner has downloaded the full archive, so artifact names do not provide per-worker authorization. See the [Prepare to Worker JSON manifest contract](prepare-to-worker-json-manifest-design.md) for the payload and validation rules.
 
 ### Prepare to aggregator: one artifact
 
@@ -83,7 +82,9 @@ The current implementation already has `WorkflowStatePathLayout`, `PathLayout.wo
 
 Each directional layout owns the exact member list for its logical handoff. For prepare-to-workers, the layout exposes a per-worker member list: prepare stages the exact union for all configured IDs into the combined worker-input archive, and each runtime worker restores only the list for its own `worker_id`. A member records its source path and archive-relative path; it does not carry an artifact name or upload settings.
 
-The prepare-to-worker member list contains `runtime-config.yaml`, `assigned-roots.csv`, and `worker-identity.json`; restore validates the YAML and JSON identities before copying any member. The prepare-to-aggregate layout carries `output-config.yaml`, worker IDs, manual domains, prepare review/terminal rows, source formats, source-line index, source archives, diagnostics, source-item records/index/diagnostics; only the source-input directory may be absent when there are no sources. Current worker result paths use `worker-results/.../handoff-state.yaml` and status `.yaml`, not the former plan's `workers/.../worker-aggregate-manifest.json` and status `.json` names.
+The prepare-to-worker layout declares the two JSON files listed above.
+
+The prepare-to-aggregate layout carries `output-config.yaml`, worker IDs, manual domains, prepare review/terminal rows, source formats, source-line index, source archives, diagnostics, source-item records/index/diagnostics; only the source-input directory may be absent when there are no sources. Current worker result paths use `worker-results/.../handoff-state.yaml` and status `.yaml`, not the former plan's `workers/.../worker-aggregate-manifest.json` and status `.json` names.
 
 Compose the directional layouts with the shared workflow-state and output layouts. Do not inherit the broad workflow-state API into each directional layout. `OutputPathLayout` already owns the preparation validation/batch log and worker cache-log paths needed by the member lists.
 

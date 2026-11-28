@@ -74,7 +74,7 @@ def _write_prepare_worker_fixture(
 ) -> None:
     """Write a minimal prepare-to-worker archive with a known config name."""
     state = PathLayout(archive).workflow_state
-    write_yaml(
+    write_json(
         state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id),
         {
             "batch_id": batch_id,
@@ -147,13 +147,19 @@ def test_worker_restore_cli_checks_configuration_identity(
     result = subprocess.run(
         invocation, cwd=project, capture_output=True, text=True, check=False
     )
-    restored = PathLayout(state_root).workflow_state.prepare_worker_config_path(
-        batch_id=batch_id, worker_id=worker_id
-    )
+    worker_path = Path(".workflow_state") / "batches" / batch_id / "workers" / worker_id
     assert (result.returncode == 0) is succeeds, result.stderr
-    assert restored.is_file() is succeeds
-    if not succeeds:
+    if succeeds:
+        restored = state_root / worker_path
+        assert {member.name for member in restored.iterdir()} == {
+            "runtime-config.json",
+            "worker-identity.json",
+        }
+        for member in restored.iterdir():
+            assert member.read_bytes() == (archive / worker_path / member.name).read_bytes()
+    else:
         assert "handoff identity mismatch" in result.stderr
+        assert not state_root.exists()
 
     workflow = (
         project / ".github/workflows/_pipeline-run-batch.yml"

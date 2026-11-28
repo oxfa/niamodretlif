@@ -25,7 +25,7 @@ from domain_pipeline.pipeline_run.handoffs import (
     stage_worker_inputs,
     validate_worker_inputs,
 )
-from domain_pipeline.prepare.batch_writer import PreparedBatchWriter
+from domain_pipeline.prepare.batch_writer import PreparedBatch, PreparedBatchWriter
 from domain_pipeline.prepare.config.loader import (
     load_config_without_runtime_credentials,
 )
@@ -77,17 +77,16 @@ def _assert_json_artifacts_match_declared_members(
     assert actual == expected
 
 
-def _prepare_and_restore(tmp_path: Path) -> None:
-    """Write and stage actual preparation outputs."""
-    prepare_root = tmp_path / "prepare"
-    worker_root = tmp_path / "worker"
-    aggregate_root = tmp_path / "aggregate"
-    config = load_config_without_runtime_credentials(Path("config/block.yaml"))
+def _write_prepared_batch(
+    prepare_root: Path, *, config_name: str, worker_ids: list[str]
+) -> PreparedBatch:
+    """Write preparation output for two local source lines."""
+    config = load_config_without_runtime_credentials(Path("config") / f"{config_name}.yaml")
     source_config = config["sources"][0]
     source = SourceJob(
         source_id=source_config["id"],
         input_label="local fixture",
-        output_stem="block",
+        output_stem=config_name,
         lines=["||ads.example.com^\n", "||bad.example.net^\n"],
         config=source_config,
     )
@@ -112,7 +111,7 @@ def _prepare_and_restore(tmp_path: Path) -> None:
     prepared_inputs = PreparedInputSet(
         config=config,
         source_jobs_by_id=source_jobs_by_id,
-        parsed_source_entry_count=2,
+        parsed_source_entry_count=len(source_entries),
         entries_by_source=entries_by_source,
         manual_routing_by_host={},
         root_plans=root_plans,
@@ -121,9 +120,18 @@ def _prepare_and_restore(tmp_path: Path) -> None:
     )
     writer = PreparedBatchWriter()
     prepared = writer.from_prepared_inputs(
-        prepared_inputs=prepared_inputs, worker_ids=[WORKER], batch_id=BATCH
+        prepared_inputs=prepared_inputs, worker_ids=worker_ids, batch_id=BATCH
     )
     writer.write(prepared, state_root=prepare_root)
+    return prepared
+
+
+def _prepare_and_restore(tmp_path: Path) -> None:
+    """Write and stage actual preparation outputs."""
+    prepare_root = tmp_path / "prepare"
+    worker_root = tmp_path / "worker"
+    aggregate_root = tmp_path / "aggregate"
+    _write_prepared_batch(prepare_root, config_name="block", worker_ids=[WORKER])
 
     worker_staging = tmp_path / "worker-stage"
     worker_ids = json.dumps([WORKER])
@@ -171,6 +179,83 @@ def _prepare_and_restore(tmp_path: Path) -> None:
     restore_handoff(
         state_root=aggregate_root, source=aggregate_staging, request=aggregate_request
     )
+
+
+def test_prepare_worker_stages_and_restores_populated_and_empty_assignments(
+    tmp_path: Path,
+) -> None:
+    """Round-trip each worker's two JSON members into its own state root."""
+    assignments = {
+        WORKER: {"example.com": "ads.example.com"},
+        "worker-2": {"example.net": "bad.example.net"},
+        "worker-3": {},
+    }
+    prepare_root = tmp_path / "prepare"
+    staging = tmp_path / "worker-stage"
+    config_name = "direct"
+    prepared = _write_prepared_batch(
+        prepare_root, config_name=config_name, worker_ids=list(assignments)
+    )
+    manifests = {worker.worker_id: worker.manifest for worker in prepared.worker_manifests}
+    worker_ids = json.dumps(list(assignments))
+    stage_worker_inputs(
+        state_root=prepare_root,
+        batch_id=BATCH,
+        worker_ids_json=worker_ids,
+        destination=staging,
+    )
+    validate_worker_inputs(
+        state_root=prepare_root,
+        batch_id=BATCH,
+        worker_ids_json=worker_ids,
+        destination=staging,
+    )
+
+    def files(root: Path) -> dict[Path, bytes]:
+        return {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    workers_path = Path(".workflow_state") / "batches" / BATCH / "workers"
+    member_names = ("runtime-config.json", "worker-identity.json")
+    produced = files(prepare_root / workers_path)
+    assert set(produced) == {
+        Path(worker_id) / name for worker_id in assignments for name in member_names
+    }
+    for worker_id, roots in assignments.items():
+        members = {
+            workers_path / worker_id / name: produced[Path(worker_id) / name]
+            for name in member_names
+        }
+        source = staging / worker_id
+        restored = tmp_path / "restored" / worker_id
+        assert files(source) == members
+        restore_handoff(
+            state_root=restored,
+            source=source,
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id=worker_id, config_name=config_name
+            ),
+        )
+        assert files(restored) == members
+        manifest = load_prepare_worker_manifest_for_worker(
+            batch_id=BATCH, worker_id=worker_id, state_root=restored
+        )
+        assert manifest == manifests[worker_id]
+        metadata = manifest.prepared_metadata
+        assert set(metadata.delegation_roots) == set(roots)
+        assert len(metadata.profiles.delegation) == len(roots)
+        assert len(metadata.profiles.host_resolution) == len(roots)
+        assert len(metadata.profiles.ip_location) == len(roots)
+        for root, input_domain in roots.items():
+            root_work = metadata.delegation_roots[root]
+            assert root_work.delegation_profile_id == 0
+            assert set(root_work.input_domains) == {input_domain}
+            input_work = root_work.input_domains[input_domain]
+            assert input_work.host_resolution_profile_id == 0
+            assert input_work.ip_location_profile_id == 0
 
 
 def _domain_results_fixture() -> dict[str, list[dict]]:
@@ -279,16 +364,15 @@ def test_prepare_worker_loader_rejects_unknown_fields(
     paths = PathLayout(worker_root).workflow_state
     if member == "runtime-config":
         path = paths.prepare_worker_config_path(batch_id=BATCH, worker_id=WORKER)
-        payload = read_yaml(path)
-        payload["unexpected"] = True
-        write_yaml(path, payload)
+        expected_error = "invalid prepare worker configuration"
     else:
         path = paths.prepare_worker_identity_path(batch_id=BATCH, worker_id=WORKER)
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["unexpected"] = True
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        expected_error = "prepare worker identity record mismatch"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["unexpected"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=expected_error):
         load_prepare_worker_manifest_for_worker(
             batch_id=BATCH, worker_id=WORKER, state_root=worker_root
         )
