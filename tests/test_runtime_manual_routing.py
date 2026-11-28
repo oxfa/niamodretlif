@@ -1,8 +1,9 @@
-"""Tests for manual routing behavior in the worker runtime."""
+"""Tests for source-blind per-input-domain worker routing."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.routing.policies import DelegationRoutingPolicy, ManualRoutingPolicy
@@ -12,12 +13,11 @@ from domain_pipeline.worker.delegation.lookup import (
     DelegationResult,
     DelegationSoaEvidence,
 )
+from domain_pipeline.worker.host_resolution.lookup import selected_host_resolution_names
 from domain_pipeline.worker.runtime.contracts import (
-    ParsedHostItem,
+    ParsedInputDomain,
     RuntimeItemPosition,
     RuntimeManualRouting,
-    RuntimeOutputSource,
-    WorkerSourceContext,
 )
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 from domain_pipeline.worker.runtime.results import CompletedResultRequest
@@ -29,42 +29,48 @@ class DummyRuntime:
 
     def __init__(self) -> None:
         self.requests: list[CompletedResultRequest] = []
+        self.busy_state = DummyBusyState()
 
     async def put_completed(
         self, queue_bundle: RuntimeQueueSet, request: CompletedResultRequest
     ) -> None:
-        """Record a completed request without using the downstream queues."""
+        """Record a completed request without using downstream queues."""
         _ = queue_bundle
         self.requests.append(request)
 
-    def completed_requests(self) -> list[CompletedResultRequest]:
-        """Return requests captured during the test."""
-        return self.requests
+
+class DummyBusyState:
+    """Provide no-op tracking for stage queue transitions."""
+
+    @asynccontextmanager
+    async def track(self, reason: object):
+        _ = reason
+        yield
 
 
 def _parsed(
-    *, manually_selected_for_filtered: bool = False, manually_added: bool = False
-) -> ParsedHostItem:
-    """Build a parsed host with the requested manual-routing flags."""
-    return ParsedHostItem(
-        source_context=WorkerSourceContext(
-            source_id="source",
-            input_label="input",
-            output_stem="output",
-            config={"host_resolution": {"enabled": False}},
-        ),
-        entry=DomainEntry(host="www.example.com", registrable_domain="example.com"),
-        position=RuntimeItemPosition(sequence=1, total=1),
-        output_source=RuntimeOutputSource(source_id="source", input_label="input"),
+    *,
+    input_domain: str = "www.example.com",
+    manually_selected_for_filtered: bool = False,
+    manually_added: bool = False,
+    host_resolution_enabled: bool = False,
+) -> ParsedInputDomain:
+    """Build one input-domain work item with explicit routing settings."""
+    return ParsedInputDomain(
+        entry=DomainEntry(host=input_domain, registrable_domain="example.com"),
+        position=RuntimeItemPosition(sequence=0, total=1),
         manual_routing=RuntimeManualRouting(
             manually_selected_for_filtered=manually_selected_for_filtered,
             manually_added=manually_added,
         ),
+        host_resolution_profile={"resolve_www_for_registrable_domain": False}
+        if host_resolution_enabled
+        else None,
     )
 
 
 def _actionable_delegation() -> DelegationResult:
-    """Return a delegation result eligible for manual routing."""
+    """Return a root delegation result eligible for downstream routing."""
     return DelegationResult(
         domain="example.com",
         dns=DelegationDnsEvidence(ns_records_exist=True),
@@ -73,8 +79,8 @@ def _actionable_delegation() -> DelegationResult:
     )
 
 
-def _non_actionable_delegation() -> DelegationResult:
-    """Return a delegation result that must follow its normal review route."""
+def _review_delegation() -> DelegationResult:
+    """Return a root result that must take the review route."""
     return DelegationResult(
         domain="example.com",
         dns=DelegationDnsEvidence(ns_lookup_error=True),
@@ -82,60 +88,108 @@ def _non_actionable_delegation() -> DelegationResult:
     )
 
 
-def test_selected_for_filtered_does_not_override_non_actionable_delegation() -> None:
-    """A manual selection cannot override a non-actionable delegation result."""
+def test_manual_selection_does_not_override_root_review_outcome() -> None:
     runtime = DummyRuntime()
     stage = DelegationStage(runtime)
-    delegation_result = _non_actionable_delegation()
-    parsed = _parsed(manually_selected_for_filtered=True)
+    result = _review_delegation()
 
-    asyncio.run(stage.route(RuntimeQueueSet.create(), parsed, delegation_result))
-
-    assert len(runtime.completed_requests()) == 1
-    request = runtime.completed_requests()[0]
-    assert request.route_transition == DelegationRoutingPolicy().for_result(
-        delegation_result
-    )
-    assert request.route_transition.route_code == RouteCode.DELEGATION_TO_REVIEW_NS_LOOKUP_ERROR
-
-
-def test_manually_added_does_not_override_non_actionable_delegation() -> None:
-    """Manual additions cannot override a non-actionable delegation result."""
-    runtime = DummyRuntime()
-    stage = DelegationStage(runtime)
-    delegation_result = _non_actionable_delegation()
-    parsed = _parsed(manually_added=True)
-
-    asyncio.run(stage.route(RuntimeQueueSet.create(), parsed, delegation_result))
-
-    assert len(runtime.completed_requests()) == 1
-    request = runtime.completed_requests()[0]
-    assert request.route_transition == DelegationRoutingPolicy().for_result(
-        delegation_result
-    )
-    assert request.route_transition.route_code == RouteCode.DELEGATION_TO_REVIEW_NS_LOOKUP_ERROR
-
-
-def test_manual_routes_apply_only_when_delegation_is_actionable() -> None:
-    """Manual routing transitions apply to actionable delegation results."""
-    runtime = DummyRuntime()
-    stage = DelegationStage(runtime)
-    parsed_selected = _parsed(manually_selected_for_filtered=True)
-    parsed_added = _parsed(manually_added=True)
-
-    queue_bundle = RuntimeQueueSet.create()
     asyncio.run(
-        stage.route(queue_bundle, parsed_selected, _actionable_delegation())
+        stage.route(
+            RuntimeQueueSet.create(),
+            _parsed(manually_selected_for_filtered=True),
+            result,
+        )
     )
-    asyncio.run(stage.route(queue_bundle, parsed_added, _actionable_delegation()))
 
-    requests = runtime.completed_requests()
-    assert len(requests) == 2
-    assert (
-        requests[0].route_transition
-        == ManualRoutingPolicy().selected_for_filtered()
+    assert len(runtime.requests) == 1
+    assert runtime.requests[0].route_transition == DelegationRoutingPolicy().for_result(
+        result
     )
     assert (
-        requests[1].route_transition
-        == ManualRoutingPolicy().manually_added_actionable()
+        runtime.requests[0].route_transition.route_code
+        == RouteCode.DELEGATION_TO_REVIEW_NS_LOOKUP_ERROR
     )
+
+
+def test_manual_addition_does_not_override_root_review_outcome() -> None:
+    runtime = DummyRuntime()
+    stage = DelegationStage(runtime)
+    result = _review_delegation()
+
+    asyncio.run(
+        stage.route(
+            RuntimeQueueSet.create(), _parsed(manually_added=True), result
+        )
+    )
+
+    assert len(runtime.requests) == 1
+    assert runtime.requests[0].route_transition == DelegationRoutingPolicy().for_result(
+        result
+    )
+
+
+def test_manual_routes_apply_after_actionable_root_outcome() -> None:
+    runtime = DummyRuntime()
+    stage = DelegationStage(runtime)
+    queue_bundle = RuntimeQueueSet.create()
+
+    asyncio.run(
+        stage.route(
+            queue_bundle,
+            _parsed(manually_selected_for_filtered=True),
+            _actionable_delegation(),
+        )
+    )
+    asyncio.run(
+        stage.route(
+            queue_bundle,
+            _parsed(manually_added=True),
+            _actionable_delegation(),
+        )
+    )
+
+    assert [request.route_transition for request in runtime.requests] == [
+        ManualRoutingPolicy().selected_for_filtered(),
+        ManualRoutingPolicy().manually_added_actionable(),
+    ]
+
+
+def test_host_disabled_route_is_filtered_and_host_enabled_is_queued() -> None:
+    runtime = DummyRuntime()
+    stage = DelegationStage(runtime)
+    queue_bundle = RuntimeQueueSet.create()
+    result = _actionable_delegation()
+
+    asyncio.run(stage.route(queue_bundle, _parsed(), result))
+    asyncio.run(
+        stage.route(
+            queue_bundle,
+            _parsed(host_resolution_enabled=True),
+            result,
+        )
+    )
+
+    assert len(runtime.requests) == 1
+    assert runtime.requests[0].route_transition.route_code == (
+        RouteCode.HOST_RESOLUTION_TO_FILTERED_SKIPPED
+    )
+    queued = queue_bundle.delegation_to_host_resolution.get_nowait()
+    assert queued.parsed.entry.host == "www.example.com"
+
+
+def test_selected_dns_names_follow_root_only_www_policy() -> None:
+    assert selected_host_resolution_names(
+        input_domain="example.com",
+        registrable_domain="example.com",
+        resolve_www_for_registrable_domain=True,
+    ) == ["example.com", "www.example.com"]
+    assert selected_host_resolution_names(
+        input_domain="example.com",
+        registrable_domain="example.com",
+        resolve_www_for_registrable_domain=False,
+    ) == ["example.com"]
+    assert selected_host_resolution_names(
+        input_domain="ads.example.com",
+        registrable_domain="example.com",
+        resolve_www_for_registrable_domain=True,
+    ) == ["ads.example.com"]

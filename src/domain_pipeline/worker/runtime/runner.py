@@ -14,7 +14,6 @@ from typing import Any, Iterator
 from domain_pipeline.prepare.prepare_to_worker_manifest import (
     load_prepare_worker_manifest_for_worker,
 )
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.ip_location.providers import FatalIPLocationCredentialError
 from domain_pipeline.worker.runtime.executor import run_prepared_pipeline_async
 from domain_pipeline.worker.status.lifecycle import (
@@ -93,7 +92,7 @@ class WorkerBatchRunner:
             )
         except Exception as exc:
             error_reason = self._redact_error_reason(
-                str(exc).strip() or exc.__class__.__name__, None
+                str(exc).strip() or exc.__class__.__name__
             )
             log.error(
                 "Worker %s manifest loading failed: %s",
@@ -103,7 +102,6 @@ class WorkerBatchRunner:
             status_path, status_recording_error = self._record_failure_best_effort(
                 request=request,
                 failure_reason=error_reason,
-                prepare_manifest=None,
             )
             return self._failure_payload(
                 request,
@@ -158,7 +156,7 @@ class WorkerBatchRunner:
             )
         except Exception as exc:
             reason = self._redact_error_reason(
-                str(exc).strip() or exc.__class__.__name__, prepare_manifest
+                str(exc).strip() or exc.__class__.__name__
             )
             logging.getLogger(__name__).error(
                 "Worker %s setup failed: %s", request.worker_id, reason
@@ -166,7 +164,6 @@ class WorkerBatchRunner:
             status_path, status_recording_error = self._record_failure_best_effort(
                 request=request,
                 failure_reason=reason,
-                prepare_manifest=prepare_manifest,
             )
             if log_path is not None:
                 self._append_worker_log_best_effort(
@@ -179,7 +176,6 @@ class WorkerBatchRunner:
                 status_recording_error=status_recording_error,
             )
         payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": request.batch_id,
             "worker_id": request.worker_id,
             "overall_conclusion": outcome.overall_conclusion,
@@ -202,7 +198,6 @@ class WorkerBatchRunner:
     ) -> dict[str, Any]:
         """Return one consistently shaped failed worker result."""
         payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": request.batch_id,
             "worker_id": request.worker_id,
             "overall_conclusion": STATUS_FAILURE,
@@ -232,7 +227,7 @@ class WorkerBatchRunner:
                     )
                 except Exception as exc:
                     error_reason = self._redact_error_reason(
-                        str(exc).strip() or exc.__class__.__name__, prepare_manifest
+                        str(exc).strip() or exc.__class__.__name__
                     )
                     logging.getLogger(__name__).error(
                         "Worker %s failed: %s", request.worker_id, error_reason
@@ -240,11 +235,10 @@ class WorkerBatchRunner:
                     _, status_recording_error = self._record_failure_best_effort(
                         request=request,
                         failure_reason=error_reason,
-                        prepare_manifest=prepare_manifest,
                     )
         except Exception as exc:
             capture_reason = self._redact_error_reason(
-                str(exc).strip() or exc.__class__.__name__, prepare_manifest
+                str(exc).strip() or exc.__class__.__name__
             )
             if error_reason is None:
                 error_reason = capture_reason
@@ -254,7 +248,6 @@ class WorkerBatchRunner:
                 _, status_recording_error = self._record_failure_best_effort(
                     request=request,
                     failure_reason=error_reason,
-                    prepare_manifest=prepare_manifest,
                 )
                 self._append_worker_log_best_effort(
                     log_path,
@@ -313,17 +306,12 @@ class WorkerBatchRunner:
             )
 
     @staticmethod
-    def _redact_error_reason(reason: str, prepare_manifest: Any | None) -> str:
+    def _redact_error_reason(reason: str) -> str:
         """Remove configured IP-location credentials from worker failure text."""
         redacted = reason
         env_token = os.environ.get("IP_LOCATION_IPINFO_TOKEN", "").strip()
         if env_token:
             redacted = redacted.replace(env_token, "[REDACTED]")
-        if prepare_manifest is not None:
-            for source in prepare_manifest.runtime_spec.sources:
-                token = str(source.ip_location.token).strip()
-                if token:
-                    redacted = redacted.replace(token, "[REDACTED]")
         return redacted
 
     def _record_failure_best_effort(
@@ -331,7 +319,6 @@ class WorkerBatchRunner:
         *,
         request: WorkerRunRequest,
         failure_reason: str,
-        prepare_manifest: Any | None,
     ) -> tuple[str | None, str | None]:
         """Preserve the execution cause when failure-status persistence also fails."""
         try:
@@ -348,7 +335,7 @@ class WorkerBatchRunner:
             return status_path, None
         except Exception as exc:
             status_error = self._redact_error_reason(
-                str(exc).strip() or exc.__class__.__name__, prepare_manifest
+                str(exc).strip() or exc.__class__.__name__
             )
             logging.getLogger(__name__).error(
                 "Worker %s could not record failure status: %s",
@@ -389,7 +376,7 @@ class WorkerBatchRunner:
         """Remove stale worker-local sidecars while keeping the handoff stub."""
         cleanup_paths = [
             worker_paths["review"].parent.parent,
-            worker_paths["terminal_rows"].parent,
+            worker_paths["domain_results"].parent,
             worker_paths["cache"].parent,
         ]
         for cleanup_path in cleanup_paths:

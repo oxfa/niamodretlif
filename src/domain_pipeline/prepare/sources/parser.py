@@ -533,8 +533,6 @@ class AdblockFormatHandler(SourceFormatHandler):
     def _literal_request_host(
         pattern: str, syntax: DomainSyntax
     ) -> SourceTargetCandidate | None:
-        if syntax.looks_like_domain(pattern):
-            return SourceTargetCandidate(host=pattern, role="request_host")
         authority_pattern = AdblockFormatHandler._anchored_host_pattern(pattern)
         if authority_pattern is None:
             return None

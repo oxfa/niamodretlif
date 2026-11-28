@@ -36,10 +36,10 @@ import yaml
 
 from domain_pipeline.handoff_io import ensure_csv_field_capacity, validate_yaml_tree
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     validate_worker_handoff_state,
+    parse_worker_domain_results_jsonl_text,
 )
 
 API_VERSION = "2026-03-10"
@@ -361,13 +361,6 @@ def _validate_worker_documents(
             or identity.get("worker_id") != worker_id
         ):
             raise CorrelationError("worker state identity mismatch")
-        format_version = identity.get("automation_format_version")
-        if (
-            not isinstance(format_version, int)
-            or isinstance(format_version, bool)
-            or format_version != PIPELINE_RUN_FORMAT_VERSION
-        ):
-            raise CorrelationError("worker state format mismatch")
         identities[name] = identity
     if identities[status_path].get("conclusion") != "success":
         raise CorrelationError("worker status is not successful")
@@ -413,7 +406,7 @@ def _validate_finalized_contents(
         paths.worker_handoff_review_path(
             batch_id=batch_id, worker_id=worker_id
         ).as_posix(),
-        paths.worker_handoff_terminal_path(
+        paths.worker_handoff_domain_results_path(
             batch_id=batch_id, worker_id=worker_id
         ).as_posix(),
     }
@@ -426,7 +419,7 @@ def _validate_finalized_contents(
         raise CorrelationError("unexpected worker cache")
     if not required <= contents.keys():
         raise CorrelationError("incomplete finalized worker handoff")
-    terminal_path = paths.worker_handoff_terminal_path(
+    domain_results_path = paths.worker_handoff_domain_results_path(
         batch_id=batch_id, worker_id=worker_id
     ).as_posix()
     review_path = paths.worker_handoff_review_path(
@@ -436,12 +429,9 @@ def _validate_finalized_contents(
         batch_id=batch_id, worker_id=worker_id
     ).as_posix()
     try:
-        terminal = yaml.safe_load(contents[terminal_path].decode("utf-8"))
-        validate_yaml_tree(terminal)
-        if not isinstance(terminal, list) or any(
-            not isinstance(row, dict) for row in terminal
-        ):
-            raise ValueError("terminal rows must be a sequence of mappings")
+        parse_worker_domain_results_jsonl_text(
+            contents[domain_results_path].decode("utf-8")
+        )
         ensure_csv_field_capacity(len(contents[review_path]))
         review = csv.DictReader(
             io.StringIO(contents[review_path].decode("utf-8"), newline=""),

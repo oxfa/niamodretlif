@@ -578,3 +578,16 @@ def combine_host_resolution_results(
         from_cache=all(result.from_cache for result in results),
         detail=detail,
     )
+
+
+def selected_host_resolution_names(
+    *,
+    input_domain: str,
+    registrable_domain: str,
+    resolve_www_for_registrable_domain: bool,
+) -> list[str]:
+    """Return the exact DNS names selected for one input-domain assignment."""
+    names = [input_domain]
+    if input_domain == registrable_domain and resolve_www_for_registrable_domain:
+        names.append(f"www.{registrable_domain}")
+    return list(dict.fromkeys(names))

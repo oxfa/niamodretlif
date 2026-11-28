@@ -14,7 +14,6 @@ import yaml
 from domain_pipeline.aggregate.runner import AggregateBatchRunner
 from domain_pipeline.aggregate.cache_merge import AggregateCacheMerger
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     load_worker_aggregate_manifest_for_worker,
@@ -77,7 +76,6 @@ def successful_result_members(
     return {
         paths.worker_aggregate_manifest_path(batch_id=batch, worker_id=worker).as_posix(): yaml.safe_dump(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch,
                 "worker_id": worker,
                 "handoff_finalized": True,
@@ -87,7 +85,6 @@ def successful_result_members(
         ).encode(),
         paths.worker_status_path(batch_id=batch, worker_id=worker).as_posix(): yaml.safe_dump(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch,
                 "worker_id": worker,
                 "conclusion": "success",
@@ -99,8 +96,10 @@ def successful_result_members(
         paths.worker_handoff_review_path(batch_id=batch, worker_id=worker).as_posix(): (
             ",".join(REVIEW_OUTPUT_COLUMNS) + "\n"
         ).encode(),
-        paths.worker_handoff_terminal_path(batch_id=batch, worker_id=worker).as_posix(): (
-            b"---\n[]\n"
+        paths.worker_handoff_domain_results_path(
+            batch_id=batch, worker_id=worker
+        ).as_posix(): (
+            b'{"registrable_domain_results":[],"input_domain_results":[]}\n'
         ),
         f".debug_artifacts/workers/{batch}/{worker}/logs/worker.log": b"worker log",
     }
@@ -400,7 +399,9 @@ class CorrelationTests(unittest.TestCase):
             api.latest_jobs(RUN)
 
 
-@pytest.mark.parametrize("missing", ["unactionable", "review", "terminal", "cache"])
+@pytest.mark.parametrize(
+    "missing", ["unactionable", "review", "domain_results", "cache"]
+)
 def test_finalized_archive_missing_declared_data_is_incomplete(missing: str) -> None:
     """Finalized handoffs must include each direct result and declared cache."""
     paths = PathLayout(Path(".")).workflow_state
@@ -425,7 +426,7 @@ def test_finalized_archive_missing_declared_data_is_incomplete(missing: str) -> 
         "review": paths.worker_handoff_review_path(
             batch_id=BATCH, worker_id=WORKER
         ),
-        "terminal": paths.worker_handoff_terminal_path(
+        "domain_results": paths.worker_handoff_domain_results_path(
             batch_id=BATCH, worker_id=WORKER
         ),
         "cache": paths.worker_handoff_cache_path(
@@ -446,7 +447,6 @@ def test_status_requires_valid_conclusion(conclusion: object) -> None:
     members = successful_result_members()
     members[path.as_posix()] = yaml.safe_dump(
         {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": BATCH,
             "worker_id": WORKER,
             "conclusion": conclusion,
@@ -459,14 +459,12 @@ def test_status_requires_valid_conclusion(conclusion: object) -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"automation_format_version": PIPELINE_RUN_FORMAT_VERSION - 1},
-        {"automation_format_version": PIPELINE_RUN_FORMAT_VERSION + 1},
         {"worker_id": "worker-02"},
         {"batch_id": "batch-123-attempt-2"},
     ],
 )
-def test_status_requires_current_identity_and_format(changes: dict) -> None:
-    """Status documents must match the active batch, worker, and format."""
+def test_status_requires_current_identity(changes: dict) -> None:
+    """Status documents must match the active batch and worker."""
     path = PathLayout(Path(".")).workflow_state.worker_status_path(
         batch_id=BATCH, worker_id=WORKER
     )
@@ -541,9 +539,12 @@ def test_complete_finalized_archive_with_cache_is_accepted(
 @pytest.mark.parametrize(
     ("member", "invalid"),
     [
-        ("terminal", b"---\n[broken\n"),
-        ("terminal", b"---\n- 42\n"),
-        ("terminal", b"---\n- date: 2020-01-01\n"),
+        ("domain_results", b"not-json\n"),
+        ("domain_results", b'{"registrable_domain_results":[]}\n'),
+        (
+            "domain_results",
+            b'{"registrable_domain_results":[],"input_domain_results":[],"unexpected":1}\n',
+        ),
         ("review", b"wrong,header\n"),
         ("review", (",".join(REVIEW_OUTPUT_COLUMNS) + "\nshort\n").encode()),
         (
@@ -563,7 +564,7 @@ def test_finalized_malformed_data_is_incomplete(member: str, invalid: bytes) -> 
     paths = PathLayout(Path(".")).workflow_state
     members = successful_result_members()
     member_path = {
-        "terminal": paths.worker_handoff_terminal_path(
+        "domain_results": paths.worker_handoff_domain_results_path(
             batch_id=BATCH, worker_id=WORKER
         ),
         "review": paths.worker_handoff_review_path(

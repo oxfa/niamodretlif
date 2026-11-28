@@ -36,6 +36,9 @@ REVIEW_OUTPUT_COLUMNS = (
     "ip_location_policy_status",
     "ip_location_policy_reason",
     "ip_location_provider",
+)
+PREPARATION_REVIEW_COLUMNS = (
+    *REVIEW_OUTPUT_COLUMNS,
     "source_id",
     "source_input_label",
 )
@@ -89,6 +92,11 @@ class ReviewOutputRow(TypedDict):
     ip_location_policy_status: str
     ip_location_policy_reason: str
     ip_location_provider: str
+
+
+class PreparationReviewOutputRow(ReviewOutputRow):
+    """Internal prepare review projection with retained source provenance."""
+
     source_id: str
     source_input_label: str
 
@@ -336,11 +344,22 @@ class ReviewRowProjector:
             "ip_location_policy_status": str(row.get("ip_location_policy_status", "")),
             "ip_location_policy_reason": str(row.get("ip_location_policy_reason", "")),
             "ip_location_provider": str(row.get("ip_location_provider", "")),
-            "source_id": str(row.get("source_id", "")),
-            "source_input_label": str(row.get("source_input_label", "")),
         }
         return projected
 
     def project_many(self, rows: Iterable[dict[str, Any]]) -> list[ReviewOutputRow]:
         """Project multiple raw terminal rows in input order."""
         return [self.project(row) for row in rows]
+
+
+class PreparationReviewRowProjector(ReviewRowProjector):
+    """Project an internal preparation review row with source provenance."""
+
+    def project(self, row: dict[str, Any]) -> PreparationReviewOutputRow:
+        """Retain source identifiers for the private prepare-to-aggregate handoff."""
+        projected = super().project(row)
+        return {
+            **projected,
+            "source_id": str(row.get("source_id", "")),
+            "source_input_label": str(row.get("source_input_label", "")),
+        }

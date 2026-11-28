@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from collections import defaultdict
 from typing import Any
 
 from domain_pipeline.prepare.sources.jobs import SourceJob
@@ -14,14 +13,30 @@ MANUALLY_ADDED_SOURCE_ID = "manually_added"
 
 
 @dataclasses.dataclass(frozen=True)
+class PreparedInputDomainPlan:
+    """Effective worker stages and manual routing for one input domain."""
+
+    host: str
+    manual_routing: "PreparedManualRouting"
+    host_resolution_profile: dict[str, Any] | None = None
+    ip_location_profile: dict[str, Any] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class PreparedRootPlan:
-    """Preparation-time delegation metadata for one registrable domain."""
+    """Source-blind worker work beneath one registrable domain."""
 
     registrable_domain: str
     status: str = "pending"
-    entry_count: int = 0
-    delegation_config_source_id: str = ""
-    delegation_behavior_fingerprint: str = ""
+    delegation_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
+    input_domains: dict[str, PreparedInputDomainPlan] = dataclasses.field(
+        default_factory=dict
+    )
+
+    @property
+    def entry_count(self) -> int:
+        """Return the unique input-domain count assigned beneath this root."""
+        return len(self.input_domains)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,8 +45,6 @@ class PreparedManualRouting:
 
     manually_selected_for_filtered: bool = False
     manually_added: bool = False
-    output_source_id: str | None = None
-    output_source_input_label: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -53,6 +66,12 @@ class PreparedInputSet:
     manual_routing_by_host: dict[str, PreparedManualRouting]
     root_plans: dict[str, PreparedRootPlan]
     preparation_outputs: PreparedOutputRows
+    source_ids_by_host: dict[str, tuple[str, ...]] = dataclasses.field(
+        default_factory=dict
+    )
+    manually_added_entries: dict[str, DomainEntry] = dataclasses.field(
+        default_factory=dict
+    )
     excluded_source_hosts: set[str] = dataclasses.field(default_factory=set)
     parsed_source_files: dict[str, ParsedSourceFile] = dataclasses.field(
         default_factory=dict
@@ -68,16 +87,3 @@ class PreparedInputSet:
         """Return prepare-owned terminal rows."""
         return self.preparation_outputs.terminal_rows
 
-    def split_entries_for_planning(
-        self,
-    ) -> tuple[dict[str, list[tuple[str, DomainEntry]]], list[tuple[str, DomainEntry]]]:
-        """Split prepared entries into delegation-root and public-suffix groups."""
-        root_entries: dict[str, list[tuple[str, DomainEntry]]] = defaultdict(list)
-        public_suffix_entries: list[tuple[str, DomainEntry]] = []
-        for source_id, entries in self.entries_by_source.items():
-            for entry in entries:
-                if entry.registrable_domain is None:
-                    public_suffix_entries.append((source_id, entry))
-                else:
-                    root_entries[entry.registrable_domain].append((source_id, entry))
-        return dict(root_entries), public_suffix_entries

@@ -280,7 +280,8 @@ jobs:
           ./src/pipeline_run.py handoff-restore \
             --state-root . --handoff prepare-worker \
             --batch-id "${{ needs.prepare_run.outputs.batch_id }}" \
-            --worker-id "${{ matrix.worker_id }}" --archive ".tmp/combined-worker-inputs/${{ matrix.worker_id }}"
+            --worker-id "${{ matrix.worker_id }}" --config-name "${{ inputs.config_name }}" \
+            --archive ".tmp/combined-worker-inputs/${{ matrix.worker_id }}"
       - name: Initialize worker statuses
         id: init
         continue-on-error: true

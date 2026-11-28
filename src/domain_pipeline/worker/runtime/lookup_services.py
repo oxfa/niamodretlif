@@ -64,10 +64,8 @@ class IpLocationCachePartition:
 
 def _ip_location_provider_token(ip_location_config: dict[str, Any]) -> str:
     """Return runtime-only IP-location token without persisting environment secrets."""
-    config_token = str(ip_location_config.get("token", "")).strip()
-    if config_token:
-        logger.debug("IpLocation provider token source=config")
-        return config_token
+    if "token" in ip_location_config:
+        raise ValueError("ip_location.token is unsupported; use the runtime environment")
     env_token = os.environ.get("IP_LOCATION_IPINFO_TOKEN", "").strip()
     logger.debug(
         "IpLocation provider token source=%s",

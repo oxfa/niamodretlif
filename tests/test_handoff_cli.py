@@ -1,4 +1,4 @@
-"""Check the workflow's aggregate handoff restore command."""
+"""Check workflow handoff restore identity through the actual CLI."""
 
 from pathlib import Path
 import subprocess
@@ -7,7 +7,6 @@ import pytest
 
 from domain_pipeline.handoff_io import write_csv, write_json, write_yaml
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 
 
@@ -17,7 +16,6 @@ def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
     write_yaml(
         state.prepare_aggregate_config_path(batch_id=batch_id),
         {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "config_name": "block",
             "excluded_source_hosts": [],
@@ -58,7 +56,6 @@ def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
     write_json(
         state.batch_source_item_index_path(batch_id=batch_id),
         {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "sources": [],
             "valid_source_items_by_registrable_domain": {},
@@ -70,6 +67,27 @@ def _write_prepare_aggregate_fixture(archive: Path, batch_id: str) -> None:
         batch_id=batch_id
     )
     source_item_diagnostics.write_text("", encoding="utf-8")
+
+
+def _write_prepare_worker_fixture(
+    archive: Path, *, batch_id: str, worker_id: str
+) -> None:
+    """Write a minimal prepare-to-worker archive with a known config name."""
+    state = PathLayout(archive).workflow_state
+    write_yaml(
+        state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id),
+        {
+            "batch_id": batch_id,
+            "worker_id": worker_id,
+            "config_name": "block",
+            "runtime_spec": {},
+            "prepared_metadata": {},
+        },
+    )
+    write_json(
+        state.prepare_worker_identity_path(batch_id=batch_id, worker_id=worker_id),
+        {"batch_id": batch_id, "worker_id": worker_id},
+    )
 
 
 @pytest.mark.parametrize(("config_name", "succeeds"), [("block", True), ("other", False)])
@@ -101,3 +119,49 @@ def test_aggregate_restore_cli_checks_configuration_identity(
         assert "handoff identity mismatch" in result.stderr
     workflow = (project / ".github/workflows/_pipeline-run-batch.yml").read_text(encoding="utf-8")
     assert '--config-name "${{ inputs.config_name }}"' in workflow
+
+
+@pytest.mark.parametrize(("config_name", "succeeds"), [("block", True), ("other", False)])
+def test_worker_restore_cli_checks_configuration_identity(
+    tmp_path: Path, config_name: str, succeeds: bool
+) -> None:
+    """Worker restore rejects a prepared bundle from a different config."""
+    project = Path(__file__).resolve().parents[1]
+    archive = tmp_path / "archive"
+    state_root = tmp_path / "restored"
+    batch_id = "batch-123-attempt-1"
+    worker_id = "worker-1"
+    _write_prepare_worker_fixture(
+        archive, batch_id=batch_id, worker_id=worker_id
+    )
+    invocation = [
+        str(project / "src/pipeline_run.py"),
+        "handoff-restore",
+        "--state-root", str(state_root),
+        "--handoff", "prepare-worker",
+        "--batch-id", batch_id,
+        "--worker-id", worker_id,
+        "--config-name", config_name,
+        "--archive", str(archive),
+    ]
+    result = subprocess.run(
+        invocation, cwd=project, capture_output=True, text=True, check=False
+    )
+    restored = PathLayout(state_root).workflow_state.prepare_worker_config_path(
+        batch_id=batch_id, worker_id=worker_id
+    )
+    assert (result.returncode == 0) is succeeds, result.stderr
+    assert restored.is_file() is succeeds
+    if not succeeds:
+        assert "handoff identity mismatch" in result.stderr
+
+    workflow = (
+        project / ".github/workflows/_pipeline-run-batch.yml"
+    ).read_text(encoding="utf-8")
+    worker_restore = (
+        "--state-root . --handoff prepare-worker \\\n"
+        "            --batch-id \"${{ needs.prepare_run.outputs.batch_id }}\" \\\n"
+        "            --worker-id \"${{ matrix.worker_id }}\" --config-name \"${{ inputs.config_name }}\" \\\n"
+        "            --archive \".tmp/combined-worker-inputs/${{ matrix.worker_id }}\""
+    )
+    assert worker_restore in workflow

@@ -145,7 +145,7 @@ class IPLocationCredentialValidator:
         provider_probe = self.provider_probes.get(provider_name)
         if provider_probe is None:
             return None
-        token = _token_for_ip_location(ip_location, provider_probe=provider_probe)
+        token = _token_for_ip_location(provider_probe=provider_probe)
         credential_key = (provider_name, token)
         if not token or (
             checked_credentials is not None and credential_key in checked_credentials
@@ -163,12 +163,9 @@ class IPLocationCredentialValidator:
 
 
 def _token_for_ip_location(
-    ip_location: dict[str, Any], *, provider_probe: ProviderCredentialProbe
+    *, provider_probe: ProviderCredentialProbe
 ) -> str:
-    """Return the token source that runtime would use for an IP-location provider."""
-    config_token = str(ip_location.get("token", "")).strip()
-    if config_token:
-        return config_token
+    """Return the environment-only credential for one IP-location provider."""
     return os.environ.get(provider_probe.runtime_env_var, "").strip()
 
 

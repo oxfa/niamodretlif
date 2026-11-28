@@ -130,3 +130,43 @@ class RuntimeDNSCheckerFactory:
                 coordinator_state=self._coordinator_state,
             ),
         )
+
+    @staticmethod
+    def config_for_delegation_profile(
+        delegation_profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the minimal checker config from one effective root profile."""
+        return {
+            "dns_query": dict(delegation_profile["dns_query"]),
+            "delegation": dict(delegation_profile["delegation"]),
+            "host_resolution": {},
+        }
+
+    @staticmethod
+    def config_for_host_resolution_profile(
+        host_profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a checker config from one effective input-domain host profile."""
+        dns_query = {
+            "default_resolvers": list(host_profile["resolvers"]),
+            "timeout": host_profile["timeout"],
+            "retry_backoff_base_seconds": host_profile[
+                "retry_backoff_base_seconds"
+            ],
+            "query_rate_limit": dict(host_profile["query_rate_limit"]),
+        }
+        host_resolution = {
+            "resolvers": list(host_profile["resolvers"]),
+            "timeout": host_profile["timeout"],
+            "retry_backoff_base_seconds": host_profile[
+                "retry_backoff_base_seconds"
+            ],
+            "query_rate_limit": dict(host_profile["query_rate_limit"]),
+            "retry_attempts": host_profile["retry_attempts"],
+            "ecs": dict(host_profile["ecs"]),
+        }
+        return {
+            "dns_query": dns_query,
+            "delegation": {"retry_attempts": 1},
+            "host_resolution": host_resolution,
+        }

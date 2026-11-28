@@ -2,21 +2,20 @@ version: 2
 
 # Optional per-config operator files:
 # Each configured category directory contains block.txt.
-# manually_selected_for_filtered and manually_added entries require actionable
-# delegation when they have a registrable domain. Source-matched public suffix
-# selections route to filtered during prepare because there is no registrable
-# domain to query. Actionable delegation means NS records exist, NS returns
-# NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS retry budget is
-# exhausted with same-owner SOA. NS NODATA does not require SOA fallback. When
-# delegation is actionable, selected and added entries bypass host-resolution
-# and IP-location checks and route to filtered. manually_added takes precedence
-# over matching source entries for the same host. Unmatched selected entries
-# route to review without DNS lookup; unmatched manually_added entries require
-# all enabled sources to share dns_query/delegation behavior.
+# Registrable manually_selected_for_filtered and manually_added entries use the
+# shared root delegation result. Review or unactionable root outcomes take
+# precedence; an actionable root lets these entries bypass host resolution and
+# IP location and route to filtered. An unmatched selected entry remains a
+# prepare-owned review row. A PSL-valid input with no registrable domain has no
+# worker route and remains eligible for format-specific output when it is a
+# valid source target or manual addition. manually_added takes precedence over
+# a matching source entry for the same host. Unmatched manually_added entries
+# require all enabled sources to share dns_query/delegation behavior.
 # manually_excluded_from_sources is target-based source subtraction: source
 # entries whose parsed normalized target matches an operator entry are removed
-# before worker manifests, and non-matches are silent no-ops. Other
-# public-suffix inputs are prepare-owned terminal rows.
+# before worker assignments and valid source-item mappings; non-matches are
+# silent no-ops. Excluded hosts cannot re-enter through manual routes.
+# Unmatched manually selected entries remain prepare-owned review rows.
 
 manual_inputs:
   manually_selected_for_filtered: manual_inputs/manually_selected_for_filtered
@@ -91,6 +90,7 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: false
+    resolve_www_for_registrable_domain: true
 
 runtime:
   # Worker-local async stage concurrency inside one GitHub matrix worker.

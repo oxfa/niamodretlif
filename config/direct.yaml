@@ -2,21 +2,20 @@ version: 2
 
 # Optional per-config operator files:
 # Each configured category directory contains direct.txt.
-# manually_selected_for_filtered and manually_added entries require actionable
-# delegation when they have a registrable domain. Source-matched public suffix
-# selections route to filtered during prepare because there is no registrable
-# domain to query. Actionable delegation means NS records exist, NS returns
-# NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS retry budget is
-# exhausted with same-owner SOA. NS NODATA does not require SOA fallback. When
-# delegation is actionable, selected and added entries bypass host-resolution
-# and IP-location checks and route to filtered. manually_added takes precedence
-# over matching source entries for the same host. Unmatched selected entries
-# route to review without DNS lookup; unmatched manually_added entries require
-# all enabled sources to share dns_query/delegation behavior.
+# Registrable manually_selected_for_filtered and manually_added entries use the
+# shared root delegation result. Review or unactionable root outcomes take
+# precedence; an actionable root lets these entries bypass host resolution and
+# IP location and route to filtered. An unmatched selected entry remains a
+# prepare-owned review row. A PSL-valid input with no registrable domain has no
+# worker route and remains eligible for format-specific output when it is a
+# valid source target or manual addition. manually_added takes precedence over
+# a matching source entry for the same host. Unmatched manually_added entries
+# require all enabled sources to share dns_query/delegation behavior.
 # manually_excluded_from_sources is target-based source subtraction: source
 # entries whose parsed normalized target matches an operator entry are removed
-# before worker manifests, and non-matches are silent no-ops. Other
-# public-suffix inputs are prepare-owned terminal rows.
+# before worker assignments and valid source-item mappings; non-matches are
+# silent no-ops. Excluded hosts cannot re-enter through manual routes.
+# Unmatched manually selected entries remain prepare-owned review rows.
 
 manual_inputs:
   manually_selected_for_filtered: manual_inputs/manually_selected_for_filtered
@@ -99,11 +98,9 @@ defaults:
     retry_attempts: 4
   host_resolution:
     enabled: true
-    targets:
-      input_host: true
-      root_domain: true
-      subdomains:
-        - www
+    # Resolve the input domain itself. When it is the registrable root, also
+    # resolve www.<root>; a specific subdomain input is resolved on its own.
+    resolve_www_for_registrable_domain: true
     # Host-resolution resolver entries accept the same all-or-none weight field
     # as delegation. Omitted weights mean equal first-attempt share for this
     # stage.
@@ -168,11 +165,11 @@ sources:
     ip_location:
       enabled: true
       # GitHub Actions secret storage name: IPINFO_API_TOKEN.
-      # Runtime reads IP_LOCATION_IPINFO_TOKEN for country-only ipinfo_lite lookups when
-      # ip_location.token is blank. Provide it through workflow/env secrets,
-      # not config. Prepare-batch exits if the required token is absent; worker
-      # manifests are created only after one non-retried validation probe. That
-      # probe fails prepare only on IPinfo HTTP 401/403 credential rejection.
+      # Runtime reads IP_LOCATION_IPINFO_TOKEN for country-only ipinfo_lite
+      # lookups. Configure it through workflow/env secrets; credentials are not
+      # accepted in config or serialized into worker manifests. Prepare-batch
+      # exits if the required token is absent and validates it with one
+      # non-retried probe, failing only on IPinfo HTTP 401/403 rejection.
       timeout: 5.0
       cache_ttl_days: 7
       policy:

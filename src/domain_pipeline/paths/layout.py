@@ -24,7 +24,7 @@ class WorkerStatePaths:
     """Workflow-state and debug paths for one worker execution."""
 
     result_root: Path
-    terminal_rows: Path
+    domain_results: Path
     cache: Path
     debug_log: Path
 
@@ -57,9 +57,9 @@ class WorkerPathSpec:
         return self.output.review
 
     @property
-    def terminal_rows(self) -> Path:
-        """Return the worker terminal-row JSONL path."""
-        return self.state.terminal_rows
+    def domain_results(self) -> Path:
+        """Return the worker domain-result JSONL path."""
+        return self.state.domain_results
 
     @property
     def cache(self) -> Path:
@@ -177,12 +177,6 @@ class PrepareHandoffPaths(WorkflowStateBasePaths):
             self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "runtime-config.yaml"
         )
 
-    def prepare_worker_roots_path(self, *, batch_id: str, worker_id: str) -> Path:
-        """Return the prepare worker roots path."""
-        return (
-            self.prepare_worker_manifest_root(batch_id=batch_id) / worker_id / "assigned-roots.csv"
-        )
-
     def prepare_worker_identity_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the compact identity record for a hosted worker handoff."""
         return (
@@ -227,19 +221,24 @@ class PrepareHandoffPaths(WorkflowStateBasePaths):
         """Return the worker handoff unactionable path."""
         return (
             self.worker_result_root(batch_id=batch_id, worker_id=worker_id)
-            / "unactionable-registrable-domains.txt"
+            / "unactionable-input-domains.txt"
         )
 
     def worker_handoff_review_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the worker handoff review path."""
         return (
             self.worker_result_root(batch_id=batch_id, worker_id=worker_id)
-            / "review-results-by-registrable-domain.csv"
+            / "review-results-by-input-domain.csv"
         )
 
-    def worker_handoff_terminal_path(self, *, batch_id: str, worker_id: str) -> Path:
-        """Return the worker handoff terminal path."""
-        return self.worker_result_root(batch_id=batch_id, worker_id=worker_id) / "terminal.yaml"
+    def worker_handoff_domain_results_path(
+        self, *, batch_id: str, worker_id: str
+    ) -> Path:
+        """Return the worker handoff domain-result path."""
+        return (
+            self.worker_result_root(batch_id=batch_id, worker_id=worker_id)
+            / "domain-results.jsonl"
+        )
 
     def worker_handoff_cache_path(self, *, batch_id: str, worker_id: str) -> Path:
         """Return the worker handoff cache path."""
@@ -284,26 +283,28 @@ class WorkflowStatePathLayout(PrepareHandoffPaths):
         )
 
     def worker_unactionable_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
-        """Return the worker unactionable-output path."""
+        """Return the worker input-domain unactionable-output path."""
         return (
             self.worker_publish_output_root(batch_id=batch_id, worker_id=worker_id)
-            / "unactionable-registrable-domains"
+            / "unactionable-input-domains"
             / f"{config_name}.txt"
         )
 
     def worker_review_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
-        """Return the worker review-output path."""
+        """Return the worker input-domain review-output path."""
         return (
             self.worker_publish_output_root(batch_id=batch_id, worker_id=worker_id)
-            / "review-results-by-registrable-domain"
+            / "review-results-by-input-domain"
             / f"{config_name}.csv"
         )
 
-    def worker_terminal_rows_path(self, *, batch_id: str, worker_id: str, config_name: str) -> Path:
-        """Return the worker workflow-internal terminal-row JSONL path."""
+    def worker_domain_results_path(
+        self, *, batch_id: str, worker_id: str, config_name: str
+    ) -> Path:
+        """Return the worker workflow-internal domain-result JSONL path."""
         return (
             self.worker_state_root(batch_id=batch_id, worker_id=worker_id)
-            / "terminal_rows"
+            / "domain_results"
             / f"{config_name}.jsonl"
         )
 
@@ -346,7 +347,6 @@ class PrepareToWorkerPathLayout:
         state = WorkflowStatePathLayout(self.workspace_root)
         paths = (
             state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id),
-            state.prepare_worker_roots_path(batch_id=batch_id, worker_id=worker_id),
             state.prepare_worker_identity_path(batch_id=batch_id, worker_id=worker_id),
         )
         return tuple(_member(self.workspace_root, path, required=True) for path in paths)
@@ -428,7 +428,9 @@ class WorkerToAggregatorPathLayout:
         paths = (
             state.worker_handoff_unactionable_path(batch_id=batch_id, worker_id=worker_id),
             state.worker_handoff_review_path(batch_id=batch_id, worker_id=worker_id),
-            state.worker_handoff_terminal_path(batch_id=batch_id, worker_id=worker_id),
+            state.worker_handoff_domain_results_path(
+                batch_id=batch_id, worker_id=worker_id
+            ),
             state.worker_handoff_cache_path(batch_id=batch_id, worker_id=worker_id),
             state.worker_aggregate_manifest_path(batch_id=batch_id, worker_id=worker_id),
             state.worker_status_path(batch_id=batch_id, worker_id=worker_id),
@@ -487,7 +489,7 @@ class PathLayout:
                     batch_id=batch_id,
                     worker_id=worker_id,
                 ),
-                terminal_rows=self.workflow_state.worker_terminal_rows_path(
+                domain_results=self.workflow_state.worker_domain_results_path(
                     batch_id=batch_id,
                     worker_id=worker_id,
                     config_name=config_name,

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,6 +26,7 @@ from domain_pipeline.prepare.config.loader import (
 )
 from domain_pipeline.prepare.config.models import OutputConfig
 from domain_pipeline.prepare.models import (
+    PreparedInputDomainPlan,
     PreparedInputSet,
     PreparedManualRouting,
     PreparedOutputRows,
@@ -31,6 +35,11 @@ from domain_pipeline.prepare.models import (
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     ManuallyAddedDomain,
     load_prepare_aggregate_manifest_for_batch,
+)
+from domain_pipeline.prepare.delegation import (
+    effective_delegation_profile,
+    effective_host_resolution_profile,
+    effective_ip_location_profile,
 )
 from domain_pipeline.prepare.source_line_index import (
     SourceLineIndex,
@@ -44,11 +53,29 @@ from domain_pipeline.prepare.sources.parser import (
     DomainEntry,
     DomainListParser,
 )
-from domain_pipeline.routing.route_codes import RouteCode
+from domain_pipeline.routing.policies import (
+    ROUTE_REASON_TEXT,
+    DelegationRoutingPolicy,
+    HostResolutionRoutingPolicy,
+)
+from domain_pipeline.routing.route_codes import RouteCode, TerminalRouteTransition
+from domain_pipeline.worker.delegation.lookup import (
+    DelegationDnsEvidence,
+    DelegationResult,
+    DelegationSoaEvidence,
+)
 from domain_pipeline.worker.output.writer import ResultOutputWriter
 from domain_pipeline.worker.runtime.contracts import (
-    CompletedHostResult,
-    WorkerSourceContext,
+    CompletedResultEvidence,
+    RegistrableDomainResult,
+)
+from domain_pipeline.worker.runtime.results import (
+    CompletedResultRequest,
+    build_completed_result,
+)
+from domain_pipeline.worker.worker_to_aggregate_manifest import (
+    InputDomainResultRow,
+    RegistrableDomainResultRow,
 )
 
 
@@ -88,6 +115,154 @@ def _source_item_handoff(
     )
     return SourceItemHandoff.build(
         batch_id="batch", prepared_inputs=prepared_inputs
+    )
+
+
+def _all_filtered_input_routes(
+    source_items: SourceItemHandoff,
+    manually_added_domains: list[ManuallyAddedDomain],
+) -> dict[tuple[str, str], str]:
+    """Build explicit filtered input routes for focused renderer tests."""
+    routes: dict[tuple[str, str], str] = {}
+    associations = {
+        association["association_id"]: association
+        for item in source_items.item_records
+        for association in item["target_associations"]
+    }
+    for registrable_domain, references in source_items.index_payload[
+        "valid_source_items_by_registrable_domain"
+    ].items():
+        for reference in references:
+            association = associations[reference["association_id"]]
+            routes[(registrable_domain, association["host"])] = "filtered"
+    for item in manually_added_domains:
+        if item.registrable_domain is not None:
+            routes[(item.registrable_domain, item.host)] = "filtered"
+    return routes
+
+
+def _render_filtered_output(
+    source_items: SourceItemHandoff,
+    unactionable_registrable_domains: list[str],
+    manually_added_domains: list[ManuallyAddedDomain],
+    filtered_output: tuple[Path, str],
+    *,
+    input_domain_routes: dict[tuple[str, str], str] | None = None,
+) -> None:
+    """Render with explicit per-input routes, defaulting test fixtures to filtered."""
+    routes = (
+        dict(input_domain_routes)
+        if input_domain_routes is not None
+        else _all_filtered_input_routes(source_items, manually_added_domains)
+    )
+    if unactionable_registrable_domains:
+        unactionable_roots = set(unactionable_registrable_domains)
+        for key in routes:
+            if key[0] in unactionable_roots:
+                routes[key] = "unactionable"
+    AggregateOutputMerger().write_filtered_source_items(
+        source_items,
+        routes,
+        manually_added_domains,
+        filtered_output,
+    )
+
+
+def _root_result(registrable_domain: str, disposition: str) -> dict[str, object]:
+    return {
+        "registrable_domain": registrable_domain,
+        "disposition": disposition,
+        "delegation_result": {},
+    }
+
+
+def _input_result(
+    input_domain: str, registrable_domain: str, route: str
+) -> dict[str, object]:
+    return {
+        "input_domain": input_domain,
+        "registrable_domain": registrable_domain,
+        "route": route,
+        "route_code": "test_route",
+        "route_reason": "test reason",
+        "host_resolution_results": [],
+        "ip_location_results": [],
+        "ip_location_policy": None,
+    }
+
+
+def _worker_results(
+    roots: list[dict[str, object]], inputs: list[dict[str, object]]
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        worker_id="worker-1",
+        handoff_finalized=True,
+        registrable_domain_results=roots,
+        input_domain_results=inputs,
+    )
+
+
+def _typed_audit_rows() -> tuple[RegistrableDomainResultRow, InputDomainResultRow]:
+    route_code = RouteCode.HOST_RESOLUTION_TO_FILTERED_SKIPPED
+    root_row = RegistrableDomainResultRow.model_validate(
+        {
+            "registrable_domain": "example.com",
+            "disposition": "actionable",
+            "delegation_result": {
+                "domain": "example.com",
+                "dns": {
+                    "ns_records_exist": True,
+                    "ns_nodata": False,
+                    "ns_nxdomain": False,
+                    "ns_retry_exhausted": False,
+                    "ns_lookup_error": False,
+                },
+                "soa": {
+                    "soa_exists": False,
+                    "soa_absent": False,
+                    "soa_retry_exhausted": False,
+                    "soa_source": "",
+                },
+                "no_nameservers": False,
+                "nameservers": ["ns1.example.com"],
+                "from_cache": False,
+            },
+        }
+    )
+    input_row = InputDomainResultRow.model_validate(
+        {
+            "input_domain": "example.com",
+            "registrable_domain": "example.com",
+            "route": "filtered",
+            "route_code": route_code,
+            "route_reason": ROUTE_REASON_TEXT[route_code],
+            "host_resolution_results": [],
+            "ip_location_results": [],
+            "ip_location_policy": None,
+        }
+    )
+    return root_row, input_row
+
+
+def test_audit_merger_serializes_typed_worker_result_rows(tmp_path: Path) -> None:
+    root_row, input_row = _typed_audit_rows()
+    output_path = tmp_path / "audit" / "results.jsonl"
+
+    AggregateOutputMerger().merge_audit_payloads(
+        [("worker-1", [root_row, input_row])], output_path
+    )
+
+    actual_rows = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+    expected_rows = [
+        root_row.model_dump(mode="json"),
+        input_row.model_dump(mode="json"),
+    ]
+    assert actual_rows == sorted(
+        expected_rows,
+        key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")),
     )
 
 
@@ -139,8 +314,11 @@ def test_sample_config_inherits_defaults_and_keeps_outputs_at_root() -> None:
     assert "output" not in source
     assert source["fetch"] == config["defaults"]["fetch"]
     assert source["delegation"] == config["defaults"]["delegation"]
-    assert source["host_resolution"]["targets"]["root_domain"] is False
-    assert config["defaults"]["host_resolution"]["targets"]["root_domain"] is True
+    assert source["host_resolution"]["resolve_www_for_registrable_domain"] is True
+    assert (
+        config["defaults"]["host_resolution"]["resolve_www_for_registrable_domain"]
+        is True
+    )
 
 
 def test_adblock_parser_extracts_concrete_blocking_domain_targets() -> None:
@@ -164,20 +342,37 @@ def test_adblock_parser_extracts_concrete_blocking_domain_targets() -> None:
     ]
 
 
-def test_configured_adblock_standalone_domain_is_a_request_host_target() -> None:
-    """Interpret a standalone literal domain as a target in explicit AdBlock input."""
+def test_configured_adblock_unanchored_domain_is_retained_without_host_target(
+    tmp_path: Path,
+) -> None:
+    """Keep an unanchored AdBlock pattern without inventing a request host."""
     parser = DomainListParser()
+    line = "standalone.example.net\n"
 
-    entries = list(
-        parser.process_entries(
-            ["standalone.example.net\n"],
-            forced_format="adblock",
-        )
-    )
-
-    assert entries == [
-        DomainEntry(host="standalone.example.net", registrable_domain="example.net")
+    entries = list(parser.process_entries([line], forced_format="adblock"))
+    source_items = _source_item_handoff([line], file_format="adblock")
+    no_target_items = source_items.index_payload[
+        "valid_source_items_without_extractable_registrable_domain"
     ]
+    plain_path = tmp_path / "filtered" / "plain.txt"
+    adblock_path = tmp_path / "filtered" / "adblock.txt"
+
+    _render_filtered_output(source_items, [], [], (plain_path, "plain"))
+    _render_filtered_output(source_items, [], [], (adblock_path, "adblock"))
+
+    assert entries == []
+    assert source_items.index_payload[
+        "valid_source_items_by_registrable_domain"
+    ] == {}
+    assert no_target_items == [
+        {
+            "item_id": "source:1",
+            "association_id": None,
+            "reason": "network_filter_is_not_host_anchored",
+        }
+    ]
+    assert plain_path.read_text(encoding="utf-8") == ""
+    assert adblock_path.read_text(encoding="utf-8") == line
 
 
 def test_adblock_host_modifiers_preserve_literal_target_and_rule_text(
@@ -191,7 +386,7 @@ def test_adblock_host_modifiers_preserve_literal_target_and_rule_text(
     source_items = _source_item_handoff(lines, file_format="adblock")
     target_path = tmp_path / "filtered" / "modifier-rules.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -222,7 +417,7 @@ def test_adblock_exceptions_are_not_rendered_as_plain_or_hosts(
     )
     target_path = tmp_path / f"exceptions-{output_format}.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -244,7 +439,7 @@ def test_adblock_host_path_rule_maps_and_renders_request_host(
     )
     target_path = tmp_path / "host-path.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -421,7 +616,7 @@ def test_filtered_output_formats(
     """Render prepared source-item associations in each configured output format."""
     target_path = tmp_path / "filtered" / "domains.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff(["ads.example.com\n"], file_format="plain"),
         [],
         [],
@@ -464,7 +659,7 @@ def test_valid_adblock_no_target_items_render_only_as_adblock(
     ]
     target_path = tmp_path / "filtered" / f"no-target-{output_format}.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff(lines, file_format="adblock"),
         [],
         [],
@@ -487,7 +682,7 @@ def test_invalid_adblock_lines_are_diagnosed_and_not_rendered(
     source_items = _source_item_handoff(lines, file_format="adblock")
     target_path = tmp_path / "filtered" / "invalid-rules.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -512,7 +707,7 @@ def test_adblock_source_exclusions_do_not_reappear_in_filtered_outputs(
     )
     target_path = tmp_path / "filtered" / "excluded.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -574,7 +769,7 @@ def test_filtered_output_deduplicates_rendered_hosts_not_provenance(
     )
     target_path = tmp_path / "filtered" / "deduplicated.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -597,7 +792,7 @@ def test_multi_target_line_preserves_physical_and_occurrence_provenance(
     )
     target_path = tmp_path / "filtered" / "repeated-hosts.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -642,7 +837,7 @@ def test_public_suffix_target_without_registrable_domain_is_kept(
     source_items = _source_item_handoff(["co.uk\n"], file_format="plain")
     target_path = tmp_path / "filtered" / f"suffix-{output_format}.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -663,7 +858,7 @@ def test_excluded_public_suffix_is_not_indexed_or_rendered(tmp_path: Path) -> No
     )
     target_path = tmp_path / "filtered" / "excluded-public-suffix.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -700,7 +895,7 @@ def test_strict_psl_miss_is_invalid_and_never_rendered(tmp_path: Path) -> None:
         "no_strict_public_suffix_match"
     )
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -717,7 +912,7 @@ def test_strict_psl_miss_adblock_rule_is_not_reemitted(tmp_path: Path) -> None:
     )
     target_path = tmp_path / "filtered" / "invalid-adblock-target.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -751,7 +946,7 @@ def test_adblock_output_preserves_valid_non_domain_rules_and_filters_bad_targets
         "||good.example.org^\n"
     )
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff(
             source_content.splitlines(keepends=True), file_format="adblock"
         ),
@@ -774,7 +969,7 @@ def test_hosts_line_filters_only_unactionable_aliases(tmp_path: Path) -> None:
     """Preserve actionable hosts aliases when a line spans multiple roots."""
     target_path = tmp_path / "filtered" / "hosts.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff(
             ["0.0.0.0 bad.example.com good.example.org\n"],
             file_format="hosts",
@@ -798,7 +993,7 @@ def test_hosts_line_exclusion_removes_only_excluded_target_association(
     )
     target_path = tmp_path / "partially-excluded-hosts.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -834,7 +1029,7 @@ def test_hosts_line_separates_excluded_invalid_and_eligible_targets(
     )
     target_path = tmp_path / "partially-valid-hosts.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         source_items,
         [],
         [],
@@ -928,11 +1123,6 @@ def test_source_archive_keeps_manual_additions_separate() -> None:
         lines=["||source.example.com^\n"],
         config={"input": {"format": "adblock"}},
     )
-    parsed_source_file = DomainListParser().parse_source_file(
-        source_job.lines,
-        source_name=source_job.input_label,
-        forced_format="adblock",
-    )
     manual_entry = DomainEntry(
         host="manual.example.net",
         registrable_domain="example.net",
@@ -941,12 +1131,13 @@ def test_source_archive_keeps_manual_additions_separate() -> None:
         config={},
         source_jobs_by_id={"block": source_job},
         parsed_source_entry_count=1,
-        entries_by_source={"block": [manual_entry]},
+        entries_by_source={"block": []},
         manual_routing_by_host={
             manual_entry.host: PreparedManualRouting(manually_added=True)
         },
         root_plans={},
         preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        manually_added_entries={manual_entry.host: manual_entry},
     )
 
     contents, index, manually_added_domains = (
@@ -980,7 +1171,7 @@ def test_aggregate_renders_actionable_manual_additions(
     """Render unmatched manual additions in each configured output format."""
     target_path = tmp_path / "filtered" / "manual.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff([], file_format="plain"),
         [],
         [
@@ -999,7 +1190,7 @@ def test_aggregate_omits_unactionable_manual_additions(tmp_path: Path) -> None:
     """Filter separately handed-off manual hosts by their registrable domain."""
     target_path = tmp_path / "filtered" / "manual.txt"
 
-    AggregateOutputMerger().write_filtered_source_items(
+    _render_filtered_output(
         _source_item_handoff([], file_format="plain"),
         ["example.net"],
         [
@@ -1014,81 +1205,323 @@ def test_aggregate_omits_unactionable_manual_additions(tmp_path: Path) -> None:
     assert target_path.read_text(encoding="utf-8") == ""
 
 
-def test_worker_writer_does_not_create_filtered_output(tmp_path: Path) -> None:
-    """Keep actionable host results for audit without writing a worker filtered file."""
-    output_directory = tmp_path / "worker-output"
-    audit_path = tmp_path / "worker-audit.jsonl"
-    writer = ResultOutputWriter()
-    writer.add(
-        CompletedHostResult(
-            source_context=WorkerSourceContext(
-                source_id="block",
-                input_label="fixture",
-                output_stem="block",
-                config={
-                    "output": {
-                        "directory": str(output_directory),
-                        "terminal_rows_file": str(audit_path),
+def test_filtered_renderer_joins_each_target_to_its_input_domain_route(
+    tmp_path: Path,
+) -> None:
+    """Render only filtered associations while retaining route-free valid inputs."""
+    source_items = _source_item_handoff(
+        [
+            "0.0.0.0 review.example.com filtered.example.com\n",
+            "0.0.0.0 co.uk\n",
+        ],
+        file_format="hosts",
+    )
+    manual = [
+        ManuallyAddedDomain(
+            host="manual.example.net", registrable_domain="example.net"
+        ),
+        ManuallyAddedDomain(host="com", registrable_domain=None),
+    ]
+    target_path = tmp_path / "filtered" / "route-joined.txt"
+
+    _render_filtered_output(
+        source_items,
+        [],
+        manual,
+        (target_path, "plain"),
+        input_domain_routes={
+            ("example.com", "review.example.com"): "review",
+            ("example.com", "filtered.example.com"): "filtered",
+            ("example.net", "manual.example.net"): "filtered",
+        },
+    )
+
+    assert target_path.read_text(encoding="utf-8") == (
+        "filtered.example.com\nco.uk\ncom\nmanual.example.net\n"
+    )
+
+
+def test_aggregate_validates_global_root_and_input_domain_coverage() -> None:
+    """Require one outcome per mapped root and registrable manual input."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(
+        ["ads.example.com\n", "cdn.example.com\n", "co.uk\n"],
+        file_format="plain",
+    )
+    manual = [
+        ManuallyAddedDomain(
+            host="manual.example.net", registrable_domain="example.net"
+        ),
+        ManuallyAddedDomain(host="com", registrable_domain=None),
+    ]
+    results = _worker_results(
+        [
+            _root_result("example.com", "actionable"),
+            _root_result("example.net", "actionable"),
+        ],
+        [
+            _input_result("ads.example.com", "example.com", "review"),
+            _input_result("cdn.example.com", "example.com", "filtered"),
+            _input_result("manual.example.net", "example.net", "unactionable"),
+        ],
+    )
+
+    routes = merger.validate_worker_results(source_items, manual, [results])
+
+    assert routes == {
+        ("example.com", "ads.example.com"): "review",
+        ("example.com", "cdn.example.com"): "filtered",
+        ("example.net", "manual.example.net"): "unactionable",
+    }
+    assert merger.unactionable_input_domains(routes) == ["manual.example.net"]
+
+
+def test_aggregate_rejects_missing_input_domain_outcome() -> None:
+    """Do not treat an omitted final route as a filtered association."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(
+        ["ads.example.com\n", "cdn.example.com\n"],
+        file_format="plain",
+    )
+    results = _worker_results(
+        [_root_result("example.com", "actionable")],
+        [_input_result("ads.example.com", "example.com", "filtered")],
+    )
+
+    with pytest.raises(ValueError, match="missing input-domain outcomes"):
+        merger.validate_worker_results(source_items, [], [results])
+
+
+@pytest.mark.parametrize(
+    ("root_results", "input_results", "error"),
+    [
+        (
+            [],
+            [_input_result("ads.example.com", "example.com", "filtered")],
+            "missing registrable-domain outcomes",
+        ),
+        (
+            [_root_result("example.com", "actionable")],
+            [_input_result("other.example.com", "example.com", "filtered")],
+            "unexpected input-domain result",
+        ),
+    ],
+)
+def test_aggregate_rejects_incomplete_or_unexpected_global_results(
+    root_results: list[dict[str, object]],
+    input_results: list[dict[str, object]],
+    error: str,
+) -> None:
+    """Reject missing root outcomes and unexpected input-domain routes."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(["ads.example.com\n"], file_format="plain")
+
+    with pytest.raises(ValueError, match=error):
+        merger.validate_worker_results(
+            source_items,
+            [],
+            [_worker_results(root_results, input_results)],
+        )
+
+
+@pytest.mark.parametrize("duplicate_kind", ["root", "input"])
+def test_aggregate_rejects_duplicate_results_across_workers(
+    duplicate_kind: str,
+) -> None:
+    """Reject duplicated global outcomes even when each worker is finalized."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(["ads.example.com\n"], file_format="plain")
+    root = _root_result("example.com", "actionable")
+    input_row = _input_result("ads.example.com", "example.com", "filtered")
+    first = _worker_results([root], [input_row])
+    second = _worker_results(
+        [root] if duplicate_kind == "root" else [],
+        [] if duplicate_kind == "root" else [input_row],
+    )
+
+    expected_error = (
+        "duplicate registrable-domain result"
+        if duplicate_kind == "root"
+        else "duplicate input-domain result"
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        merger.validate_worker_results(source_items, [], [first, second])
+
+
+def test_aggregate_requires_terminal_root_route_fanout() -> None:
+    """A review root cannot have a filtered child input-domain route."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(
+        ["ads.example.com\n", "cdn.example.com\n"],
+        file_format="plain",
+    )
+    results = _worker_results(
+        [_root_result("example.com", "review")],
+        [
+            _input_result("ads.example.com", "example.com", "review"),
+            _input_result("cdn.example.com", "example.com", "filtered"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="terminal root outcome"):
+        merger.validate_worker_results(source_items, [], [results])
+
+
+def test_unactionable_output_uses_input_domains_under_terminal_root() -> None:
+    """Publish each routed child domain instead of replacing them with the root."""
+    merger = AggregateOutputMerger()
+    source_items = _source_item_handoff(
+        ["ads.example.com\n", "cdn.example.com\n"],
+        file_format="plain",
+    )
+    results = _worker_results(
+        [_root_result("example.com", "unactionable")],
+        [
+            _input_result("ads.example.com", "example.com", "unactionable"),
+            _input_result("cdn.example.com", "example.com", "unactionable"),
+        ],
+    )
+
+    routes = merger.validate_worker_results(source_items, [], [results])
+
+    assert merger.unactionable_input_domains(routes) == [
+        "ads.example.com",
+        "cdn.example.com",
+    ]
+
+
+def test_aggregate_review_projection_drops_prepare_source_details(
+    tmp_path: Path,
+) -> None:
+    """Keep the published review rows source-blind after prepare merging."""
+    target_path = tmp_path / "review.csv"
+    AggregateOutputMerger().merge_review_payloads(
+        [
+            (
+                "prepare",
+                [
+                    {
+                        "host": "manual.example.net",
+                        "registrable_domain": "example.net",
+                        "route_code": "manual_input_review",
+                        "review_reason": "manual input needs review",
+                        "source_id": "source-secret",
+                        "source_input_label": "private-feed.txt",
+                        "source_url": "https://example.invalid/private-feed",
+                        "original_text": "private source line",
+                        "source_line_number": "3",
                     }
-                },
-            ),
-            entry=DomainEntry(
-                host="ads.example.com",
-                registrable_domain="example.com",
-            ),
-            route="filtered",
-            route_code=RouteCode.HOST_RESOLUTION_TO_FILTERED_SKIPPED,
-            row={"host": "ads.example.com"},
+                ],
+            )
+        ],
+        target_path,
+    )
+
+    with target_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames is not None
+        assert not {
+            "source_id",
+            "source_input_label",
+            "source_url",
+            "original_text",
+            "source_line_number",
+        } & set(reader.fieldnames)
+        rows = list(reader)
+    assert rows[0]["host"] == "manual.example.net"
+
+
+def test_worker_writer_does_not_create_filtered_output(tmp_path: Path) -> None:
+    """Keep input-domain results source-blind without a worker filtered file."""
+    output_directory = tmp_path / "worker-output"
+    domain_results_path = tmp_path / "worker-domain-results.jsonl"
+    writer = ResultOutputWriter(
+        output_spec={
+            "domain_results": str(domain_results_path),
+            "review": str(output_directory / "review-results-by-input-domain" / "worker.csv"),
+            "unactionable": str(output_directory / "unactionable-input-domains" / "worker.txt"),
+        },
+        expected_input_domains_by_root={"example.com": {"ads.example.com"}},
+    )
+    delegation = DelegationResult(
+        domain="example.com",
+        dns=DelegationDnsEvidence(ns_records_exist=True),
+        soa=DelegationSoaEvidence(),
+        nameservers=["ns1.example.com"],
+    )
+    writer.add_root_result(
+        RegistrableDomainResult(
+            registrable_domain="example.com",
+            disposition="actionable",
+            delegation_result=delegation,
+        )
+    )
+    writer.add(
+        build_completed_result(
+            CompletedResultRequest(
+                entry=DomainEntry(
+                    host="ads.example.com",
+                    registrable_domain="example.com",
+                ),
+                route_transition=HostResolutionRoutingPolicy().skipped(),
+                evidence=CompletedResultEvidence(delegation_result=delegation),
+            )
         )
     )
 
     writer.write()
 
     assert not (output_directory / "filtered").exists()
-    assert audit_path.read_text(encoding="utf-8") == (
-        '{"host": "ads.example.com", "route": "filtered"}\n'
-    )
+    envelope = json.loads(domain_results_path.read_text(encoding="utf-8"))
+    assert set(envelope) == {"registrable_domain_results", "input_domain_results"}
+    assert envelope["input_domain_results"][0]["input_domain"] == "ads.example.com"
+    assert "source_id" not in envelope["input_domain_results"][0]
 
 
-def test_worker_writer_writes_unactionable_registrable_domain(tmp_path: Path) -> None:
-    """Write the rendered registrable domain to its configured worker TXT path."""
+def test_worker_writer_writes_unactionable_input_domain(tmp_path: Path) -> None:
+    """Write the input-domain value for an unactionable route."""
     output_directory = tmp_path / "worker-output"
-    audit_path = tmp_path / "worker-audit.jsonl"
-    writer = ResultOutputWriter()
+    domain_results_path = tmp_path / "worker-domain-results.jsonl"
+    writer = ResultOutputWriter(
+        output_spec={
+            "domain_results": str(domain_results_path),
+            "review": str(output_directory / "review-results-by-input-domain" / "worker.csv"),
+            "unactionable": str(output_directory / "unactionable-input-domains" / "worker.txt"),
+        },
+        expected_input_domains_by_root={"example.com": {"ads.example.com"}},
+    )
+    delegation = DelegationResult(
+        domain="example.com",
+        dns=DelegationDnsEvidence(),
+        soa=DelegationSoaEvidence(),
+        no_nameservers=True,
+    )
+    transition = DelegationRoutingPolicy().for_result(delegation)
+    assert isinstance(transition, TerminalRouteTransition)
+    writer.add_root_result(
+        RegistrableDomainResult(
+            registrable_domain="example.com",
+            disposition="unactionable",
+            delegation_result=delegation,
+        )
+    )
     writer.add(
-        CompletedHostResult(
-            source_context=WorkerSourceContext(
-                source_id="block",
-                input_label="fixture",
-                output_stem="block",
-                config={
-                    "output": {
-                        "directory": str(output_directory),
-                        "terminal_rows_file": str(audit_path),
-                    }
-                },
-            ),
-            entry=DomainEntry(
-                host="ads.example.com",
-                registrable_domain="example.com",
-            ),
-            route="unactionable",
-            route_code=RouteCode.DELEGATION_TO_UNACTIONABLE_NS_NXDOMAIN_SOA_ABSENT,
-            row={
-                "host": "ads.example.com",
-                "registrable_domain": "example.com",
-            },
+        build_completed_result(
+            CompletedResultRequest(
+                entry=DomainEntry(
+                    host="ads.example.com",
+                    registrable_domain="example.com",
+                ),
+                route_transition=transition,
+                evidence=CompletedResultEvidence(delegation_result=delegation),
+            )
         )
     )
 
     writer.write()
 
-    unactionable_path = (
-        output_directory
-        / "unactionable-registrable-domains"
-        / "block.txt"
-    )
-    assert unactionable_path.read_text(encoding="utf-8") == "example.com\n"
+    unactionable_path = output_directory / "unactionable-input-domains" / "worker.txt"
+    assert unactionable_path.read_text(encoding="utf-8") == "ads.example.com\n"
 
 
 def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
@@ -1107,10 +1540,7 @@ def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
         source_name=source_job.input_label,
         forced_format="adblock",
     )
-    manual_entry = DomainEntry(
-        host="manual.example.net",
-        registrable_domain="example.net",
-    )
+    manual_entry = DomainEntry(host="co.uk", registrable_domain=None)
     prepared_inputs = PreparedInputSet(
         config={
             "config_name": "block",
@@ -1123,12 +1553,11 @@ def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
         },
         source_jobs_by_id={"block": source_job},
         parsed_source_entry_count=1,
-        entries_by_source={"block": [manual_entry]},
-        manual_routing_by_host={
-            manual_entry.host: PreparedManualRouting(manually_added=True)
-        },
+        entries_by_source={"block": []},
+        manual_routing_by_host={},
         root_plans={},
         preparation_outputs=PreparedOutputRows(review_rows=[], terminal_rows=[]),
+        manually_added_entries={manual_entry.host: manual_entry},
         excluded_source_hosts={"source.example.com"},
         parsed_source_files={source_job.source_id: parsed_source_file},
     )
@@ -1148,8 +1577,8 @@ def test_prepare_aggregate_manifest_persists_manual_additions_and_exclusions(
     assert batch.source_input_contents == ["||source.example.com^\n"]
     assert persisted_manifest.manually_added_domains == [
         ManuallyAddedDomain(
-            host="manual.example.net",
-            registrable_domain="example.net",
+            host="co.uk",
+            registrable_domain=None,
         )
     ]
     assert persisted_manifest.excluded_source_hosts == ["source.example.com"]
@@ -1221,50 +1650,52 @@ def test_batch_emits_empty_manifests_for_every_configured_worker(
     }
 
 
-def test_worker_assignment_balances_registrable_domains_not_host_counts() -> None:
-    """Treat each registrable domain as one unit of worker work."""
-    roots = [
-        "a.example.com",
-        "b.example.com",
-        "c.example.com",
-        "d.example.com",
-    ]
-    entries_by_root = {
-        root: [
-            ("block", DomainEntry(host=f"host-{index}.{root}", registrable_domain=root))
-            for index in range(3 if root == roots[0] else 1)
-        ]
-        for root in roots
+def test_worker_assignment_balances_unique_input_domain_counts() -> None:
+    """Assign large roots first, weighting each root by its unique input domains."""
+    input_counts = {
+        "example.com": 5,
+        "example.net": 4,
+        "example.org": 3,
+        "example.co.uk": 1,
+    }
+    root_plans = {
+        root: PreparedRootPlan(
+            registrable_domain=root,
+            delegation_profile={"query": "shared"},
+            input_domains={
+                f"host-{index}.{root}": PreparedInputDomainPlan(
+                    host=f"host-{index}.{root}",
+                    manual_routing=PreparedManualRouting(),
+                )
+                for index in range(count)
+            },
+        )
+        for root, count in input_counts.items()
     }
     planning_inputs = PreparedBatchPlanningInputs(
-        source_jobs_by_id={"block": None},
-        eligible_root_entries=entries_by_root,
-        public_suffix_entries=[],
-        root_plans={
-            root: PreparedRootPlan(
-                registrable_domain=root,
-                entry_count=len(entries),
-                delegation_config_source_id="block",
-                delegation_behavior_fingerprint="fixture",
-            )
-            for root, entries in entries_by_root.items()
-        },
+        root_plans=root_plans,
     )
 
-    source_entries, root_plans, root_counts = WorkerAssignmentPlanner().assign(
+    worker_root_plans, domain_counts = WorkerAssignmentPlanner().assign(
         planning_inputs=planning_inputs,
         worker_ids=["worker-1", "worker-2"],
     )
 
-    assert {worker_id: len(roots) for worker_id, roots in root_plans.items()} == {
-        "worker-1": 2,
-        "worker-2": 2,
+    assert {
+        worker_id: set(plans) for worker_id, plans in worker_root_plans.items()
+    } == {
+        "worker-1": {"example.com", "example.co.uk"},
+        "worker-2": {"example.net", "example.org"},
     }
-    assert dict(root_counts.items()) == {
-        "worker-1": 2,
-        "worker-2": 2,
+    assert dict(domain_counts.items()) == {
+        "worker-1": 6,
+        "worker-2": 7,
     }
-    assert all(source_entries[worker_id] for worker_id in root_plans)
+    assert sum(
+        len(plan.input_domains)
+        for plans in worker_root_plans.values()
+        for plan in plans.values()
+    ) == sum(input_counts.values())
 
 
 def test_aggregate_spec_uses_only_configured_output_paths() -> None:
@@ -1314,49 +1745,67 @@ def test_config_requires_at_least_one_filtered_output() -> None:
 
 
 @pytest.mark.parametrize(
-    ("config_path", "source_id"),
-    [("config/block.yaml", "block"), ("config/direct.yaml", "direct")],
+    "config_path",
+    ["config/block.yaml", "config/direct.yaml"],
 )
 def test_additional_filtered_outputs_are_not_sent_to_worker_runtime(
-    config_path: str, source_id: str
+    config_path: str,
 ) -> None:
     """Keep aggregate-only filtered output settings out of worker manifests."""
     config = load_config_without_runtime_credentials(Path(config_path))
-    source = next(item for item in config["sources"] if item["id"] == source_id)
+    source_config = config["sources"][0]
     entry = DomainEntry(host="ads.example.com", registrable_domain="example.com")
-    source_job = SourceJob(
-        source_id=source_id,
-        input_label="fixture",
-        output_stem=str(config["config_name"]),
-        lines=[],
-        config=source,
-    )
     manifests = WorkerAssignmentPlanner().build_worker_manifests(
         WorkerManifestBuildRequest(
             config=config,
             batch_id="batch",
             worker_ids=["worker-1"],
-            worker_source_entries={"worker-1": {source_id: [entry]}},
             worker_root_plans={
                 "worker-1": {
                     "example.com": PreparedRootPlan(
                         registrable_domain="example.com",
-                        entry_count=1,
-                        delegation_config_source_id=source_id,
-                        delegation_behavior_fingerprint="fixture",
+                        delegation_profile=effective_delegation_profile(source_config),
+                        input_domains={
+                            entry.host: PreparedInputDomainPlan(
+                                host=entry.host,
+                                manual_routing=PreparedManualRouting(),
+                                host_resolution_profile=(
+                                    effective_host_resolution_profile(source_config)
+                                    if source_config["host_resolution"]["enabled"]
+                                    else None
+                                ),
+                                ip_location_profile=(
+                                    effective_ip_location_profile(source_config)
+                                    if source_config["host_resolution"]["enabled"]
+                                    and source_config["ip_location"]["enabled"]
+                                    else None
+                                ),
+                            )
+                        },
                     )
                 }
             },
-            source_jobs_by_id={source_id: source_job},
         )
     )
     runtime_spec = manifests[0].manifest.runtime_spec
+    runtime_payload = runtime_spec.model_dump(mode="json")
 
-    assert runtime_spec.sources[0].output.directory.endswith("publish_snapshot/output")
-    assert runtime_spec.sources[0].output.model_dump() == {
-        "directory": runtime_spec.sources[0].output.directory
+    assert set(runtime_payload) == {
+        "config_name",
+        "cache",
+        "runtime",
+        "output_spec",
+        "debug_log_path",
     }
-    assert "filtered" not in runtime_spec.output_spec.model_dump()
+    assert set(runtime_spec.output_spec.model_dump()) == {
+        "result_root",
+        "unactionable",
+        "review",
+        "domain_results",
+        "cache",
+    }
+    assert "filtered" not in runtime_payload
+    assert "sources" not in runtime_payload
 
 
 def test_output_paths_must_be_unique_and_safe() -> None:

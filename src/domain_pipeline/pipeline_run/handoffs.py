@@ -11,10 +11,6 @@ from pathlib import Path
 import yaml
 
 from domain_pipeline.handoff_io import read_json, read_yaml
-from domain_pipeline.pipeline_run.format_version import (
-    PIPELINE_RUN_FORMAT_VERSION,
-    has_current_pipeline_run_format,
-)
 from domain_pipeline.prepare.source_line_index import load_source_line_index
 from domain_pipeline.prepare.source_items import SourceItemHandoff
 
@@ -113,16 +109,10 @@ def _validate_identity(
     payload = read_yaml(path)
     if not isinstance(payload, dict):
         raise ValueError(f"handoff identity mismatch: {path}")
-    format_version = payload.get("automation_format_version")
     if (
         payload.get("batch_id") != batch_id
         or (worker_id is not None and payload.get("worker_id") != worker_id)
         or (config_name is not None and payload.get("config_name") != config_name)
-        or (
-            not isinstance(format_version, int)
-            or isinstance(format_version, bool)
-            or format_version != PIPELINE_RUN_FORMAT_VERSION
-        )
     ):
         raise ValueError(f"handoff identity mismatch: {path}")
 
@@ -213,11 +203,14 @@ def _validate_restored_identity(
     if handoff == "prepare-worker":
         if worker_id is None:
             raise ValueError("worker ID is required for worker handoff")
+        if request.config_name is None:
+            raise ValueError("worker config name is required")
         identity_path = state.prepare_worker_config_path(batch_id=batch_id, worker_id=worker_id)
         _validate_identity(
             source / identity_path.relative_to(state_root),
             batch_id=batch_id,
             worker_id=worker_id,
+            config_name=request.config_name,
         )
         identity_json_path = state.prepare_worker_identity_path(
             batch_id=batch_id, worker_id=worker_id
@@ -231,12 +224,8 @@ def _validate_restored_identity(
             ) from exc
         if (
             not isinstance(identity, dict)
-            or not has_current_pipeline_run_format(
-                identity.get("automation_format_version")
-            )
             or identity
             != {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch_id,
                 "worker_id": worker_id,
             }

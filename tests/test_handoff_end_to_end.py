@@ -18,7 +18,6 @@ import pytest
 from domain_pipeline.aggregate.runner import AggregateBatchRunner
 from domain_pipeline.handoff_io import read_yaml, write_yaml
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.pipeline_run.handoffs import (
     HandoffRequest,
     restore_handoff,
@@ -54,6 +53,8 @@ from domain_pipeline.worker.status.lifecycle import (
 from domain_pipeline.worker.runtime.runner import run_worker
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     finalize_worker_aggregate_handoff,
+    load_worker_aggregate_manifest,
+    parse_worker_domain_results_jsonl_text,
 )
 from worker_artifact_correlation import GitHubActionsAPI, correlate_worker
 
@@ -96,12 +97,16 @@ def _prepare_and_restore(tmp_path: Path) -> None:
         source_name=source.input_label,
         forced_format=source_config["input"]["format"],
     )
-    entries_by_source = {
-        source.source_id: list(parser.entries_from_parsed_source_file(parsed_source_file))
-    }
+    source_entries = list(parser.entries_from_parsed_source_file(parsed_source_file))
+    entries_by_source = {source.source_id: source_entries}
     source_jobs_by_id = {source.source_id: source}
+    entries_by_host = {entry.host: entry for entry in source_entries}
     root_plans = PreparationPlanner(source_root=Path("."))._root_plans(
-        entries_by_source=entries_by_source,
+        entries_by_host=entries_by_host,
+        source_ids_by_host={
+            entry.host: {source.source_id} for entry in source_entries
+        },
+        manual_routing_by_host={},
         source_jobs_by_id=source_jobs_by_id,
     )
     prepared_inputs = PreparedInputSet(
@@ -159,30 +164,128 @@ def _prepare_and_restore(tmp_path: Path) -> None:
     restore_handoff(
         state_root=worker_root,
         source=worker_staging / WORKER,
-        request=HandoffRequest("prepare-worker", BATCH, worker_id=WORKER),
+        request=HandoffRequest(
+            "prepare-worker", BATCH, worker_id=WORKER, config_name="block"
+        ),
     )
     restore_handoff(
         state_root=aggregate_root, source=aggregate_staging, request=aggregate_request
     )
 
 
+def _domain_results_fixture() -> dict[str, list[dict]]:
+    """Return closed worker result rows for the prepared input-domain set."""
+    return {
+        "registrable_domain_results": [
+            {
+                "registrable_domain": "example.com",
+                "disposition": "actionable",
+                "delegation_result": {
+                    "domain": "example.com",
+                    "dns": {
+                        "ns_records_exist": True,
+                        "ns_nodata": False,
+                        "ns_nxdomain": False,
+                        "ns_retry_exhausted": False,
+                        "ns_lookup_error": False,
+                    },
+                    "soa": {
+                        "soa_exists": False,
+                        "soa_absent": False,
+                        "soa_retry_exhausted": False,
+                        "soa_source": "",
+                    },
+                    "no_nameservers": False,
+                    "nameservers": ["ns1.example.com"],
+                    "from_cache": False,
+                },
+            },
+            {
+                "registrable_domain": "example.net",
+                "disposition": "unactionable",
+                "delegation_result": {
+                    "domain": "example.net",
+                    "dns": {
+                        "ns_records_exist": False,
+                        "ns_nodata": False,
+                        "ns_nxdomain": True,
+                        "ns_retry_exhausted": False,
+                        "ns_lookup_error": False,
+                    },
+                    "soa": {
+                        "soa_exists": False,
+                        "soa_absent": True,
+                        "soa_retry_exhausted": False,
+                        "soa_source": "",
+                    },
+                    "no_nameservers": False,
+                    "nameservers": [],
+                    "from_cache": False,
+                },
+            },
+        ],
+        "input_domain_results": [
+            {
+                "input_domain": "ads.example.com",
+                "registrable_domain": "example.com",
+                "route": "review",
+                "route_code": "host_resolution_to_review_nxdomain",
+                "route_reason": "host resolution returned NXDOMAIN",
+                "host_resolution_results": [
+                    {
+                        "host": "ads.example.com",
+                        "dns": {
+                            "a_exists": False,
+                            "a_nodata": False,
+                            "a_nxdomain": True,
+                            "a_timeout": False,
+                            "a_servfail": False,
+                        },
+                        "addresses": {
+                            "canonical_name": None,
+                            "ipv4_addresses": [],
+                            "ipv6_addresses": [],
+                        },
+                        "from_cache": False,
+                        "detail": "",
+                    }
+                ],
+                "ip_location_results": [],
+                "ip_location_policy": None,
+            },
+            {
+                "input_domain": "bad.example.net",
+                "registrable_domain": "example.net",
+                "route": "unactionable",
+                "route_code": "delegation_to_unactionable_ns_nxdomain_soa_absent",
+                "route_reason": (
+                    "delegation NS query returned NXDOMAIN and SOA was absent"
+                ),
+                "host_resolution_results": [],
+                "ip_location_results": [],
+                "ip_location_policy": None,
+            },
+        ],
+    }
+
+
 @pytest.mark.parametrize("member", ["runtime-config", "worker-identity"])
-def test_prepare_worker_loader_rejects_float_format_marker(
+def test_prepare_worker_loader_rejects_unknown_fields(
     tmp_path: Path, member: str
 ) -> None:
-    """Reject a numerically equal non-integer worker marker at load time."""
+    """Reject unknown fields in the worker manifest or identity record."""
     _prepare_and_restore(tmp_path)
     worker_root = tmp_path / "worker"
     paths = PathLayout(worker_root).workflow_state
     if member == "runtime-config":
         path = paths.prepare_worker_config_path(batch_id=BATCH, worker_id=WORKER)
         payload = read_yaml(path)
-        payload["automation_format_version"] = float(PIPELINE_RUN_FORMAT_VERSION)
+        payload["unexpected"] = True
         write_yaml(path, payload)
     else:
         path = paths.prepare_worker_identity_path(batch_id=BATCH, worker_id=WORKER)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["automation_format_version"] = float(PIPELINE_RUN_FORMAT_VERSION)
+        payload["unexpected"] = True
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError):
@@ -191,42 +294,65 @@ def test_prepare_worker_loader_rejects_float_format_marker(
         )
 
 
-def test_prepare_aggregate_loader_rejects_float_format_marker(
+def test_restore_rejects_prepare_worker_config_identity_mismatch(
     tmp_path: Path,
 ) -> None:
-    """Reject a numerically equal non-integer aggregate marker."""
+    """Worker restore checks its config identity against the workflow input."""
+    _prepare_and_restore(tmp_path)
+    source = tmp_path / "worker-stage" / WORKER
+    restored_root = tmp_path / "mismatched-worker"
+
+    with pytest.raises(ValueError, match="identity mismatch"):
+        restore_handoff(
+            state_root=restored_root,
+            source=source,
+            request=HandoffRequest(
+                "prepare-worker",
+                BATCH,
+                worker_id=WORKER,
+                config_name="direct",
+            ),
+        )
+
+    assert not restored_root.exists()
+
+
+def test_prepare_aggregate_loader_rejects_unknown_fields(
+    tmp_path: Path,
+) -> None:
+    """Reject unknown fields in the prepare-to-aggregate manifest."""
     _prepare_and_restore(tmp_path)
     aggregate_root = tmp_path / "aggregate"
     path = PathLayout(aggregate_root).workflow_state.prepare_aggregate_config_path(
         batch_id=BATCH
     )
     payload = read_yaml(path)
-    payload["automation_format_version"] = float(PIPELINE_RUN_FORMAT_VERSION)
+    payload["unexpected"] = True
     write_yaml(path, payload)
 
-    with pytest.raises(ValueError, match="invalid prepare aggregate handoff"):
+    with pytest.raises(ValueError, match="invalid prepare aggregate configuration"):
         load_prepare_aggregate_manifest_for_batch(
             batch_id=BATCH, state_root=aggregate_root
         )
 
 
-def test_source_item_index_rejects_float_format_marker() -> None:
-    """Require the source-item index marker to use its canonical integer value."""
+def test_source_item_index_rejects_unknown_fields() -> None:
+    """Reject unknown fields in the source-item index."""
     handoff = SourceItemHandoff(
         batch_id=BATCH,
         item_records=(),
         index_payload={
-            "automation_format_version": float(PIPELINE_RUN_FORMAT_VERSION),
             "batch_id": BATCH,
             "sources": [],
             "valid_source_items_by_registrable_domain": {},
             "valid_source_items_without_extractable_registrable_domain": [],
             "adblock_metadata": [],
+            "unexpected": True,
         },
         diagnostic_records=(),
     )
 
-    with pytest.raises(ValueError, match="source-item index version"):
+    with pytest.raises(ValueError, match="unexpected|fields|schema"):
         handoff.validate()
 
 
@@ -243,7 +369,7 @@ def _finish_worker(tmp_path: Path) -> None:
     assigned_roots = set(manifest.prepared_metadata.delegation_roots)
     assert assigned_roots == {"example.com", "example.net"}
     paths["unactionable"].parent.mkdir(parents=True, exist_ok=True)
-    paths["unactionable"].write_text("example.net\n", encoding="utf-8")
+    paths["unactionable"].write_text("bad.example.net\n", encoding="utf-8")
     paths["review"].parent.mkdir(parents=True, exist_ok=True)
     with paths["review"].open("w", encoding="utf-8", newline="") as handle:
         review = csv.DictWriter(handle, fieldnames=REVIEW_OUTPUT_COLUMNS)
@@ -252,13 +378,13 @@ def _finish_worker(tmp_path: Path) -> None:
             {
                 "host": "ads.example.com",
                 "registrable_domain": "example.com",
+                "route_code": "host_resolution_to_review_nxdomain",
                 "review_reason": "fixture reason",
             }
         )
-    paths["terminal_rows"].parent.mkdir(parents=True, exist_ok=True)
-    paths["terminal_rows"].write_text(
-        '{"host":"bad.example.net","registrable_domain":"example.net",'
-        '"route":"unactionable"}\n',
+    paths["domain_results"].parent.mkdir(parents=True, exist_ok=True)
+    paths["domain_results"].write_text(
+        json.dumps(_domain_results_fixture(), separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     worker_log = manifest.resolve_log_path(worker_root)
@@ -308,23 +434,20 @@ def _finish_worker(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("json_value", ["null", "[]", '"text"', "17"])
-def test_worker_handoff_rejects_non_mapping_terminal_rows(
+def test_worker_handoff_rejects_non_object_domain_result_envelope(
     tmp_path: Path, json_value: str
 ) -> None:
-    """Reject valid JSONL values that cannot represent terminal rows."""
+    """Reject valid JSON values that cannot represent a result envelope."""
     _prepare_and_restore(tmp_path)
     worker_root = tmp_path / "worker"
     manifest = load_prepare_worker_manifest_for_worker(
         batch_id=BATCH, worker_id=WORKER, state_root=worker_root
     )
-    terminal_path = manifest.resolve_paths(worker_root)["terminal_rows"]
-    terminal_path.parent.mkdir(parents=True, exist_ok=True)
-    terminal_path.write_text(f"\n{json_value}\n", encoding="utf-8")
+    results_path = manifest.resolve_paths(worker_root)["domain_results"]
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results_path.write_text(f"{json_value}\n", encoding="utf-8")
 
-    with pytest.raises(
-        ValueError,
-        match=r"terminal JSONL row at .*:2 must be a mapping",
-    ):
+    with pytest.raises(ValueError):
         finalize_worker_aggregate_handoff(
             batch_id=BATCH, worker_id=WORKER, state_root=worker_root
         )
@@ -333,6 +456,26 @@ def test_worker_handoff_rejects_non_mapping_terminal_rows(
         batch_id=BATCH, worker_id=WORKER
     )
     assert not handoff_path.exists()
+
+
+def test_worker_handoff_serializes_domain_results_as_jsonl(
+    tmp_path: Path,
+) -> None:
+    """The worker artifact's domain-results member uses its declared JSONL form."""
+    _prepare_and_restore(tmp_path)
+    _finish_worker(tmp_path)
+    path = PathLayout(tmp_path / "worker").workflow_state.worker_handoff_domain_results_path(
+        batch_id=BATCH, worker_id=WORKER
+    )
+
+    envelope = parse_worker_domain_results_jsonl_text(
+        path.read_text(encoding="utf-8")
+    )
+
+    assert [row.registrable_domain for row in envelope.registrable_domain_results] == [
+        "example.com",
+        "example.net",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -370,7 +513,9 @@ def test_worker_handoff_rejects_malformed_review_csv(
         )
 
 
-@pytest.mark.parametrize("result_kind", ["unactionable", "review", "terminal"])
+@pytest.mark.parametrize(
+    "result_kind", ["unactionable", "review", "domain_results"]
+)
 def test_worker_handoff_rejects_domains_outside_its_assignment(
     tmp_path: Path, result_kind: str
 ) -> None:
@@ -398,20 +543,18 @@ def test_worker_handoff_rejects_domains_outside_its_assignment(
                 }
             )
     else:
-        paths["terminal_rows"].parent.mkdir(parents=True, exist_ok=True)
-        paths["terminal_rows"].write_text(
-            json.dumps(
-                {
-                    "host": "bad.outside.example.org",
-                    "registrable_domain": "outside.example.org",
-                    "route": "review",
-                }
-            )
-            + "\n",
+        results = _domain_results_fixture()
+        outside = results["input_domain_results"][0]
+        outside["input_domain"] = "outside.example.org"
+        outside["registrable_domain"] = "example.org"
+        outside["host_resolution_results"][0]["host"] = "outside.example.org"
+        paths["domain_results"].parent.mkdir(parents=True, exist_ok=True)
+        paths["domain_results"].write_text(
+            json.dumps(results, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
 
-    with pytest.raises(ValueError, match="outside its assigned roots"):
+    with pytest.raises(ValueError):
         finalize_worker_aggregate_handoff(
             batch_id=BATCH, worker_id=WORKER, state_root=worker_root
         )
@@ -429,6 +572,11 @@ def test_worker_handoff_rejects_duplicate_unactionable_domains(
     paths = manifest.resolve_paths(worker_root)
     paths["unactionable"].parent.mkdir(parents=True, exist_ok=True)
     paths["unactionable"].write_text("example.net\nexample.net\n", encoding="utf-8")
+    paths["domain_results"].parent.mkdir(parents=True, exist_ok=True)
+    paths["domain_results"].write_text(
+        json.dumps(_domain_results_fixture(), separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(ValueError, match="contain duplicates"):
         finalize_worker_aggregate_handoff(
@@ -737,15 +885,11 @@ def _assert_aggregate(tmp_path: Path) -> None:
     assert outcome["state"] == "aggregated"
     assert outcome["cache_merge_summary"]["merged_cache_count"] == 1
     publish_root = PathLayout(aggregate_root).output.publish_worktree_root()
-    assert (
-        publish_root / "output/filtered/block.txt"
-    ).read_text() == "ads.example.com\n"
+    assert (publish_root / "output/filtered/block.txt").read_text() == ""
     assert (
         publish_root / "output/unactionable/block.txt"
-    ).read_text() == "example.net\n"
-    assert (
-        publish_root / "output/filtered/block_easylist.txt"
-    ).read_text() == "||ads.example.com^\n"
+    ).read_text() == "bad.example.net\n"
+    assert (publish_root / "output/filtered/block_easylist.txt").read_text() == ""
     with (publish_root / "output/review/block.csv").open(
         newline="", encoding="utf-8"
     ) as handle:
@@ -755,13 +899,20 @@ def _assert_aggregate(tmp_path: Path) -> None:
     audit = (aggregate_root / outcome["final_debug_paths"]["raw_audit"]).read_text(
         encoding="utf-8"
     )
-    assert [json.loads(line) for line in audit.splitlines()] == [
-        {
-            "host": "bad.example.net",
-            "registrable_domain": "example.net",
-            "route": "unactionable",
-        }
+    audit_rows = [json.loads(line) for line in audit.splitlines()]
+    worker_results = _domain_results_fixture()
+    expected_audit_rows = [
+        *worker_results["registrable_domain_results"],
+        *worker_results["input_domain_results"],
     ]
+    assert len(audit_rows) == len(expected_audit_rows)
+    assert {
+        json.dumps(row, sort_keys=True, separators=(",", ":"))
+        for row in audit_rows
+    } == {
+        json.dumps(row, sort_keys=True, separators=(",", ":"))
+        for row in expected_audit_rows
+    }
     assert (
         "worker fixture log"
         in (aggregate_root / outcome["final_debug_paths"]["runtime_log"]).read_text()
@@ -781,3 +932,31 @@ def test_local_handoffs_reach_aggregate_success(tmp_path: Path) -> None:
     _finish_worker(tmp_path)
     _correlate_and_restore(tmp_path)
     _assert_aggregate(tmp_path)
+
+
+def test_aggregate_loads_worker_results_without_worker_input_manifest(
+    tmp_path: Path,
+) -> None:
+    """Aggregate consumes worker results without restoring worker assignments."""
+    _prepare_and_restore(tmp_path)
+    _finish_worker(tmp_path)
+    _correlate_and_restore(tmp_path)
+    aggregate_root = tmp_path / "aggregate"
+    paths = PathLayout(aggregate_root).workflow_state
+    worker_config = paths.prepare_worker_config_path(
+        batch_id=BATCH, worker_id=WORKER
+    )
+    assert not worker_config.exists()
+
+    manifest = load_worker_aggregate_manifest(
+        paths.worker_aggregate_manifest_path(batch_id=BATCH, worker_id=WORKER),
+        state_root=aggregate_root,
+        batch_id=BATCH,
+        worker_id=WORKER,
+    )
+
+    assert manifest.handoff_finalized
+    assert [row.input_domain for row in manifest.input_domain_results] == [
+        "ads.example.com",
+        "bad.example.net",
+    ]

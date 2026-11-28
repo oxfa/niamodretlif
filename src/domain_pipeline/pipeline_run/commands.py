@@ -17,7 +17,6 @@ from domain_pipeline.pipeline_run.cache_lifecycle import (
     inspect_cache_lifecycle,
     render_lifecycle_log_lines,
 )
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.pipeline_run.handoffs import (
     HandoffRequest,
     stage_handoff,
@@ -139,7 +138,6 @@ def _handle_initialize_worker_statuses(args: argparse.Namespace, state_root: Pat
         )
     except Exception as exc:
         payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": args.batch_id,
             "worker_id": args.worker_id,
             "conclusion": "failure",
@@ -196,7 +194,6 @@ def _handle_finalize_worker_aggregate_handoff(
         )
     except Exception as exc:
         payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": args.batch_id,
             "worker_id": args.worker_id,
             "handoff_finalized": False,

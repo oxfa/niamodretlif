@@ -16,35 +16,29 @@ version: 2
 #
 # Optional operator input files are named <config-stem>.txt inside each
 # configurable category directory below.
-# manually_selected_for_filtered and manually_added entries require an
-# actionable delegation result for the registrable domain. Source-matched
-# public suffix selections route to filtered during prepare because there is no
-# registrable domain to query. Delegation is actionable when NS records exist,
-# NS returns NODATA, NS returns NXDOMAIN with same-owner SOA, or the NS retry
-# budget is exhausted with same-owner SOA. NS NODATA does not require SOA
-# fallback. If delegation is actionable, selected and added entries skip
-# host-resolution and IP-location and route to filtered. manually_added takes
-# precedence over matching source entries for the same host. If delegation is
-# not actionable, they route to unactionable or review using the normal
-# delegation result. Unmatched manually_added entries require all enabled
-# sources to share dns_query and delegation behavior. Unmatched
-# selected entries route to review without delegation or host-resolution lookup
-# because they are operator reconciliation rows.
+# Registrable manually_selected_for_filtered and manually_added entries use the
+# shared registrable-domain DNS result. A root review or unactionable outcome
+# takes precedence; an actionable root lets these manual routes bypass host
+# resolution and IP location. An unmatched selected entry remains a
+# prepare-owned review row. A PSL-valid source target or manual addition with no
+# registrable domain has no worker route and remains eligible for
+# format-specific filtered output. An unmatched manually_added registrable
+# domain requires all enabled sources to share its root DNS behavior.
 # manually_excluded_from_sources is target-based source subtraction: source
 # entries whose parsed normalized target matches an operator entry are removed
-# before worker manifests, and non-matches are silent no-ops. Other public
-# suffix inputs are prepare-owned terminal rows because there is no registrable
-# domain to query.
+# before worker assignments and valid source-item mappings; non-matches are
+# silent no-ops. Excluded targets cannot re-enter through a manual route.
 #
-# Runtime rows use three terminal routes:
-# - filtered: positive output rows.
-# - review: uncertain or operator-attention rows.
-# - unactionable: rows whose registrable domain has no actionable delegation.
-# Duplicate host collapse is keyed by final host and compares dns_query,
-# delegation, host_resolution, and ip_location behavior across enabled sources.
-# For manually_added matched hosts, only dns_query/delegation behavior must match
-# because manually_added bypasses host-resolution and
-# IP-location after delegation passes.
+# Worker results contain one registrable-domain DNS outcome and one final route
+# per input domain. Root review or unactionable outcomes fan out to the root's
+# input domains. For an actionable root, ordinary domains use their effective
+# host-resolution and IP-location settings; disabled host resolution routes to
+# filtered, while manual additions/selections bypass both stages. Duplicate
+# input domains are assigned once after route-relevant profiles are checked:
+# root DNS settings must agree under a root, while host/IP settings need agree
+# only for repeated ordinary domains that reach those stages. Source identity
+# and source membership stay in aggregate source-item mappings and are not sent
+# to workers or published in the merged review output.
 manual_inputs:
   manually_selected_for_filtered: manual_inputs/manually_selected_for_filtered
   manually_excluded_from_sources: manual_inputs/manually_excluded_from_sources
@@ -56,8 +50,9 @@ output:
   filtered:
     - path: output/filtered/domain-pipeline.txt
       format: plain
-    # Each file receives the same deduplicated filtered hosts, rendered as
-    # plain, hosts, or adblock lines.
+    # Each file renders eligible source targets and manually added domains,
+    # deduplicated according to that file's configured format. AdBlock outputs
+    # also preserve valid no-target rules and recognized metadata.
     # - path: output/filtered/domain-pipeline-adblock.txt
     #   format: adblock
   review: output/review/domain-pipeline.csv
@@ -149,10 +144,9 @@ defaults:
     #   - resolver: 1.1.1.1
     #     weight: 1
     retry_attempts: 4
-    # Optional exact-host A/AAAA/CNAME resolution. The targets setting below
-    # controls which names are checked. It has a separate DNS coordinator from
-    # delegation. It inherits dns_query.default_resolvers unless
-    # resolvers is provided here. Host-resolution resolver entries accept the
+    # Optional input-domain A/AAAA/CNAME resolution. It has a separate DNS
+    # coordinator from delegation. It inherits dns_query.default_resolvers
+    # unless resolvers is provided here. Host-resolution resolver entries accept the
     # same all-or-none weight field as delegation: omit weight on every entry
     # for equal first-attempt share, or set weight on every entry for explicit
     # stage-local traffic preference. ECS applies only to host resolution; when
@@ -162,18 +156,13 @@ defaults:
     # because their public ECS behavior differs. If enabled is omitted, the
     # runtime defaults it to true when ip_location.enabled=true and false otherwise.
     # Timeout/SERVFAIL use this stage-specific retry budget and are not cached
-    # after retry exhaustion.
+    # after retry exhaustion. Resolve the input domain itself. When it equals
+    # its registrable root, also resolve www.<root> if
+    # resolve_www_for_registrable_domain is true; a specific subdomain input
+    # resolves only itself.
   host_resolution:
     enabled: false
-    # DNS names to resolve for each input host. The input host is checked by
-    # default, along with each configured subdomain under the registrable root.
-    # Subdomain entries can contain nested labels (for example, api.staging).
-    # Enable root_domain to also resolve the registrable root itself.
-    targets:
-      input_host: true
-      root_domain: true
-      subdomains:
-        - www
+    resolve_www_for_registrable_domain: true
     # resolvers:
     #   - resolver: 8.8.8.8
     #     weight: 2
@@ -207,9 +196,9 @@ defaults:
     # GitHub Actions secret storage name: IPINFO_API_TOKEN. The reusable workflow
     # passes it to Python as runtime env IP_LOCATION_IPINFO_TOKEN for country-only
     # ipinfo_lite lookups. Runtime consumes that env token without writing it into
-    # prepare-to-worker manifests; leave ip_location.token blank unless you
-    # intentionally commit an explicit config token. Prepare-batch exits before
-    # worker manifests are created when ipinfo_lite is enabled without a token.
+    # prepare-to-worker manifests. Credentials are not accepted in config.
+    # Prepare-batch exits before worker manifests are created when ipinfo_lite is
+    # enabled without a token.
     # When a token exists, prepare-batch sends one non-retried IPinfo validation
     # probe and fails only when IPinfo proves credential rejection with HTTP 401
     # or 403. Rate limits, network failures, and validation payloads that do not
@@ -230,7 +219,8 @@ defaults:
 runtime:
   # Worker-local async concurrency for each processing stage inside one GitHub
   # matrix worker. Delegation consumes registrable-domain root work and fans
-  # results out to host rows; host_resolution and IP-location stay host-level.
+  # results out to input-domain rows; host_resolution and IP-location operate
+  # on each original input domain.
   # Delegation and enabled host_resolution stages can adapt between minimums
   # and caps. Scale-up requires backlog, sustained DNS/in-flight work, and
   # usable provider capacity; one pressured provider does not by itself block
@@ -303,11 +293,7 @@ sources:
       retry_attempts: 4
     host_resolution:
       enabled: false
-      targets:
-        input_host: true
-        root_domain: false
-        subdomains:
-          - www
+      resolve_www_for_registrable_domain: true
       ecs:
         enabled: false
         subnet: ""

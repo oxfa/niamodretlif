@@ -1,9 +1,9 @@
-"""Worker runtime stage owners."""
+"""Worker runtime stage owners for root and input-domain decisions."""
 
 from __future__ import annotations
 
-from typing import Any
 import dataclasses
+from typing import Any
 
 from domain_pipeline.routing import (
     DelegationRoutingPolicy,
@@ -12,45 +12,41 @@ from domain_pipeline.routing import (
     TerminalRouteTransition,
 )
 from domain_pipeline.worker.delegation.lookup import DelegationResult
-from domain_pipeline.worker.host_resolution.lookup import (
-    HostResolutionResult,
-)
+from domain_pipeline.worker.host_resolution.lookup import HostResolutionResult
+from domain_pipeline.worker.runtime.busy_state import BusyReason
 from domain_pipeline.worker.runtime.contracts import (
     CompletedResultEvidence,
     DelegationRootWorkItem,
-    IpLocationWorkItem,
     HostResolutionWorkItem,
-    ParsedHostItem,
+    IpLocationWorkItem,
+    ParsedInputDomain,
+    RegistrableDomainResult,
 )
-from domain_pipeline.worker.runtime.busy_state import BusyReason
 from domain_pipeline.worker.runtime.queues import RuntimeQueueSet
 from domain_pipeline.worker.runtime.results import CompletedResultRequest
 
 
 def _completed_request(
-    parsed: ParsedHostItem,
+    parsed: ParsedInputDomain,
     route_transition: TerminalRouteTransition,
     evidence: CompletedResultEvidence | None = None,
 ) -> CompletedResultRequest:
-    """Return a completed-result request preserving parsed source context."""
+    """Return a completed result request for one input domain."""
     return CompletedResultRequest(
-        source_context=parsed.source_context,
         entry=parsed.entry,
         route_transition=route_transition,
         evidence=evidence or CompletedResultEvidence(),
-        source_id=parsed.output_source.source_id,
-        source_input_label=parsed.output_source.input_label,
     )
 
 
 class DelegationStage:
-    """Own root-level delegation queue consumption and host-level fanout."""
+    """Own one root lookup, result emission, and source-blind domain fanout."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
     async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume root-level delegation input and route each host result."""
+        """Consume root work, emit one root result, then route every input domain."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
                 work_item = await queue_bundle.delegation_input.get()
@@ -59,10 +55,33 @@ class DelegationStage:
                     return
                 async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
                     delegation_result = await self.runtime.lookup_delegation_root(
-                        work_item.delegation_source_context,
+                        work_item.delegation_profile,
                         work_item.registrable_domain,
                     )
-                    await self.route_root(queue_bundle, work_item, delegation_result)
+                    delegation_transition = DelegationRoutingPolicy().for_result(
+                        delegation_result
+                    )
+                    disposition = (
+                        "actionable"
+                        if not isinstance(
+                            delegation_transition, TerminalRouteTransition
+                        )
+                        else delegation_transition.route
+                    )
+                    await self.runtime.put_root_result(
+                        queue_bundle,
+                        RegistrableDomainResult(
+                            registrable_domain=work_item.registrable_domain,
+                            disposition=disposition,
+                            delegation_result=delegation_result,
+                        ),
+                    )
+                    await self.route_root(
+                        queue_bundle,
+                        work_item,
+                        delegation_result,
+                        delegation_transition,
+                    )
             finally:
                 queue_bundle.delegation_input.task_done()
 
@@ -71,56 +90,88 @@ class DelegationStage:
         queue_bundle: RuntimeQueueSet,
         work_item: DelegationRootWorkItem,
         delegation_result: DelegationResult,
+        delegation_transition: Any,
     ) -> None:
-        """Fan out one root delegation result to host-level routing."""
+        """Fan one root outcome out to every assigned input domain."""
         self.runtime.log_delegation_fanout(
             work_item.registrable_domain, len(work_item.items)
         )
         for parsed in work_item.items:
-            await self.route(queue_bundle, parsed, delegation_result)
+            await self.route(
+                queue_bundle,
+                parsed,
+                delegation_result,
+                delegation_transition,
+            )
 
     async def route(
         self,
         queue_bundle: RuntimeQueueSet,
-        parsed: ParsedHostItem,
+        parsed: ParsedInputDomain,
         delegation_result: DelegationResult,
+        delegation_transition: Any | None = None,
     ) -> None:
-        """Route one delegation result to terminal output or host resolution."""
-        delegation_transition = DelegationRoutingPolicy().for_result(delegation_result)
-        if isinstance(delegation_transition, TerminalRouteTransition):
+        """Apply root outcome first, then manual or per-domain stage routing."""
+        transition = delegation_transition or DelegationRoutingPolicy().for_result(
+            delegation_result
+        )
+        evidence = CompletedResultEvidence(delegation_result=delegation_result)
+        if isinstance(transition, TerminalRouteTransition):
+            await self.runtime.put_completed(
+                queue_bundle,
+                _completed_request(parsed, transition, evidence),
+            )
+            return
+
+        if parsed.manual_routing.manually_selected_for_filtered:
             await self.runtime.put_completed(
                 queue_bundle,
                 _completed_request(
                     parsed,
-                    delegation_transition,
-                    CompletedResultEvidence(delegation_result=delegation_result),
+                    ManualRoutingPolicy().selected_for_filtered(),
+                    evidence,
                 ),
             )
             return
-        if parsed.manual_routing.manually_selected_for_filtered:
-            route_transition = ManualRoutingPolicy().selected_for_filtered()
-        elif parsed.manual_routing.manually_added:
-            route_transition = ManualRoutingPolicy().manually_added_actionable()
-        else:
-            route_transition = HostResolutionRoutingPolicy().skipped()
-        await self.runtime.put_completed(
-            queue_bundle,
-            _completed_request(
-                parsed,
-                route_transition,
-                CompletedResultEvidence(delegation_result=delegation_result),
-            ),
-        )
+        if parsed.manual_routing.manually_added:
+            await self.runtime.put_completed(
+                queue_bundle,
+                _completed_request(
+                    parsed,
+                    ManualRoutingPolicy().manually_added_actionable(),
+                    evidence,
+                ),
+            )
+            return
+        if parsed.host_resolution_profile is None:
+            await self.runtime.put_completed(
+                queue_bundle,
+                _completed_request(
+                    parsed,
+                    HostResolutionRoutingPolicy().skipped(),
+                    evidence,
+                ),
+            )
+            return
+
+        async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
+            await queue_bundle.delegation_to_host_resolution.put(
+                HostResolutionWorkItem(
+                    parsed=parsed,
+                    delegation_result=delegation_result,
+                    delegation_transition=transition,
+                )
+            )
 
 
 class HostResolutionStage:
-    """Own host-resolution queue consumption and routing."""
+    """Own host-resolution lookups and IP-stage routing for input domains."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
     async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume host-resolution work and route review, filtered, or IP-location cases."""
+        """Resolve selected names for each input domain and route the combined result."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
                 work_item = await queue_bundle.delegation_to_host_resolution.get()
@@ -128,10 +179,15 @@ class HostResolutionStage:
                 if work_item is None:
                     return
                 async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
-                    host_resolution_result = await self.runtime.lookup_host_resolution(
-                        work_item.parsed.source_context, work_item.parsed.entry
+                    host_resolution_result, host_resolution_results = (
+                        await self.runtime.lookup_host_resolution(work_item.parsed)
                     )
-                    await self.route(queue_bundle, work_item, host_resolution_result)
+                    await self.route(
+                        queue_bundle,
+                        work_item,
+                        host_resolution_result,
+                        host_resolution_results,
+                    )
             finally:
                 queue_bundle.delegation_to_host_resolution.task_done()
 
@@ -140,26 +196,23 @@ class HostResolutionStage:
         queue_bundle: RuntimeQueueSet,
         work_item: HostResolutionWorkItem,
         host_resolution_result: HostResolutionResult,
+        host_resolution_results: list[HostResolutionResult],
     ) -> None:
-        """Route one host-resolution result to terminal output or ip_location."""
-        ip_location_enabled = bool(
-            work_item.parsed.source_context.config["ip_location"].get("enabled", False)
-        )
+        """Route the combined input-domain DNS outcome to IP location or terminal."""
+        ip_location_enabled = work_item.parsed.ip_location_profile is not None
         transition = HostResolutionRoutingPolicy().for_result(
             host_resolution_result,
             ip_location_enabled=ip_location_enabled,
         )
+        evidence = CompletedResultEvidence(
+            delegation_result=work_item.delegation_result,
+            host_resolution_results=host_resolution_results,
+            host_resolution_result=host_resolution_result,
+        )
         if isinstance(transition, TerminalRouteTransition):
             await self.runtime.put_completed(
                 queue_bundle,
-                _completed_request(
-                    work_item.parsed,
-                    transition,
-                    CompletedResultEvidence(
-                        delegation_result=work_item.delegation_result,
-                        host_resolution_result=host_resolution_result,
-                    ),
-                ),
+                _completed_request(work_item.parsed, transition, evidence),
             )
             return
         async with self.runtime.busy_state.track(BusyReason.DOWNSTREAM_PUT):
@@ -168,19 +221,20 @@ class HostResolutionStage:
                     parsed=work_item.parsed,
                     delegation_result=work_item.delegation_result,
                     host_resolution_result=host_resolution_result,
+                    host_resolution_results=host_resolution_results,
                     host_resolution_transition=transition,
                 )
             )
 
 
 class IpLocationStage:
-    """Own IP-location queue consumption and terminal policy routing."""
+    """Own IP-location lookups and final input-domain policy routes."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
     async def consume(self, queue_bundle: RuntimeQueueSet) -> None:
-        """Consume IP-location work and emit terminal policy results."""
+        """Consume resolved input domains and emit policy outcomes."""
         while True:
             async with self.runtime.busy_state.track(BusyReason.QUEUE_WAIT):
                 work_item = await queue_bundle.host_resolution_to_ip_location.get()
@@ -190,7 +244,7 @@ class IpLocationStage:
                 async with self.runtime.busy_state.track(BusyReason.ITEM_PROCESSING):
                     ip_location_transition, ip_location_results, ip_location_policy = (
                         await self.runtime.lookup_ip_location(
-                            work_item.parsed.source_context,
+                            work_item.parsed,
                             work_item.host_resolution_result,
                         )
                     )
@@ -211,7 +265,7 @@ class IpLocationStage:
         queue_bundle: RuntimeQueueSet,
         route_result: "IpLocationRouteResult",
     ) -> None:
-        """Emit one terminal IP-location policy result."""
+        """Emit the final route with evidence from stages actually run."""
         await self.runtime.put_completed(
             queue_bundle,
             _completed_request(
@@ -219,6 +273,9 @@ class IpLocationStage:
                 route_result.route_transition,
                 CompletedResultEvidence(
                     delegation_result=route_result.work_item.delegation_result,
+                    host_resolution_results=(
+                        route_result.work_item.host_resolution_results
+                    ),
                     host_resolution_result=(
                         route_result.work_item.host_resolution_result
                     ),
@@ -231,7 +288,7 @@ class IpLocationStage:
 
 @dataclasses.dataclass(frozen=True)
 class IpLocationRouteResult:
-    """IP-location route outcome consumed by the terminal emitter."""
+    """IP-location route and evidence consumed by terminal result emission."""
 
     work_item: IpLocationWorkItem
     route_transition: TerminalRouteTransition

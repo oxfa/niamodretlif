@@ -11,17 +11,12 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
-    model_validator,
 )
 
 from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
 from domain_pipeline.handoff_io import read_csv, read_yaml, write_csv, write_yaml
 from domain_pipeline.paths.layout import PathLayout
-from domain_pipeline.pipeline_run.format_version import (
-    PIPELINE_RUN_FORMAT_VERSION,
-    has_current_pipeline_run_format,
-)
-from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
+from domain_pipeline.worker.output.rows import PREPARATION_REVIEW_COLUMNS
 
 
 def _validate_publish_path(value: str, *, field_name: str) -> str:
@@ -100,25 +95,44 @@ class AggregateOutputSpec(PrepareAggregateModel):
         return [(publish_root / Path(item.path), item.format) for item in self.filtered]
 
 
+class PreparationTerminalRow(PrepareAggregateModel):
+    """Raw preparation terminal row, including prepare-owned provenance."""
+
+    host: str
+    registrable_domain: str
+    route: str
+    route_code: str
+    route_reason: str
+    delegation_status: str
+    delegation_reason: str
+    delegation_nameservers: list[str]
+    host_resolution_status: str
+    host_resolution_reason: str
+    canonical_name: str
+    resolved_ips: list[str]
+    ip_location_status: str
+    ip_location_reason: str
+    ip_location_policy_status: str
+    ip_location_policy_reason: str
+    ip_location_provider: str
+    ip_location_countries: list[str]
+    ip_location_region_codes: list[str]
+    ip_location_region_names: list[str]
+    source_id: str
+    source_input_label: str
+
+
 class PrepareAggregateManifest(PrepareAggregateModel):
     """Persisted prepare-to-aggregate JSON data handoff."""
 
-    automation_format_version: int
     batch_id: str
     config_name: str
     aggregate_output_spec: AggregateOutputSpec
     worker_ids: list[str]
     excluded_source_hosts: list[str]
     manually_added_domains: list[ManuallyAddedDomain]
-    preparation_review_output_rows: list[dict[str, str]]
+    preparation_review_rows: list[dict[str, str]]
     preparation_terminal_rows: list[dict[str, Any]]
-
-    @field_validator("automation_format_version", mode="before")
-    @classmethod
-    def _validate_format_version(cls, value: Any) -> int:
-        if not has_current_pipeline_run_format(value):
-            raise ValueError("unsupported prepare aggregate handoff format version")
-        return value
 
     @field_validator("excluded_source_hosts")
     @classmethod
@@ -128,6 +142,36 @@ class PrepareAggregateManifest(PrepareAggregateModel):
         if len(values) != len(set(values)):
             raise ValueError("excluded source hosts must not contain duplicates")
         return values
+
+    @field_validator("preparation_review_rows", mode="before")
+    @classmethod
+    def _validate_preparation_review_rows(
+        cls, values: Any
+    ) -> list[dict[str, str]]:
+        if not isinstance(values, list):
+            raise ValueError("preparation_review_rows must be a list")
+        expected_fields = set(PREPARATION_REVIEW_COLUMNS)
+        for value in values:
+            if (
+                not isinstance(value, dict)
+                or set(value) != expected_fields
+                or any(
+                    not isinstance(value.get(field), str)
+                    for field in PREPARATION_REVIEW_COLUMNS
+                )
+            ):
+                raise ValueError("preparation review row has unsupported fields")
+        return values
+
+    @field_validator("preparation_terminal_rows", mode="after")
+    @classmethod
+    def _validate_preparation_terminal_rows(
+        cls, values: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [
+            PreparationTerminalRow.model_validate(value).model_dump(mode="json")
+            for value in values
+        ]
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved aggregate-managed paths for this batch."""
@@ -151,7 +195,6 @@ def write_prepare_aggregate_handoff(
     write_yaml(
         config,
         {
-            "automation_format_version": manifest.automation_format_version,
             "batch_id": batch_id,
             "config_name": manifest.config_name,
             "excluded_source_hosts": manifest.excluded_source_hosts,
@@ -175,7 +218,11 @@ def write_prepare_aggregate_handoff(
             for item in manifest.manually_added_domains
         ],
     )
-    write_csv(review, REVIEW_OUTPUT_COLUMNS, manifest.preparation_review_output_rows)
+    write_csv(
+        review,
+        PREPARATION_REVIEW_COLUMNS,
+        manifest.preparation_review_rows,
+    )
     write_yaml(terminal, manifest.preparation_terminal_rows)
     return [config, workers, manual, review, terminal]
 
@@ -188,7 +235,6 @@ def load_prepare_aggregate_manifest_for_batch(
     config_path = paths.prepare_aggregate_config_path(batch_id=batch_id)
     payload = read_yaml(config_path)
     if not isinstance(payload, dict) or set(payload) != {
-        "automation_format_version",
         "batch_id",
         "config_name",
         "excluded_source_hosts",
@@ -227,7 +273,8 @@ def load_prepare_aggregate_manifest_for_batch(
         raise ValueError("invalid or duplicate aggregate worker id")
     manual = _load_manual_domains(paths.batch_manual_domains_path(batch_id=batch_id))
     review = read_csv(
-        paths.batch_preparation_review_path(batch_id=batch_id), REVIEW_OUTPUT_COLUMNS
+        paths.batch_preparation_review_path(batch_id=batch_id),
+        PREPARATION_REVIEW_COLUMNS,
     )
     terminal = read_yaml(paths.batch_preparation_terminal_path(batch_id=batch_id))
     if not isinstance(terminal, list):
@@ -235,14 +282,13 @@ def load_prepare_aggregate_manifest_for_batch(
     try:
         return PrepareAggregateManifest.model_validate(
             {
-                "automation_format_version": payload["automation_format_version"],
                 "batch_id": batch_id,
                 "config_name": config_name,
                 "aggregate_output_spec": output,
                 "worker_ids": workers,
                 "excluded_source_hosts": payload["excluded_source_hosts"],
                 "manually_added_domains": manual,
-                "preparation_review_output_rows": review,
+                "preparation_review_rows": review,
                 "preparation_terminal_rows": terminal,
             }
         )

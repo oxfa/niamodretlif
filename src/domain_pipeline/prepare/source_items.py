@@ -9,10 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from domain_pipeline.handoff_io import read_json, write_json
-from domain_pipeline.pipeline_run.format_version import (
-    PIPELINE_RUN_FORMAT_VERSION,
-    has_current_pipeline_run_format,
-)
 from domain_pipeline.prepare.models import PreparedInputSet
 from domain_pipeline.prepare.sources.jobs import SourceJob
 from domain_pipeline.prepare.sources.parser import (
@@ -178,7 +174,6 @@ class SourceItemHandoff:
 
         records.sort(key=lambda item: (item["source_ordinal"], item["source_line_number"]))
         index_payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "sources": source_metadata,
             "valid_source_items_by_registrable_domain": {
@@ -266,7 +261,6 @@ class SourceItemHandoff:
         """Validate schema, identities, and exact index-to-record membership."""
         payload = self.index_payload
         expected_keys = {
-            "automation_format_version",
             "batch_id",
             "sources",
             "valid_source_items_by_registrable_domain",
@@ -275,13 +269,8 @@ class SourceItemHandoff:
         }
         if not isinstance(payload, dict) or set(payload) != expected_keys:
             raise ValueError("source-item index has unsupported or missing fields")
-        if (
-            not has_current_pipeline_run_format(
-                payload["automation_format_version"]
-            )
-            or payload["batch_id"] != self.batch_id
-        ):
-            raise ValueError("source-item index version or batch identity mismatch")
+        if payload["batch_id"] != self.batch_id:
+            raise ValueError("source-item index batch identity mismatch")
         sources = payload["sources"]
         if not isinstance(sources, list):
             raise ValueError("source-item index sources must be a list")

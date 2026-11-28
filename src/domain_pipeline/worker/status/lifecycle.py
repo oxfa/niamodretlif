@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.worker_to_aggregate_manifest import (
     WorkerAggregateManifest,
     load_prepare_worker_manifest_or_error,
@@ -100,7 +99,6 @@ class WorkerStatusLifecycle:
                 )
             except Exception as status_exc:
                 return {
-                    "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                     "batch_id": batch_id,
                     "worker_id": worker_id,
                     "conclusion": STATUS_FAILURE,
@@ -111,7 +109,6 @@ class WorkerStatusLifecycle:
                     ),
                 }
             return {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch_id,
                 "worker_id": worker_id,
                 "conclusion": STATUS_FAILURE,
@@ -172,7 +169,6 @@ class WorkerStatusLifecycle:
                 )
                 result_status_path = None
             return {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch_id,
                 "worker_id": worker_id,
                 "conclusion": STATUS_FAILURE,
@@ -181,7 +177,6 @@ class WorkerStatusLifecycle:
                 "status_recording_error": status_recording_error,
             }
         return {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "worker_id": worker_id,
             "conclusion": STATUS_SUCCESS,
@@ -297,7 +292,6 @@ class WorkerStatusLifecycle:
 
     def _status_template(self, *, batch_id: str, worker_id: str) -> dict[str, Any]:
         return {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "worker_id": worker_id,
             "conclusion": STATUS_IN_PROGRESS,
@@ -308,7 +302,6 @@ class WorkerStatusLifecycle:
         self, request: WorkerStatusPayloadRequest
     ) -> dict[str, Any]:
         return {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": request.template["batch_id"],
             "worker_id": request.template["worker_id"],
             "conclusion": request.conclusion,

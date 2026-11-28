@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from domain_pipeline.prepare.config.loader import PipelineConfigLoader
-from domain_pipeline.prepare.delegation import delegation_behavior_fingerprint
+from domain_pipeline.prepare.delegation import (
+    effective_delegation_profile,
+    effective_host_resolution_profile,
+    effective_ip_location_profile,
+)
 from domain_pipeline.prepare.delegation_conflicts import (
     conflicting_delegation_behavior_message,
 )
@@ -18,8 +23,8 @@ from domain_pipeline.prepare.ip_location_credentials import (
 from domain_pipeline.prepare.manual_inputs import ManualInputLoader, ManualInputSet
 from domain_pipeline.prepare.merger import PreparedEntryMerger, prepared_entry_merge_key
 from domain_pipeline.prepare.models import (
-    MANUALLY_ADDED_SOURCE_ID,
     MANUALLY_SELECTED_FOR_FILTERED_SOURCE_ID,
+    PreparedInputDomainPlan,
     PreparedInputSet,
     PreparedManualRouting,
     PreparedOutputRows,
@@ -32,7 +37,6 @@ from domain_pipeline.prepare.sources.parser import (
     ParsedSourceFile,
 )
 from domain_pipeline.routing import (
-    InputValidationRoutingPolicy,
     ManualRoutingPolicy,
     TerminalRouteTransition,
 )
@@ -57,6 +61,7 @@ class PreparationCollections:
 
     entries_by_host: dict[str, DomainEntry] = dataclasses.field(default_factory=dict)
     source_id_by_host: dict[str, str] = dataclasses.field(default_factory=dict)
+    source_ids_by_host: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     manual_routing_by_host: dict[str, PreparedManualRouting] = dataclasses.field(
         default_factory=dict
     )
@@ -134,46 +139,6 @@ def _manual_review_row(request: ManualRowRequest) -> dict[str, Any]:
     )
 
 
-def _public_suffix_review_row(
-    *,
-    job: SourceJob,
-    entry: DomainEntry,
-    manual_routing: PreparedManualRouting,
-) -> dict[str, Any]:
-    route_transition = InputValidationRoutingPolicy().public_suffix()
-    return TerminalRowBuilder().build(
-        BaseRowRequest(
-            source=BaseRowSourceRequest(
-                source_context=_source_context_from_job(job),
-                source_id=manual_routing.output_source_id,
-                source_input_label=manual_routing.output_source_input_label,
-            ),
-            entry=entry,
-            route_transition=route_transition,
-        )
-    )
-
-
-def _manually_selected_public_suffix_row(
-    *,
-    job: SourceJob,
-    entry: DomainEntry,
-    manual_routing: PreparedManualRouting,
-) -> dict[str, Any]:
-    route_transition = ManualRoutingPolicy().selected_public_suffix_for_filtered()
-    return TerminalRowBuilder().build(
-        BaseRowRequest(
-            source=BaseRowSourceRequest(
-                source_context=_source_context_from_job(job),
-                source_id=manual_routing.output_source_id,
-                source_input_label=manual_routing.output_source_input_label,
-            ),
-            entry=entry,
-            route_transition=route_transition,
-        )
-    )
-
-
 def _preparation_terminal_row(
     *,
     row: dict[str, Any],
@@ -235,8 +200,10 @@ class PreparationPlanner:
         self._append_missing_manually_selected_rows(state)
 
         root_plans = self._root_plans(
-            entries_by_source=entries_by_source,
             source_jobs_by_id=state.source_jobs_by_id,
+            entries_by_host=state.collections.entries_by_host,
+            source_ids_by_host=state.collections.source_ids_by_host,
+            manual_routing_by_host=state.collections.manual_routing_by_host,
         )
         return PreparedInputSet(
             config=config,
@@ -248,6 +215,13 @@ class PreparationPlanner:
             preparation_outputs=PreparedOutputRows(
                 review_rows=state.collections.review_rows,
                 terminal_rows=state.collections.terminal_rows,
+            ),
+            source_ids_by_host={
+                host: tuple(sorted(source_ids))
+                for host, source_ids in state.collections.source_ids_by_host.items()
+            },
+            manually_added_entries=dict(
+                state.manual_inputs.manually_added_entries
             ),
             excluded_source_hosts=set(
                 state.manual_inputs.manually_excluded_from_sources_entries
@@ -274,6 +248,9 @@ class PreparationPlanner:
                 state.collections.matched_hosts.add(host)
                 if host in excluded_hosts:
                     continue
+                state.collections.source_ids_by_host.setdefault(host, set()).add(
+                    job.source_id
+                )
                 manual_routing = PreparedManualRouting(
                     manually_selected_for_filtered=(
                         host
@@ -288,31 +265,13 @@ class PreparationPlanner:
                     state.collections.manual_routing_by_host[host] = manual_routing
 
     def _merge_manually_added_entries(self, state: PreparationState) -> None:
-        manually_added_config_fingerprints = {
-            delegation_behavior_fingerprint(job.config) for job in state.jobs
-        }
-        manually_added_label = _source_relative_label(
-            self.source_root,
-            state.manual_inputs.manually_added_path,
-        )
         for host, entry in sorted(state.manual_inputs.manually_added_entries.items()):
-            manual_routing = PreparedManualRouting(
-                manually_added=True,
-                output_source_id=MANUALLY_ADDED_SOURCE_ID,
-                output_source_input_label=manually_added_label,
-            )
+            manual_routing = PreparedManualRouting(manually_added=True)
             current_keys = self._matching_prepared_entry_keys(
                 state.collections.entries_by_host,
                 entry,
             )
             if not current_keys:
-                if len(manually_added_config_fingerprints) > 1:
-                    raise ValueError(
-                        "manually added file "
-                        f"{state.manual_inputs.manually_added_path} contains "
-                        f"unmatched host {host!r}; unmatched manually_added requires "
-                        "all enabled sources to share dns_query/delegation behavior"
-                    )
                 state.collections.entries_by_host[prepared_entry_merge_key(entry)] = (
                     entry
                 )
@@ -327,8 +286,6 @@ class PreparationPlanner:
                         dataclasses.replace(
                             current_routing,
                             manually_added=True,
-                            output_source_id=MANUALLY_ADDED_SOURCE_ID,
-                            output_source_input_label=manually_added_label,
                         )
                     )
             state.collections.matched_hosts.add(host)
@@ -367,33 +324,7 @@ class PreparationPlanner:
             ),
         ):
             source_id = state.collections.source_id_by_host[entry.host]
-            manual_routing = state.collections.manual_routing_by_host.get(
-                entry.host, PreparedManualRouting()
-            )
             if entry.registrable_domain is None:
-                if manual_routing.manually_selected_for_filtered:
-                    route_transition = (
-                        ManualRoutingPolicy().selected_public_suffix_for_filtered()
-                    )
-                    row = _manually_selected_public_suffix_row(
-                        job=state.source_jobs_by_id[source_id],
-                        entry=entry,
-                        manual_routing=manual_routing,
-                    )
-                else:
-                    route_transition = InputValidationRoutingPolicy().public_suffix()
-                    row = _public_suffix_review_row(
-                        job=state.source_jobs_by_id[source_id],
-                        entry=entry,
-                        manual_routing=manual_routing,
-                    )
-                    state.collections.review_rows.append(row)
-                state.collections.terminal_rows.append(
-                    _preparation_terminal_row(
-                        row=row,
-                        route_transition=route_transition,
-                    )
-                )
                 continue
             entries_by_source[source_id].append(entry)
         return entries_by_source
@@ -430,48 +361,166 @@ class PreparationPlanner:
     def _root_plans(
         self,
         *,
-        entries_by_source: dict[str, list[DomainEntry]],
         source_jobs_by_id: dict[str, SourceJob],
+        entries_by_host: dict[str, DomainEntry],
+        source_ids_by_host: dict[str, set[str] | tuple[str, ...]],
+        manual_routing_by_host: dict[str, PreparedManualRouting],
     ) -> dict[str, PreparedRootPlan]:
-        root_entries: dict[str, list[tuple[str, DomainEntry]]] = defaultdict(list)
-        source_order_by_id = {
-            source_id: source_index
-            for source_index, source_id in enumerate(source_jobs_by_id)
-        }
-        for source_id, entries in entries_by_source.items():
-            for entry in entries:
-                if entry.registrable_domain:
-                    root_entries[entry.registrable_domain].append((source_id, entry))
+        root_entries: dict[str, dict[str, DomainEntry]] = defaultdict(dict)
+        for host, entry in entries_by_host.items():
+            if entry.registrable_domain:
+                root_entries[entry.registrable_domain][host] = entry
 
         root_plans: dict[str, PreparedRootPlan] = {}
         for registrable_domain, entries in sorted(root_entries.items()):
-            ordered_entries = sorted(
-                entries,
-                key=lambda entry: (
-                    source_order_by_id[entry[0]],
-                    entry[1].host,
-                ),
-            )
-            fingerprints_by_source = {
-                source_id: delegation_behavior_fingerprint(
-                    source_jobs_by_id[source_id].config
-                )
-                for source_id, _entry in ordered_entries
+            delegation_profiles_by_source: dict[str, dict[str, Any]] = {}
+            for host in sorted(entries):
+                source_ids = tuple(sorted(source_ids_by_host.get(host, ())))
+                routing = manual_routing_by_host.get(host, PreparedManualRouting())
+                if routing.manually_added and not source_ids:
+                    source_ids = tuple(sorted(source_jobs_by_id))
+                for source_id in source_ids:
+                    delegation_profiles_by_source[source_id] = (
+                        effective_delegation_profile(
+                            source_jobs_by_id[source_id].config
+                        )
+                    )
+
+            profile_keys = {
+                _profile_key(profile)
+                for profile in delegation_profiles_by_source.values()
             }
-            fingerprints = set(fingerprints_by_source.values())
-            if len(fingerprints) > 1:
+            if len(profile_keys) > 1:
                 raise ValueError(
                     conflicting_delegation_behavior_message(
-                        registrable_domain, fingerprints_by_source
+                        registrable_domain, delegation_profiles_by_source
                     )
                 )
-            delegation_config_source_id = ordered_entries[0][0]
+            if not delegation_profiles_by_source:
+                raise ValueError(
+                    f"registrable domain {registrable_domain!r} has no effective "
+                    "delegation profile"
+                )
+            delegation_profile = delegation_profiles_by_source[
+                sorted(delegation_profiles_by_source)[0]
+            ]
+
+            input_domains: dict[str, PreparedInputDomainPlan] = {}
+            for host, entry in sorted(entries.items()):
+                routing = manual_routing_by_host.get(host, PreparedManualRouting())
+                host_profile: dict[str, Any] | None = None
+                ip_profile: dict[str, Any] | None = None
+                if not (
+                    routing.manually_selected_for_filtered or routing.manually_added
+                ):
+                    source_ids = tuple(sorted(source_ids_by_host.get(host, ())))
+                    if not source_ids:
+                        raise ValueError(
+                            f"ordinary input domain {host!r} has no source profile"
+                        )
+                    source_configs = [
+                        source_jobs_by_id[source_id].config
+                        for source_id in source_ids
+                    ]
+                    host_enabled = {
+                        bool(source["host_resolution"].get("enabled", False))
+                        for source in source_configs
+                    }
+                    if len(host_enabled) > 1:
+                        raise _domain_profile_conflict(
+                            registrable_domain,
+                            host,
+                            source_ids,
+                            "different host-resolution enablement",
+                        )
+                    if True in host_enabled:
+                        effective_host_profiles = {
+                            source_id: effective_host_resolution_profile(
+                                source_jobs_by_id[source_id].config
+                            )
+                            for source_id in source_ids
+                        }
+                        host_profile_keys = {
+                            _profile_key(
+                                profile
+                                if host == registrable_domain
+                                else {
+                                    key: value
+                                    for key, value in profile.items()
+                                    if key
+                                    != "resolve_www_for_registrable_domain"
+                                }
+                            )
+                            for profile in effective_host_profiles.values()
+                        }
+                        if len(host_profile_keys) > 1:
+                            raise _domain_profile_conflict(
+                                registrable_domain,
+                                host,
+                                source_ids,
+                                "different effective host-resolution profile",
+                            )
+                        host_profile = effective_host_profiles[source_ids[0]]
+
+                        ip_enabled = {
+                            bool(source["ip_location"].get("enabled", False))
+                            for source in source_configs
+                        }
+                        if len(ip_enabled) > 1:
+                            raise _domain_profile_conflict(
+                                registrable_domain,
+                                host,
+                                source_ids,
+                                "different IP-location enablement",
+                            )
+                        if True in ip_enabled:
+                            effective_ip_profiles = {
+                                source_id: effective_ip_location_profile(
+                                    source_jobs_by_id[source_id].config
+                                )
+                                for source_id in source_ids
+                            }
+                            if len(
+                                {
+                                    _profile_key(profile)
+                                    for profile in effective_ip_profiles.values()
+                                }
+                            ) > 1:
+                                raise _domain_profile_conflict(
+                                    registrable_domain,
+                                    host,
+                                    source_ids,
+                                    "different effective IP-location profile",
+                                )
+                            ip_profile = effective_ip_profiles[source_ids[0]]
+                input_domains[host] = PreparedInputDomainPlan(
+                    host=entry.host,
+                    manual_routing=routing,
+                    host_resolution_profile=host_profile,
+                    ip_location_profile=ip_profile,
+                )
+
             root_plans[registrable_domain] = PreparedRootPlan(
                 registrable_domain=registrable_domain,
-                entry_count=len(ordered_entries),
-                delegation_config_source_id=delegation_config_source_id,
-                delegation_behavior_fingerprint=fingerprints_by_source[
-                    delegation_config_source_id
-                ],
+                delegation_profile=delegation_profile,
+                input_domains=input_domains,
             )
         return root_plans
+
+
+def _profile_key(profile: dict[str, Any]) -> str:
+    """Return a deterministic key for one fully effective runtime profile."""
+    return json.dumps(profile, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _domain_profile_conflict(
+    registrable_domain: str,
+    host: str,
+    source_ids: tuple[str, ...],
+    reason: str,
+) -> ValueError:
+    """Describe conflicting enabled-stage behavior for a deduplicated host."""
+    return ValueError(
+        f"input domain {host!r} under registrable domain {registrable_domain!r} "
+        f"appears in sources with {reason}: {', '.join(source_ids)}"
+    )

@@ -16,19 +16,18 @@ from pydantic import (
 )
 
 from domain_pipeline.config_namespace import CONFIG_NAMESPACE_PATTERN
+from domain_pipeline.prepare.config.models import (
+    DNSECSConfig,
+    DNSQueryRateLimitConfig,
+    DNSResolverConfig,
+)
 from domain_pipeline.handoff_io import (
-    read_csv,
     read_json,
     read_yaml,
-    write_csv,
     write_json,
     write_yaml,
 )
 from domain_pipeline.paths.layout import PathLayout
-from domain_pipeline.pipeline_run.format_version import (
-    PIPELINE_RUN_FORMAT_VERSION,
-    has_current_pipeline_run_format,
-)
 from domain_pipeline.prepare.stage_concurrency import (
     RuntimeStageConcurrencyAdaptiveConfig,
 )
@@ -51,7 +50,7 @@ class WorkerOutputSpec(PrepareWorkerModel):
     result_root: str
     unactionable: str
     review: str
-    terminal_rows: str
+    domain_results: str
     cache: str
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
@@ -60,45 +59,186 @@ class WorkerOutputSpec(PrepareWorkerModel):
             "result_root": state_root / Path(self.result_root),
             "unactionable": state_root / Path(self.unactionable),
             "review": state_root / Path(self.review),
-            "terminal_rows": state_root / Path(self.terminal_rows),
+            "domain_results": state_root / Path(self.domain_results),
             "cache": state_root / Path(self.cache),
         }
 
 
-class PreparedDelegationRootMetadata(PrepareWorkerModel):
-    """Worker-local settings selected for one registrable-domain check."""
+class WorkerRuntimeRootDNSQueryProfile(PrepareWorkerModel):
+    """Effective shared DNS settings used by one root delegation profile."""
 
-    delegation_config_source_id: str
-    delegation_behavior_fingerprint: str
+    default_resolvers: list[DNSResolverConfig]
+    timeout: float
+    retry_backoff_base_seconds: float
+    query_rate_limit: DNSQueryRateLimitConfig
+
+
+class WorkerRuntimeDelegationDNSProfile(PrepareWorkerModel):
+    """Effective delegation-stage overrides for one root profile."""
+
+    resolvers: list[DNSResolverConfig] | None
+    timeout: float | None
+    query_rate_limit: DNSQueryRateLimitConfig | None
+    retry_attempts: int
+
+
+class PreparedDelegationProfile(PrepareWorkerModel):
+    """Source-blind effective DNS settings for one registrable-root query."""
+
+    dns_query: WorkerRuntimeRootDNSQueryProfile
+    delegation: WorkerRuntimeDelegationDNSProfile
+
+
+class PreparedManualRoutingProfile(PrepareWorkerModel):
+    """Source-blind manual routing flags for one input domain."""
+
+    manually_selected_for_filtered: bool
+    manually_added: bool
 
     @model_validator(mode="after")
-    def _validate_root_metadata(self) -> "PreparedDelegationRootMetadata":
-        if not self.delegation_config_source_id:
-            raise ValueError("delegation root delegation_config_source_id is required")
-        if not self.delegation_behavior_fingerprint:
-            raise ValueError(
-                "delegation root delegation_behavior_fingerprint is required"
-            )
+    def _validate_mutually_exclusive_flags(self) -> "PreparedManualRoutingProfile":
+        if self.manually_selected_for_filtered and self.manually_added:
+            raise ValueError("input domain cannot be manually selected and added")
+        return self
+
+
+class WorkerRuntimeHostResolutionProfile(PrepareWorkerModel):
+    """Fully effective host-resolution settings for one input domain."""
+
+    resolvers: list[DNSResolverConfig]
+    timeout: float
+    retry_backoff_base_seconds: float
+    query_rate_limit: DNSQueryRateLimitConfig
+    retry_attempts: int
+    ecs: DNSECSConfig
+    resolve_www_for_registrable_domain: bool
+
+
+class WorkerRuntimeIpLocationMatchList(PrepareWorkerModel):
+    """IP-location include/exclude country and region values."""
+
+    countries: list[str]
+    regions: list[str]
+
+
+class WorkerRuntimeLocationPolicyProfile(PrepareWorkerModel):
+    """Effective IP-location policy with no credential input."""
+
+    enabled: bool
+    match_scope: Literal["all_ips", "any_ip"]
+    include: WorkerRuntimeIpLocationMatchList
+    exclude: WorkerRuntimeIpLocationMatchList
+
+
+class WorkerRuntimeIpLocationProfile(PrepareWorkerModel):
+    """Effective credential-free IP-location settings for one input domain."""
+
+    timeout: float
+    cache_ttl_days: int
+    policy: WorkerRuntimeLocationPolicyProfile
+    requires_region_lookup: bool
+    effective_provider: Literal[
+        IP_LOCATION_PROVIDER_IPINFO_LITE,
+        IP_LOCATION_PROVIDER_GEOJS,
+    ]
+
+
+class PreparedInputDomainWork(PrepareWorkerModel):
+    """One unique source-blind input domain and the routes it can execute."""
+
+    manual_routing: PreparedManualRoutingProfile
+    host_resolution_profile: WorkerRuntimeHostResolutionProfile | None = None
+    ip_location_profile: WorkerRuntimeIpLocationProfile | None = None
+
+    @model_validator(mode="after")
+    def _validate_stage_profiles(self) -> "PreparedInputDomainWork":
+        if (
+            "host_resolution_profile" in self.model_fields_set
+            and self.host_resolution_profile is None
+        ):
+            raise ValueError("host_resolution_profile must be omitted when disabled")
+        if (
+            "ip_location_profile" in self.model_fields_set
+            and self.ip_location_profile is None
+        ):
+            raise ValueError("ip_location_profile must be omitted when disabled")
+        if self.ip_location_profile is not None and self.host_resolution_profile is None:
+            raise ValueError("ip_location_profile requires host resolution")
+        if (
+            self.manual_routing.manually_selected_for_filtered
+            or self.manual_routing.manually_added
+        ) and (
+            self.host_resolution_profile is not None
+            or self.ip_location_profile is not None
+        ):
+            raise ValueError("manual input domains cannot carry host/IP profiles")
+        return self
+
+
+class PreparedDelegationRootWork(PrepareWorkerModel):
+    """One atomic root assignment with its unique input-domain work."""
+
+    delegation_profile: PreparedDelegationProfile
+    input_domains: dict[str, PreparedInputDomainWork]
+
+    @model_validator(mode="after")
+    def _validate_input_domains(self) -> "PreparedDelegationRootWork":
+        if not self.input_domains:
+            raise ValueError("delegation root must assign at least one input domain")
         return self
 
 
 class PreparedRuntimeMetadata(PrepareWorkerModel):
-    """Root-owned prepared metadata consumed by the worker runtime fast path."""
+    """Canonical source-blind root-to-input-domain worker work manifest."""
 
-    delegation_roots: dict[str, PreparedDelegationRootMetadata]
+    delegation_roots: dict[str, PreparedDelegationRootWork]
 
     @model_validator(mode="after")
     def _validate_delegation_root_keys(self) -> "PreparedRuntimeMetadata":
-        for root_key in self.delegation_roots:
-            if not root_key:
+        parser = DomainListParser()
+        for root_key, root_work in self.delegation_roots.items():
+            parsed_root = parser.parse_source_item(
+                root_key, file_format=InputFileFormat.PLAIN
+            )
+            if (
+                parsed_root is None
+                or parsed_root.error_reason is not None
+                or len(parsed_root.targets) != 1
+                or parsed_root.targets[0].error_reason is not None
+                or parsed_root.targets[0].host != root_key
+                or parsed_root.targets[0].registrable_domain != root_key
+            ):
                 raise ValueError(
-                    "delegation_roots key must be a non-empty registrable domain"
+                    f"delegation_roots key is not a registrable domain: {root_key!r}"
                 )
+            for input_domain in root_work.input_domains:
+                parsed_input = parser.parse_source_item(
+                    input_domain, file_format=InputFileFormat.PLAIN
+                )
+                if (
+                    parsed_input is None
+                    or parsed_input.error_reason is not None
+                    or len(parsed_input.targets) != 1
+                    or parsed_input.targets[0].error_reason is not None
+                    or parsed_input.targets[0].host != input_domain
+                    or parsed_input.targets[0].registrable_domain != root_key
+                ):
+                    raise ValueError(
+                        "input domain does not match its registrable root: "
+                        f"{input_domain!r} under {root_key!r}"
+                    )
         return self
 
     def to_runtime_payload(self) -> dict[str, Any]:
-        """Return a mutable runtime payload preserving the current metadata shape."""
-        return copy.deepcopy(self.model_dump())
+        """Return the canonical mutable root-to-domain work mapping."""
+        payload = copy.deepcopy(self.model_dump(mode="json"))
+        for root in payload["delegation_roots"].values():
+            for domain in root["input_domains"].values():
+                if domain["host_resolution_profile"] is None:
+                    domain.pop("host_resolution_profile")
+                if domain["ip_location_profile"] is None:
+                    domain.pop("ip_location_profile")
+        return payload
 
 
 class WorkerRuntimeDelegationTTLSpec(PrepareWorkerModel):
@@ -164,93 +304,12 @@ class WorkerRuntimeSettingsSpec(PrepareWorkerModel):
     stage_concurrency: WorkerRuntimeStageConcurrencySpec
 
 
-class WorkerRuntimeInputConfig(PrepareWorkerModel):
-    """Source input config persisted in worker manifests."""
-
-    type: Literal["file", "url"]
-    location: str
-    format: str = "auto"
-    label: str = ""
-
-
-class WorkerRuntimeFetchConfig(PrepareWorkerModel):
-    """Source fetch config persisted in worker manifests."""
-
-    request_timeout: float = 30.0
-
-
-class WorkerRuntimeIpLocationMatchList(PrepareWorkerModel):
-    """IP-location include/exclude country and region values in worker manifests."""
-
-    countries: list[str] = Field(default_factory=list)
-    regions: list[str] = Field(default_factory=list)
-
-
-class WorkerRuntimeLocationPolicyConfig(PrepareWorkerModel):
-    """IP-location policy config persisted in worker manifests."""
-
-    enabled: bool = False
-    match_scope: Literal["all_ips", "any_ip"] = "all_ips"
-    include: WorkerRuntimeIpLocationMatchList = Field(
-        default_factory=WorkerRuntimeIpLocationMatchList
-    )
-    exclude: WorkerRuntimeIpLocationMatchList = Field(
-        default_factory=WorkerRuntimeIpLocationMatchList
-    )
-
-
-class WorkerRuntimeIPLocationConfig(PrepareWorkerModel):
-    """Effective IP-location settings persisted after config normalization."""
-
-    enabled: bool = False
-    timeout: float = 5.0
-    cache_ttl_days: int = 7
-    token: str = ""
-    policy: WorkerRuntimeLocationPolicyConfig = Field(
-        default_factory=WorkerRuntimeLocationPolicyConfig
-    )
-    requires_region_lookup: bool = False
-    effective_provider: str = IP_LOCATION_PROVIDER_IPINFO_LITE
-
-    @model_validator(mode="after")
-    def _validate_effective_provider(self) -> "WorkerRuntimeIPLocationConfig":
-        if self.effective_provider not in {
-            IP_LOCATION_PROVIDER_IPINFO_LITE,
-            IP_LOCATION_PROVIDER_GEOJS,
-        }:
-            raise ValueError("effective_provider must be ipinfo_lite or geojs")
-        return self
-
-
-class WorkerRuntimeOutputConfig(PrepareWorkerModel):
-    """Source output config persisted in worker manifests."""
-
-    directory: str = "output"
-
-
-class WorkerRuntimeSourceConfig(PrepareWorkerModel):
-    """Effective source settings persisted in one prepare-to-worker manifest."""
-
-    id: str
-    enabled: bool = True
-    input: WorkerRuntimeInputConfig
-    fetch: WorkerRuntimeFetchConfig = Field(default_factory=WorkerRuntimeFetchConfig)
-    dns_query: dict[str, Any] = Field(default_factory=dict)
-    delegation: dict[str, Any] = Field(default_factory=dict)
-    host_resolution: dict[str, Any] = Field(default_factory=dict)
-    ip_location: WorkerRuntimeIPLocationConfig = Field(
-        default_factory=WorkerRuntimeIPLocationConfig
-    )
-    output: WorkerRuntimeOutputConfig = Field(default_factory=WorkerRuntimeOutputConfig)
-
-
 class WorkerRuntimeSpec(PrepareWorkerModel):
     """Prepare-owned runtime config for one worker execution."""
 
     config_name: str
     cache: WorkerRuntimeCacheSpec
     runtime: WorkerRuntimeSettingsSpec
-    sources: list[WorkerRuntimeSourceConfig]
     output_spec: WorkerOutputSpec
     debug_log_path: str
 
@@ -262,11 +321,16 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
     ) -> dict[str, Any]:
         """Return the runtime config payload with paths resolved for execution."""
         payload = {
-            "version": 2,
             "config_name": self.config_name,
             "cache": self.cache.model_dump(mode="json"),
             "runtime": self.runtime.model_dump(mode="json"),
-            "sources": [source.model_dump(mode="json") for source in self.sources],
+            "output_spec": {
+                key: str(path.resolve())
+                for key, path in self.output_spec.resolve_paths(state_root).items()
+            },
+            "debug_log_path": str(
+                (state_root / Path(self.debug_log_path)).resolve()
+            ),
         }
         cache_payload = payload["cache"]
         cache_file = str(cache_payload.get("cache_file", "")).strip()
@@ -277,34 +341,16 @@ class WorkerRuntimeSpec(PrepareWorkerModel):
             cache_payload["baseline_cache_file"] = str(
                 (source_root / Path(baseline_cache_file)).resolve()
             )
-        for source in payload["sources"]:
-            output_payload = source.get("output", {})
-            directory = str(output_payload.get("directory", "")).strip()
-            if directory:
-                output_payload["directory"] = str(
-                    (state_root / Path(directory)).resolve()
-                )
-            output_payload["terminal_rows_file"] = str(
-                (state_root / Path(self.output_spec.terminal_rows)).resolve()
-            )
         return payload
 
 
 class PrepareWorkerManifest(PrepareWorkerModel):
     """Persisted prepare-to-worker runtime manifest."""
 
-    automation_format_version: int
     batch_id: str
     worker_id: str
     runtime_spec: WorkerRuntimeSpec
     prepared_metadata: PreparedRuntimeMetadata
-
-    @field_validator("automation_format_version", mode="before")
-    @classmethod
-    def _validate_format_version(cls, value: Any) -> int:
-        if not has_current_pipeline_run_format(value):
-            raise ValueError("unsupported prepare worker handoff format version")
-        return value
 
     def resolve_paths(self, state_root: Path) -> dict[str, Path]:
         """Return resolved worker output paths for this manifest."""
@@ -318,12 +364,9 @@ class PrepareWorkerManifest(PrepareWorkerModel):
 def write_prepare_worker_handoff(
     manifest: PrepareWorkerManifest, *, state_root: Path
 ) -> list[Path]:
-    """Write runtime configuration and assigned root metadata separately."""
+    """Write one source-blind worker-work manifest and its identity record."""
     paths = PathLayout(state_root).workflow_state
     config_path = paths.prepare_worker_config_path(
-        batch_id=manifest.batch_id, worker_id=manifest.worker_id
-    )
-    roots_path = paths.prepare_worker_roots_path(
         batch_id=manifest.batch_id, worker_id=manifest.worker_id
     )
     runtime = manifest.runtime_spec.model_dump(mode="json")
@@ -332,31 +375,15 @@ def write_prepare_worker_handoff(
     runtime.pop("debug_log_path")
     runtime["cache"].pop("cache_file")
     runtime["cache"].pop("baseline_cache_file")
-    for source in runtime["sources"]:
-        source.pop("output")
     write_yaml(
         config_path,
         {
-            "automation_format_version": manifest.automation_format_version,
             "batch_id": manifest.batch_id,
             "worker_id": manifest.worker_id,
             "config_name": manifest.runtime_spec.config_name,
             "runtime_spec": runtime,
+            "prepared_metadata": manifest.prepared_metadata.to_runtime_payload(),
         },
-    )
-    write_csv(
-        roots_path,
-        (
-            "registrable_domain",
-            "delegation_config_source_id",
-            "delegation_behavior_fingerprint",
-        ),
-        [
-            {"registrable_domain": domain, **metadata.model_dump()}
-            for domain, metadata in sorted(
-                manifest.prepared_metadata.delegation_roots.items()
-            )
-        ],
     )
     identity_path = paths.prepare_worker_identity_path(
         batch_id=manifest.batch_id, worker_id=manifest.worker_id
@@ -364,12 +391,11 @@ def write_prepare_worker_handoff(
     write_json(
         identity_path,
         {
-            "automation_format_version": manifest.automation_format_version,
             "batch_id": manifest.batch_id,
             "worker_id": manifest.worker_id,
         },
     )
-    return [config_path, roots_path, identity_path]
+    return [config_path, identity_path]
 
 
 def load_prepare_worker_manifest_for_worker(
@@ -378,7 +404,7 @@ def load_prepare_worker_manifest_for_worker(
     worker_id: str,
     state_root: Path,
 ) -> PrepareWorkerManifest:
-    """Load the designated worker's YAML configuration and assigned roots."""
+    """Load the designated worker's source-blind YAML work manifest."""
     layout = PathLayout(state_root)
     paths = layout.workflow_state
     config_path = paths.prepare_worker_config_path(
@@ -390,15 +416,13 @@ def load_prepare_worker_manifest_for_worker(
         )
     payload = read_yaml(config_path)
     if not isinstance(payload, dict) or set(payload) != {
-        "automation_format_version",
         "batch_id",
         "worker_id",
         "config_name",
         "runtime_spec",
+        "prepared_metadata",
     }:
         raise ValueError(f"invalid prepare worker configuration {config_path}")
-    if not has_current_pipeline_run_format(payload["automation_format_version"]):
-        raise ValueError("unsupported prepare worker handoff format version")
     if payload["batch_id"] != batch_id or payload["worker_id"] != worker_id:
         raise ValueError("prepare worker configuration identity mismatch")
     identity = read_json(
@@ -406,12 +430,8 @@ def load_prepare_worker_manifest_for_worker(
     )
     if (
         not isinstance(identity, dict)
-        or not has_current_pipeline_run_format(
-            identity.get("automation_format_version")
-        )
         or identity
         != {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": batch_id,
             "worker_id": worker_id,
         }
@@ -428,17 +448,13 @@ def load_prepare_worker_manifest_for_worker(
         worker_id=worker_id,
         config_name=config_name,
     )
-    roots = _load_assigned_roots(
-        paths.prepare_worker_roots_path(batch_id=batch_id, worker_id=worker_id)
-    )
     try:
         return PrepareWorkerManifest.model_validate(
             {
-                "automation_format_version": payload["automation_format_version"],
                 "batch_id": batch_id,
                 "worker_id": worker_id,
                 "runtime_spec": runtime,
-                "prepared_metadata": {"delegation_roots": roots},
+                "prepared_metadata": payload["prepared_metadata"],
             }
         )
     except ValidationError as exc:
@@ -456,19 +472,14 @@ def _worker_runtime_with_paths(
     runtime: Any, *, batch_id: str, worker_id: str, config_name: str
 ) -> dict[str, Any]:
     """Validate worker configuration and restore its derived paths."""
-    if not isinstance(runtime, dict) or set(runtime) != {"cache", "runtime", "sources"}:
+    if not isinstance(runtime, dict) or set(runtime) != {"cache", "runtime"}:
         raise ValueError("invalid prepare worker runtime fields")
     cache = runtime.get("cache")
-    sources = runtime.get("sources")
     if not isinstance(cache, dict) or set(cache) != {
         "delegation_ttl_days",
         "host_resolution_ttl_days",
     }:
         raise ValueError("invalid prepare worker cache fields")
-    if not isinstance(sources, list) or any(
-        not isinstance(source, dict) or "output" in source for source in sources
-    ):
-        raise ValueError("invalid prepare worker source fields")
     runtime["config_name"] = config_name
     # Derive paths from the validated identities, rather than trusting handoff paths.
     relative = PathLayout(Path("."))
@@ -480,15 +491,13 @@ def _worker_runtime_with_paths(
         runtime["cache"]["baseline_cache_file"] = (
             relative.workflow_state.runtime_cache_path().as_posix()
         )
-        for source in runtime["sources"]:
-            source["output"] = {"directory": wp.output_directory.as_posix()}
         runtime["output_spec"] = {
             name: getattr(wp, name).as_posix()
             for name in (
                 "result_root",
                 "unactionable",
                 "review",
-                "terminal_rows",
+                "domain_results",
                 "cache",
             )
         }
@@ -496,32 +505,3 @@ def _worker_runtime_with_paths(
     except (KeyError, TypeError) as exc:
         raise ValueError("invalid prepare worker runtime configuration") from exc
     return runtime
-
-
-def _load_assigned_roots(path: Path) -> dict[str, dict[str, str]]:
-    """Read and validate the assigned root table."""
-    roots: dict[str, dict[str, str]] = {}
-    parser = DomainListParser()
-    for row in read_csv(
-        path,
-        (
-            "registrable_domain",
-            "delegation_config_source_id",
-            "delegation_behavior_fingerprint",
-        ),
-    ):
-        domain = row.pop("registrable_domain")
-        if not domain or domain in roots:
-            raise ValueError("invalid or duplicate assigned root")
-        parsed = parser.parse_source_item(domain, file_format=InputFileFormat.PLAIN)
-        if (
-            parsed is None
-            or parsed.error_reason is not None
-            or len(parsed.targets) != 1
-            or parsed.targets[0].error_reason is not None
-            or parsed.targets[0].host != domain
-            or parsed.targets[0].registrable_domain != domain
-        ):
-            raise ValueError(f"assigned root is not a valid registrable domain: {domain!r}")
-        roots[domain] = row
-    return roots

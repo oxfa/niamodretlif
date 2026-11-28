@@ -30,7 +30,6 @@ from domain_pipeline.worker.output.invariants import DuplicateOutputInvariantErr
 from domain_pipeline.worker.status.lifecycle import (
     STATUS_FAILURE,
 )
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.worker.status.store import WorkerStatusStore
 
 logger = logging.getLogger(__name__)
@@ -128,43 +127,44 @@ class AggregateBatchRunner:
             return readiness
         status_payloads = readiness["status_payloads"]
         try:
+            source_items = self.services.checker.source_items_for_batch(batch_id)
+            input_domain_routes = self.services.output_merger.validate_worker_results(
+                source_items,
+                prepare_manifest.manually_added_domains,
+                [
+                    manifest
+                    for manifest in worker_manifests
+                    if manifest.handoff_finalized
+                ],
+            )
             unactionable_domains = (
-                self.services.output_merger.collect_host_value_payloads(
-                    [
-                        (
-                            manifest.worker_id,
-                            manifest.unactionable_registrable_domains,
-                        )
-                        for manifest in worker_manifests
-                        if manifest.handoff_finalized
-                    ]
+                self.services.output_merger.unactionable_input_domains(
+                    input_domain_routes
                 )
             )
-            source_items = self.services.checker.source_items_for_batch(batch_id)
             for filtered_output in (
                 prepare_manifest.aggregate_output_spec.resolve_filtered(state_root)
             ):
                 self.services.output_merger.write_filtered_source_items(
                     source_items,
-                    unactionable_domains,
+                    input_domain_routes,
                     prepare_manifest.manually_added_domains,
                     filtered_output,
                 )
             self.services.output_merger.merge_host_value_payloads(
-                [
-                    (
-                        manifest.worker_id,
-                        manifest.unactionable_registrable_domains,
-                    )
-                    for manifest in worker_manifests
-                    if manifest.handoff_finalized
-                ],
+                [("input_domain_results", unactionable_domains)],
                 final_output_paths["unactionable"],
             )
             self.services.output_merger.merge_audit_payloads(
                 [
                     *[
-                        (manifest.worker_id, manifest.terminal_rows)
+                        (
+                            manifest.worker_id,
+                            [
+                                *manifest.registrable_domain_results,
+                                *manifest.input_domain_results,
+                            ],
+                        )
                         for manifest in worker_manifests
                         if manifest.handoff_finalized
                     ],
@@ -179,7 +179,7 @@ class AggregateBatchRunner:
                         for manifest in worker_manifests
                         if manifest.handoff_finalized
                     ],
-                    ("prepare", prepare_manifest.preparation_review_output_rows),
+                    ("prepare", prepare_manifest.preparation_review_rows),
                 ],
                 final_output_paths["review"],
             )
@@ -262,7 +262,6 @@ class AggregateBatchRunner:
             target_path=context.final_output_paths["cache"],
         )
         failure_payload = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": context.batch_id,
             "failed_status_count": 0,
             "written_at": utc_now(),
@@ -444,7 +443,7 @@ class AggregateBatchRunner:
                     "final_log_path": prepare_manifest.aggregate_output_spec.log,
                     "final_cache_path": prepare_manifest.aggregate_output_spec.cache,
                     "preparation_review_row_count": len(
-                        prepare_manifest.preparation_review_output_rows
+                        prepare_manifest.preparation_review_rows
                     ),
                     "preparation_terminal_row_count": len(
                         prepare_manifest.preparation_terminal_rows

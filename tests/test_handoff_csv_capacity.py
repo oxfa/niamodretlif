@@ -11,7 +11,6 @@ from pathlib import Path
 import yaml
 
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.prepare.batch_writer import PreparedBatchWriter
 from domain_pipeline.prepare.config.loader import load_config_without_runtime_credentials
 from domain_pipeline.prepare.config.models import InputConfig
@@ -19,13 +18,16 @@ from domain_pipeline.prepare.planner import PreparationPlanner
 from domain_pipeline.prepare.prepare_to_aggregate_manifest import (
     load_prepare_aggregate_manifest_for_batch,
 )
+from domain_pipeline.prepare.source_items import SourceItemHandoff
 from domain_pipeline.worker.output.rows import REVIEW_OUTPUT_COLUMNS
 from domain_pipeline.worker.worker_to_aggregate_manifest import _read_review_rows
 from worker_artifact_correlation import validate_archive
 
 
-def test_prepare_review_label_round_trips_beyond_csv_default(tmp_path: Path) -> None:
-    """A valid source label survives prepare production and aggregate loading."""
+def test_public_suffix_item_preserves_provenance_without_review(
+    tmp_path: Path,
+) -> None:
+    """A valid public-suffix-only target keeps provenance without a review row."""
     original_limit = csv.field_size_limit()
     try:
         csv.field_size_limit(131072)
@@ -46,40 +48,60 @@ def test_prepare_review_label_round_trips_beyond_csv_default(tmp_path: Path) -> 
         result = load_prepare_aggregate_manifest_for_batch(
             batch_id="batch", state_root=tmp_path
         )
-        assert result.preparation_review_output_rows[0]["source_input_label"] == label
+        assert result.preparation_review_rows == []
+
+        paths = PathLayout(tmp_path).workflow_state
+        source_items = SourceItemHandoff.load(
+            batch_id="batch",
+            items_path=paths.batch_source_items_path(batch_id="batch"),
+            index_path=paths.batch_source_item_index_path(batch_id="batch"),
+            diagnostics_path=paths.batch_source_item_diagnostics_path(
+                batch_id="batch"
+            ),
+        )
+        assert source_items.index_payload["sources"][0]["source_label"] == label
+        assert source_items.item_records[0]["source_label"] == label
+        assert source_items.index_payload[
+            "valid_source_items_without_extractable_registrable_domain"
+        ] == [
+            {
+                "item_id": "block:1",
+                "association_id": "block:1:target:1",
+                "reason": "public_suffix_only",
+            }
+        ]
     finally:
         csv.field_size_limit(original_limit)
 
 
-def test_worker_review_accepts_long_source_label(tmp_path: Path) -> None:
-    """Worker review reading accepts producer-sized labels."""
+def test_worker_review_accepts_long_input_domain_reason(tmp_path: Path) -> None:
+    """Worker review reading accepts a long source-blind reason field."""
     original_limit = csv.field_size_limit()
     try:
         csv.field_size_limit(131072)
-        label = "x" * 131073
+        reason = "x" * 131073
         review = tmp_path / "review.csv"
         with review.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=REVIEW_OUTPUT_COLUMNS)
             writer.writeheader()
-            writer.writerow({"host": "example.com", "source_input_label": label})
-        assert _read_review_rows(review)[0]["source_input_label"] == label
+            writer.writerow({"host": "example.com", "review_reason": reason})
+        assert _read_review_rows(review)[0]["review_reason"] == reason
     finally:
         csv.field_size_limit(original_limit)
 
 
-def test_worker_archive_accepts_long_source_label() -> None:
-    """Archive validation accepts producer-sized review fields."""
+def test_worker_archive_accepts_long_source_blind_review_field() -> None:
+    """Archive validation accepts producer-sized source-blind review fields."""
     original_limit = csv.field_size_limit()
     try:
         csv.field_size_limit(131072)
-        label = "x" * 131073
+        reason = "x" * 131073
         review = io.StringIO(newline="")
         writer = csv.DictWriter(review, fieldnames=REVIEW_OUTPUT_COLUMNS)
         writer.writeheader()
-        writer.writerow({"host": "example.com", "source_input_label": label})
+        writer.writerow({"host": "example.com", "review_reason": reason})
         paths = PathLayout(Path(".")).workflow_state
         state = {
-            "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
             "batch_id": "batch",
             "worker_id": "worker-1",
             "handoff_finalized": True,
@@ -96,15 +118,21 @@ def test_worker_archive_accepts_long_source_label() -> None:
             paths.worker_handoff_review_path(
                 batch_id="batch", worker_id="worker-1"
             ): review.getvalue(),
-            paths.worker_handoff_terminal_path(
+            paths.worker_handoff_domain_results_path(
                 batch_id="batch", worker_id="worker-1"
-            ): "---\n[]\n",
+            ): '{"input_domain_results":[],"registrable_domain_results":[]}\n',
             paths.worker_status_path(batch_id="batch", worker_id="worker-1"): yaml.safe_dump(
                 {
-                    "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                     "batch_id": "batch",
                     "worker_id": "worker-1",
                     "conclusion": "success",
+                    "commit_sha_produced": "",
+                    "timestamps": {
+                        "started_at": "2026-11-25T00:00:00Z",
+                        "finished_at": "2026-11-25T00:00:01Z",
+                    },
+                    "retry_count": 0,
+                    "failure_reason": None,
                 }
             ),
         }

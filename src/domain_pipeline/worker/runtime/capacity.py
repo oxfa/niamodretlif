@@ -18,6 +18,7 @@ from domain_pipeline.worker.runtime.adaptive import (
     AdaptiveDNSPressureState,
     AdaptiveDNSProviderCounts,
 )
+from domain_pipeline.worker.runtime.dns_factory import RuntimeDNSCheckerFactory
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 
 
@@ -74,24 +75,25 @@ def _capacity_group(
 def discover_dns_capacity_groups(
     loader: RuntimeItemLoader,
 ) -> RuntimeDNSCapacityGroups:
-    """Discover adaptive DNS capacity groups from runtime source contexts."""
+    """Discover adaptive DNS capacity groups from assigned effective profiles."""
     delegation_groups: set[DNSStageCapacityGroup] = set()
     host_resolution_groups: set[DNSStageCapacityGroup] = set()
-    for source_context in loader.source_contexts():
-        dns_config = {
-            **dict(source_context.config["dns_query"]),
-            "delegation": dict(source_context.config["delegation"]),
-            "host_resolution": dict(source_context.config["host_resolution"]),
-        }
+    factory = RuntimeDNSCheckerFactory()
+    for root_work in loader.delegation_work_items():
+        dns_config = factory.config_for_delegation_profile(
+            root_work.delegation_profile
+        )
         delegation_groups.update(
             _stage_capacity_groups(delegation_stage_dns_profile(dns_config))
         )
-        host_config = dict(source_context.config["host_resolution"])
-        if not host_config.get("enabled", False):
-            continue
-        host_resolution_groups.update(
-            _stage_capacity_groups(host_resolution_dns_profile(dns_config))
-        )
+        for input_domain in root_work.items:
+            host_profile = input_domain.host_resolution_profile
+            if host_profile is None:
+                continue
+            host_config = factory.config_for_host_resolution_profile(host_profile)
+            host_resolution_groups.update(
+                _stage_capacity_groups(host_resolution_dns_profile(host_config))
+            )
     return RuntimeDNSCapacityGroups(
         delegation=tuple(sorted(delegation_groups)),
         host_resolution=tuple(sorted(host_resolution_groups)),

@@ -12,7 +12,8 @@ from domain_pipeline.worker.runtime.constants import (
     RESULT_QUEUE_SIZE,
 )
 from domain_pipeline.worker.runtime.contracts import (
-    CompletedHostResult,
+    CompletedInputDomainResult,
+    RegistrableDomainResult,
     DelegationRootWorkItem,
     IpLocationWorkItem,
     HostResolutionWorkItem,
@@ -26,7 +27,9 @@ class RuntimeQueueSet:
     delegation_input: asyncio.Queue[DelegationRootWorkItem | None]
     delegation_to_host_resolution: asyncio.Queue[HostResolutionWorkItem | None]
     host_resolution_to_ip_location: asyncio.Queue[IpLocationWorkItem | None]
-    result_queue: asyncio.Queue[CompletedHostResult | None]
+    result_queue: asyncio.Queue[
+        CompletedInputDomainResult | RegistrableDomainResult | None
+    ]
 
     @classmethod
     def create(cls) -> "RuntimeQueueSet":

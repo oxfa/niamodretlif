@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from domain_pipeline.paths import PathLayout
-from domain_pipeline.pipeline_run.format_version import PIPELINE_RUN_FORMAT_VERSION
 from domain_pipeline.pipeline_run.handoffs import (
     HandoffRequest,
     _identity,
@@ -30,7 +29,6 @@ def _prepare_files(root: Path) -> dict[str, bytes]:
     base = f".workflow_state/batches/{BATCH}"
     files = {
         f"{base}/output-config.yaml": (
-            f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION}\n"
             f"batch_id: {BATCH}\nconfig_name: block\nexcluded_source_hosts: []\n"
         ).encode(),
         f"{base}/worker-ids.csv": b"worker_id\nworker-01\nworker-02\n",
@@ -44,7 +42,6 @@ def _prepare_files(root: Path) -> dict[str, bytes]:
         f"{base}/source-items.jsonl": b"",
         f"{base}/source-item-index.json": json.dumps(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": BATCH,
                 "sources": [],
                 "valid_source_items_by_registrable_domain": {},
@@ -65,17 +62,11 @@ def _worker_files(
     base = f".workflow_state/batches/{BATCH}/workers/{worker}"
     files = {
         f"{base}/runtime-config.yaml": (
-            f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION}\n"
             f"batch_id: {batch_id}\nworker_id: {worker}\n"
             "config_name: block\nruntime_spec: {}\n"
         ).encode(),
-        f"{base}/assigned-roots.csv": (
-            b"registrable_domain,delegation_config_source_id,"
-            b"delegation_behavior_fingerprint\n"
-        ),
         f"{base}/worker-identity.json": json.dumps(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": batch_id,
                 "worker_id": worker,
             }
@@ -101,7 +92,6 @@ def test_prepare_handoffs_preserve_canonical_members() -> None:
     base = f".workflow_state/batches/{BATCH}"
     worker_paths = [
         f"{base}/workers/worker-01/runtime-config.yaml",
-        f"{base}/workers/worker-01/assigned-roots.csv",
         f"{base}/workers/worker-01/worker-identity.json",
     ]
     worker = layout.prepare_to_worker.members(batch_id=BATCH, worker_id="worker-01")
@@ -144,9 +134,9 @@ def test_worker_handoff_contains_only_its_own_members() -> None:
     )
     base = f".workflow_state/worker-results/{BATCH}/worker-02"
     names = [
-        f"{base}/unactionable-registrable-domains.txt",
-        f"{base}/review-results-by-registrable-domain.csv",
-        f"{base}/terminal.yaml",
+        f"{base}/unactionable-input-domains.txt",
+        f"{base}/review-results-by-input-domain.csv",
+        f"{base}/domain-results.jsonl",
         f"{base}/cache.sqlite3",
         f"{base}/handoff-state.yaml",
         f".workflow_state/status/{BATCH}/worker-02.yaml",
@@ -200,7 +190,7 @@ def test_worker_staging_contains_one_isolated_bundle_per_worker(
         assert _files(destination / worker) == expected[worker]
 
 
-@pytest.mark.parametrize("missing_index", [0, 1, 2])
+@pytest.mark.parametrize("missing_index", [0, 1])
 def test_worker_staging_validator_rejects_missing_declared_member(
     tmp_path: Path, missing_index: int
 ) -> None:
@@ -279,7 +269,6 @@ def test_failed_worker_stages_only_available_members(tmp_path: Path) -> None:
     log = f".debug_artifacts/workers/{BATCH}/worker-01/logs/worker.log"
     values = {
         status: (
-            f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION}\n"
             f"batch_id: {BATCH}\nworker_id: worker-01\n"
         ).encode(),
         log: b"partial log\n",
@@ -309,18 +298,38 @@ def test_restore_rejects_producer_identity_mismatch(tmp_path: Path) -> None:
         restore_handoff(
             state_root=tmp_path / "restored",
             source=source,
-            request=HandoffRequest("prepare-worker", BATCH, worker_id="worker-01"),
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
         )
+
+
+def test_restore_requires_worker_config_identity(tmp_path: Path) -> None:
+    """Worker restore fails closed when the expected config is not supplied."""
+    source = tmp_path / "source"
+    _worker_files(source, "worker-01")
+    restored = tmp_path / "restored"
+
+    with pytest.raises(ValueError, match="worker config name is required"):
+        restore_handoff(
+            state_root=restored,
+            source=source,
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01"
+            ),
+        )
+
+    assert not restored.exists()
 
 
 @pytest.mark.parametrize(
     "runtime_config",
     [
-        f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION + 1}\n"
-        f"batch_id: {BATCH}\nworker_id: worker-01\n"
+        "batch_id: other-batch\nworker_id: worker-01\n"
         "config_name: block\nruntime_spec: {}\n",
-        f"batch_id: {BATCH}\nworker_id: worker-01\n"
+        f"batch_id: {BATCH}\nworker_id: worker-02\n"
         "config_name: block\nruntime_spec: {}\n",
+        "worker_id: worker-01\nconfig_name: block\nruntime_spec: {}\n",
     ],
 )
 def test_restore_rejects_invalid_runtime_identity_before_copy(
@@ -336,7 +345,9 @@ def test_restore_rejects_invalid_runtime_identity_before_copy(
         restore_handoff(
             state_root=restored,
             source=source,
-            request=HandoffRequest("prepare-worker", BATCH, worker_id="worker-01"),
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
         )
     assert not restored.exists()
 
@@ -347,23 +358,21 @@ def test_restore_rejects_invalid_runtime_identity_before_copy(
         b"not-json\n",
         json.dumps(
             {
-                "automation_format_version": float(PIPELINE_RUN_FORMAT_VERSION),
                 "batch_id": BATCH,
                 "worker_id": "worker-01",
+                "extra": "not part of the identity",
             }
         ).encode(),
         json.dumps(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION,
                 "batch_id": BATCH,
                 "worker_id": "worker-02",
             }
         ).encode(),
         json.dumps(
             {
-                "automation_format_version": PIPELINE_RUN_FORMAT_VERSION + 1,
                 "batch_id": BATCH,
-                "worker_id": "worker-01",
+                "worker_id": "",
             }
         ).encode(),
     ],
@@ -383,7 +392,9 @@ def test_restore_rejects_invalid_worker_identity_before_copy(
         restore_handoff(
             state_root=restored,
             source=source,
-            request=HandoffRequest("prepare-worker", BATCH, worker_id="worker-01"),
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
         )
     assert not restored.exists()
 
@@ -397,7 +408,9 @@ def test_restore_rejects_unexpected_member(tmp_path: Path) -> None:
         restore_handoff(
             state_root=tmp_path / "restored",
             source=source,
-            request=HandoffRequest("prepare-worker", BATCH, worker_id="worker-01"),
+            request=HandoffRequest(
+                "prepare-worker", BATCH, worker_id="worker-01", config_name="block"
+            ),
         )
 
 
@@ -413,58 +426,17 @@ def test_restore_rejects_aggregate_config_identity_mismatch(tmp_path: Path) -> N
         )
 
 
-@pytest.mark.parametrize(
-    "format_line",
-    [
-        f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION + 1}\n",
-        "",
-    ],
-)
-def test_restore_rejects_invalid_prepare_aggregate_format_before_copy(
-    tmp_path: Path, format_line: str
+def test_restore_rejects_worker_status_identity_mismatch_before_copy(
+    tmp_path: Path,
 ) -> None:
-    """Reject an absent or different prepare format before restoring members."""
-    source = tmp_path / "source"
-    _prepare_files(source)
-    config_path = f".workflow_state/batches/{BATCH}/output-config.yaml"
-    _write(
-        source,
-        config_path,
-        (
-            f"{format_line}batch_id: {BATCH}\nconfig_name: block\n"
-            "excluded_source_hosts: []\n"
-        ).encode(),
-    )
-    restored = tmp_path / "restored"
-
-    with pytest.raises(ValueError, match="identity mismatch"):
-        restore_handoff(
-            state_root=restored,
-            source=source,
-            request=HandoffRequest("prepare-aggregate", BATCH, config_name="block"),
-        )
-
-    assert not restored.exists()
-
-
-@pytest.mark.parametrize(
-    "format_line",
-    [
-        f"automation_format_version: {PIPELINE_RUN_FORMAT_VERSION + 1}\n",
-        "",
-    ],
-)
-def test_restore_rejects_invalid_worker_status_format_before_copy(
-    tmp_path: Path, format_line: str
-) -> None:
-    """Reject an absent or different worker status format before restoring."""
+    """Reject a worker status for another batch before restoring members."""
     source = tmp_path / "source"
     status_path = PathLayout(source).workflow_state.worker_status_path(
         batch_id=BATCH, worker_id="worker-01"
     )
     status_path.parent.mkdir(parents=True)
     status_path.write_text(
-        f"{format_line}batch_id: {BATCH}\nworker_id: worker-01\n",
+        f"batch_id: other-batch\nworker_id: worker-01\n",
         encoding="utf-8",
     )
     restored = tmp_path / "restored"

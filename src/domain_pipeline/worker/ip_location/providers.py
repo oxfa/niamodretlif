@@ -371,7 +371,7 @@ class IPInfoLiteProvider(RequestsIPLocationProvider):
             ) from exc
         raise FatalIPLocationCredentialError(
             "IPinfo Lite API token is missing or was not sent; set "
-            "IP_LOCATION_IPINFO_TOKEN or ip_location.token",
+            "IP_LOCATION_IPINFO_TOKEN in the runtime environment",
             failure_reason=IP_LOCATION_FAILURE_REASON_MISSING_API_TOKEN,
         ) from exc
 

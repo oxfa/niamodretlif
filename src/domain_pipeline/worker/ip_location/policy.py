@@ -48,6 +48,11 @@ class IPLocationConfigPolicy:
         self, ip_location_payload: dict[str, Any], *, source_label: str
     ) -> None:
         """Validate runtime credential requirements for one source."""
+        if "token" in ip_location_payload:
+            raise ValueError(
+                f"{source_label} ip_location.token is unsupported; provide "
+                "IP_LOCATION_IPINFO_TOKEN through the runtime environment"
+            )
         if not bool(ip_location_payload.get("enabled")):
             return
         if (
@@ -57,11 +62,8 @@ class IPLocationConfigPolicy:
             return
         if os.environ.get("IP_LOCATION_IPINFO_TOKEN", "").strip():
             return
-        if str(ip_location_payload.get("token", "")).strip():
-            return
         raise ValueError(
-            f"{source_label} ip location requires "
-            "IP_LOCATION_IPINFO_TOKEN or ip_location.token because "
+            f"{source_label} ip location requires IP_LOCATION_IPINFO_TOKEN because "
             "effective_provider resolved to ipinfo_lite"
         )
 

@@ -11,21 +11,21 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from domain_pipeline.routing import (
-    InputValidationRoutingPolicy,
-    TerminalRouteTransition,
+from domain_pipeline.routing import TerminalRouteTransition
+from domain_pipeline.worker.runtime.contracts import (
+    ParsedInputDomain,
+    RegistrableDomainResult,
 )
-from domain_pipeline.worker.runtime.contracts import WorkerSourceContext
 from domain_pipeline.worker.cache.repository import CacheRepository
 from domain_pipeline.worker.cache.service import (
     CacheBundle,
     build_cache_bundle,
 )
-from domain_pipeline.prepare.sources.parser import DomainEntry
 from domain_pipeline.worker.delegation.lookup import DelegationResult
 from domain_pipeline.worker.host_resolution.lookup import (
     HostResolutionResult,
     combine_host_resolution_results,
+    selected_host_resolution_names,
 )
 from domain_pipeline.worker.ip_location.providers import (
     IPLocationResult,
@@ -53,6 +53,7 @@ from domain_pipeline.worker.runtime.capacity import (
 from domain_pipeline.worker.runtime.config_validation import (
     runtime_cache_payload,
     runtime_stage_concurrency_payload,
+    validate_worker_runtime_payload,
 )
 from domain_pipeline.worker.runtime.loading import RuntimeItemLoader
 from domain_pipeline.worker.runtime.lookup_services import (
@@ -323,11 +324,11 @@ def _runtime_host_resolution_stage_enabled(
     *,
     prepared_metadata: dict[str, Any] | None,
 ) -> bool:
-    """Return whether any active source enables host-resolution work."""
+    """Return whether any assigned ordinary input domain enables host resolution."""
     loader = RuntimeItemLoader(config=config, prepared_metadata=prepared_metadata)
     return any(
-        bool(source_context.config["host_resolution"].get("enabled", False))
-        for source_context in loader.source_contexts()
+        item.host_resolution_profile is not None
+        for item in loader.all_input_domains()
     )
 
 
@@ -340,7 +341,12 @@ class PipelineExecutor:
         *,
         prepared_metadata: dict[str, Any] | None = None,
     ) -> None:
+        validate_worker_runtime_payload(config)
         self._input_context = RuntimeInputContext(
+            config=config,
+            prepared_metadata=prepared_metadata,
+        )
+        self._loader = RuntimeItemLoader(
             config=config,
             prepared_metadata=prepared_metadata,
         )
@@ -357,7 +363,12 @@ class PipelineExecutor:
         )
         self._resources = RuntimeWorkerResources(
             cache=RuntimeCacheResources(bundle=cache_bundle),
-            writer=ResultOutputWriter(),
+            writer=ResultOutputWriter(
+                output_spec=dict(config.get("output_spec", {})),
+                expected_input_domains_by_root=(
+                    self._loader.expected_input_domains_by_root()
+                ),
+            ),
             dns_coordinator_state=DNSQueryCoordinatorState(),
         )
         stage_concurrency = _runtime_stage_concurrency_counts(config)
@@ -458,12 +469,15 @@ class PipelineExecutor:
         self._dns_executors.close()
 
     async def lookup_delegation_root(
-        self, source_context: WorkerSourceContext, registrable_domain: str
+        self, delegation_profile: dict[str, Any], registrable_domain: str
     ) -> DelegationResult:
         """Run or join one root-level delegation lookup."""
-        checker = RuntimeDNSCheckerFactory(
+        checker_factory = RuntimeDNSCheckerFactory(
             coordinator_state=self._resources.dns_coordinator_state
-        ).build(source_context.config)
+        )
+        checker = checker_factory.build(
+            checker_factory.config_for_delegation_profile(delegation_profile)
+        )
         resolver_key = checker.delegation_resolver_key()
         task_key = (registrable_domain, resolver_key)
         task = self._delegation_tasks.get(task_key)
@@ -499,29 +513,31 @@ class PipelineExecutor:
         )
 
     async def lookup_host_resolution(
-        self, source_context: WorkerSourceContext, entry: DomainEntry
-    ) -> HostResolutionResult:
-        """Resolve configured names for the input host and registrable domain."""
-        checker = RuntimeDNSCheckerFactory(
-            coordinator_state=self._resources.dns_coordinator_state
-        ).build(source_context.config)
-        target_config = source_context.config["host_resolution"].get("targets", {})
-        hosts: list[str] = []
-        if target_config.get("input_host", True):
-            hosts.append(entry.host)
-        if entry.registrable_domain:
-            if target_config.get("root_domain", False):
-                hosts.append(entry.registrable_domain)
-            hosts.extend(
-                f"{subdomain}.{entry.registrable_domain}"
-                for subdomain in target_config.get("subdomains", ["www"])
-            )
-        hosts = list(dict.fromkeys(hosts))
-        if not hosts:
+        self, parsed: ParsedInputDomain
+    ) -> tuple[HostResolutionResult, list[HostResolutionResult]]:
+        """Resolve the input itself and, for a root input, its selected www name."""
+        host_profile = parsed.host_resolution_profile
+        if host_profile is None:
             raise ValueError(
-                "host_resolution.targets selected no names for "
-                f"{entry.host!r}"
+                f"host resolution is disabled for {parsed.entry.host!r}"
             )
+        checker_factory = RuntimeDNSCheckerFactory(
+            coordinator_state=self._resources.dns_coordinator_state
+        )
+        checker = checker_factory.build(
+            checker_factory.config_for_host_resolution_profile(host_profile)
+        )
+        if parsed.entry.registrable_domain is None:
+            raise ValueError(
+                f"host resolution requires a registrable root: {parsed.entry.host!r}"
+            )
+        hosts = selected_host_resolution_names(
+            input_domain=parsed.entry.host,
+            registrable_domain=parsed.entry.registrable_domain,
+            resolve_www_for_registrable_domain=bool(
+                host_profile["resolve_www_for_registrable_domain"]
+            ),
+        )
         results = await asyncio.gather(
             *(
                 self._lookup_services.dns_cache.lookup_host_resolution(
@@ -532,18 +548,36 @@ class PipelineExecutor:
                 for host in hosts
             )
         )
-        return combine_host_resolution_results(entry.host, list(results))
+        exact_results = list(results)
+        return (
+            combine_host_resolution_results(parsed.entry.host, exact_results),
+            exact_results,
+        )
 
     async def lookup_ip_location(
         self,
-        source_context: WorkerSourceContext,
+        parsed: ParsedInputDomain,
         host_resolution_result: HostResolutionResult,
     ) -> tuple[TerminalRouteTransition, list[IPLocationResult], Any | None]:
         """Run or cache-read the optional IP-location stage and evaluate its policy."""
+        ip_location_profile = parsed.ip_location_profile
+        if ip_location_profile is None:
+            raise ValueError(
+                f"IP location is disabled for {parsed.entry.host!r}"
+            )
         return await self._lookup_services.ip_location.lookup_ip_location(
-            ip_location_config=source_context.config["ip_location"],
+            ip_location_config=ip_location_profile,
             host_resolution_result=host_resolution_result,
         )
+
+    async def put_root_result(
+        self,
+        queue_bundle: RuntimeQueueSet,
+        result: RegistrableDomainResult,
+    ) -> None:
+        """Emit one registrable-domain result to the result collector."""
+        async with self.busy_state.track(BusyReason.RESULT_PUT):
+            await queue_bundle.result_queue.put(result)
 
     async def put_completed(
         self,
@@ -583,37 +617,24 @@ class PipelineExecutor:
             try:
                 if result is None:
                     return
-                self._resources.writer.add(result)
+                if isinstance(result, RegistrableDomainResult):
+                    self._resources.writer.add_root_result(result)
+                else:
+                    self._resources.writer.add(result)
             finally:
                 queue_bundle.result_queue.task_done()
 
     async def _load_delegation_input(
         self, queue_bundle: RuntimeQueueSet, *, send_sentinels: bool = True
     ) -> None:
-        """Seed root-level delegation input from runtime payload entries."""
-        loader = RuntimeItemLoader(
-            config=self.config, prepared_metadata=self.prepared_metadata
-        )
-        root_work_items, terminal_items = loader.delegation_work_items()
+        """Seed root-level delegation input from the canonical worker manifest."""
+        root_work_items = self._loader.delegation_work_items()
         host_item_count = sum(len(work_item.items) for work_item in root_work_items)
         logger.debug(
-            "Async pipeline loader enqueueing delegation roots=%d host_items=%d "
-            "terminal_items=%d",
+            "Async pipeline loader enqueueing delegation roots=%d input_domains=%d",
             len(root_work_items),
             host_item_count,
-            len(terminal_items),
         )
-        for item in terminal_items:
-            await self.put_completed(
-                queue_bundle,
-                CompletedResultRequest(
-                    source_context=item.source_context,
-                    entry=item.entry,
-                    route_transition=InputValidationRoutingPolicy().public_suffix(),
-                    source_id=item.output_source.source_id,
-                    source_input_label=item.output_source.input_label,
-                ),
-            )
         for work_item in root_work_items:
             await queue_bundle.delegation_input.put(work_item)
         if send_sentinels:
