@@ -9696,6 +9696,7 @@
 ||connext-cdn.azureedge.net^
 ||fp-cdn.azureedge.net^
 ||g2insights-cdn.azureedge.net^
+||loader-cdn.azureedge.net^
 ||msadsscale.azureedge.net^
 ||sdtagging.azureedge.net^
 ||wheelioapp.azureedge.net^
@@ -21720,6 +21721,7 @@
 ||datacluster.club^
 ||dataconsumed.com^
 ||datacoral.com^
+||datacoral.io^
 ||datacygnal.io^
 ||unsubscribe.datadelivers.com^
 ||datado.me^
@@ -22538,6 +22540,7 @@
 ||depleterefutation.com^
 ||get.deplike.com^
 ||guitarlearning.deplike.com^
+||deployads.com^
 ||deployfondly.com^
 ||deployinput.com^
 ||plausible.deploymentfromscratch.com^
@@ -23668,6 +23671,7 @@
 ||dkxqafejvrfai.website^
 ||dkxtzubbtmzie.space^
 ||dkzfwhvpezgkk.space^
+||dkzqeqvdfdqyj.com^
 ||dl-rms.com^
 ||dl8.me^
 ||dlads.cn^
@@ -29672,6 +29676,7 @@
 ||ffe390afd658c19dcbf707e0597b846d.de^
 ||fffcb81bb4.com^
 ||ffhuaiwestbtl.site^
+||ffiahobjyrbzoc.com^
 ||ffjqjsiovhjku.site^
 ||ffjzmuwqcpdsq.online^
 ||ffkodbsysvriy.online^
@@ -37123,6 +37128,7 @@
 ||sc.hm.com^
 ||hmadkixrebk.in^
 ||hmafbkrm.com^
+||geoip.hmageo.com^
 ||email.everyonesocial.hmausa.com^
 ||hmbcfccmdpcmg.space^
 ||adbsmetrics.ep.hmc.co.kr^
@@ -40552,6 +40558,7 @@
 ||intellimizeio.com^
 ||intellipopup.com^
 ||intellitxt.com^
+||elqtrk.intelrealsense.com^
 ||intely.cn^
 ||intendwaitresssalty.com^
 ||email.inteng-testing.com^
@@ -42310,6 +42317,7 @@
 ||mm.jgchq.com^
 ||jgdsonmfioxyf.online^
 ||jgdzthrmmhnddc.com^
+||jgfkscpqbais.com^
 ||jghadikzlvvnr.space^
 ||in.jghcy.com^
 ||jgieklrrgjcjp.site^
@@ -57989,6 +57997,7 @@
 ||optimisticcapital.pro^
 ||optimisticirresponsibility.com^
 ||optimix.asia^
+||optimix.cn^
 ||logx.optimizely.com^
 ||rum.optimizely.com^
 ||optimizelyapis.com^
@@ -86045,6 +86054,7 @@
 ||communications.wpcarey.com^
 ||cookies.wpcarey.com^
 ||corporate.wpcarey.com^
+||wpcc.io^
 ||wpcklpeseoivx.online^
 ||wpcnzz.com^
 ||mdws.wpcu.ca^
