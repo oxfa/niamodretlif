@@ -1112,3 +1112,47 @@ def test_aggregate_rejects_overlapping_publish_destinations(tmp_path: Path) -> N
         AggregateBatchRunner().run(batch_id=BATCH, state_root=aggregate_root)
 
     assert not layout.output.publish_worktree_root().exists()
+
+
+def test_worker_ip_evidence_with_unicode_line_separator_survives_restore(
+    tmp_path: Path,
+) -> None:
+    _prepare_and_restore(tmp_path)
+    results = _domain_results_fixture()
+    reviewed_domain = results["input_domain_results"][0]
+    code = RouteCode.IP_LOCATION_TO_REVIEW_POLICY_REJECTED
+    reviewed_domain.update(route_code=code.value, route_reason=ROUTE_REASON_TEXT[code])
+    host_resolution = reviewed_domain["host_resolution_results"][0]
+    host_resolution["dns"].update(a_exists=True, a_nxdomain=False)
+    address = "192.0.2.5"
+    host_resolution["addresses"]["ipv4_addresses"] = [address]
+    region = "North\u2028District"
+    reviewed_domain["ip_location_results"] = [
+        {
+            "ip": address,
+            "provider": "geojs",
+            "country_code": "US",
+            "region_code": "",
+            "region_name": region,
+            "status": "ok",
+            "failure_reason": "",
+        }
+    ]
+    reviewed_domain["ip_location_policy"] = {
+        "status": "rejected",
+        "reason": "fixture policy rejection",
+        "matched_ips": [],
+        "rejected_ips": [address],
+    }
+    _finish_worker(tmp_path, results=results)
+    _correlate_and_restore(tmp_path)
+    aggregate_root = tmp_path / "aggregate"
+
+    outcome = AggregateBatchRunner().run(batch_id=BATCH, state_root=aggregate_root)
+
+    assert outcome["state"] == "aggregated"
+    audit_path = aggregate_root / outcome["final_debug_paths"]["raw_audit"]
+    with audit_path.open(encoding="utf-8") as audit:
+        rows = [json.loads(line) for line in audit]
+    result = next(row for row in rows if row.get("input_domain") == "ads.example.com")
+    assert result["ip_location_results"][0]["region_name"] == region

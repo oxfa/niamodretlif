@@ -360,7 +360,8 @@ def parse_worker_domain_results_jsonl_text(
 ) -> WorkerDomainResultsEnvelope:
     """Parse one JSONL record and reject unknown fields at every result depth."""
     records: list[Any] = []
-    for line_number, line in enumerate(contents.splitlines(), start=1):
+    # Unicode line separators can be part of a JSON string.
+    for line_number, line in enumerate(contents.split("\n"), start=1):
         if not line.strip():
             continue
         value = json.loads(line)
