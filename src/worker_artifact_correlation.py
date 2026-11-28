@@ -24,6 +24,7 @@ import os
 import re
 import stat
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -82,6 +83,17 @@ class GitHubActionsAPI:
         self.token = token
         self._opener = urllib.request.build_opener(_NoRedirect())
 
+    def _open_api(self, request: urllib.request.Request) -> Any:
+        """Retry the same API GET once after a bad gateway response."""
+        try:
+            return self._opener.open(request, timeout=60)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 502:
+                raise
+            exc.close()
+        time.sleep(1)
+        return self._opener.open(request, timeout=60)
+
     def _get(self, path: str, *, redirected: bool = False) -> bytes:
         request = urllib.request.Request(
             self.base + path,
@@ -92,7 +104,7 @@ class GitHubActionsAPI:
             },
         )
         try:
-            with self._opener.open(request, timeout=60) as response:
+            with self._open_api(request) as response:
                 if redirected:
                     raise CorrelationError("expected a download redirect")
                 return response.read()
@@ -102,7 +114,9 @@ class GitHubActionsAPI:
                     f"GitHub API returned HTTP {exc.code}"
                 ) from exc
             if not redirected or exc.code != 302:
-                raise CorrelationError(f"GitHub API returned HTTP {exc.code}") from exc
+                raise CorrelationError(
+                    f"GitHub API returned HTTP {exc.code} for {path}"
+                ) from exc
             location = exc.headers.get("Location", "")
             if urllib.parse.urlparse(location).scheme != "https":
                 raise CorrelationError("invalid download redirect") from exc

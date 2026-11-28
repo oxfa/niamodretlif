@@ -1,4 +1,4 @@
-"""Regression tests for incomplete and rate-limited artifact API responses."""
+"""Regression tests for artifact API failures and recovery."""
 
 from __future__ import annotations
 
@@ -8,11 +8,92 @@ import time
 import urllib.error
 from collections.abc import Callable
 from email.message import Message
+from io import BytesIO
 from types import SimpleNamespace
+from urllib.request import Request
 
 import pytest
 
 import worker_artifact_correlation as correlation
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "path", "redirected"),
+    [
+        ("step_log", (123, 19), "/jobs/123/steps/19/logs", True),
+        ("metadata", (456,), "/artifacts/456", False),
+        ("artifact_zip", (456,), "/artifacts/456/zip", True),
+    ],
+)
+def test_bad_gateway_retries_same_api_get(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    args: tuple[int, ...],
+    path: str,
+    redirected: bool,
+) -> None:
+    api = correlation.GitHubActionsAPI(
+        "https://api.github.com", "oxfa/niamodretlif", "fixture-token"
+    )
+    calls: list[tuple[str, str, str | None]] = []
+    waits: list[float] = []
+    location = "https://example.invalid/download"
+    downloads: list[str] = []
+
+    def open_response(request: Request, **_kwargs: object) -> BytesIO:
+        calls.append(
+            (request.get_method(), request.full_url, request.get_header("Authorization"))
+        )
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url, 502, "Bad Gateway", Message(), None
+            )
+        assert waits == [1]
+        if redirected:
+            headers = Message()
+            headers["Location"] = location
+            raise urllib.error.HTTPError(request.full_url, 302, "Found", headers, None)
+        return BytesIO(b'{"id":456}')
+
+    def download(url: str, **_kwargs: object) -> BytesIO:
+        downloads.append(url)
+        return BytesIO(b"downloaded bytes")
+
+    monkeypatch.setattr(api, "_opener", SimpleNamespace(open=open_response))
+    monkeypatch.setattr(correlation.urllib.request, "urlopen", download)
+    monkeypatch.setattr(time, "sleep", waits.append)
+
+    expected = b"downloaded bytes" if redirected else {"id": 456}
+    assert getattr(api, method)(*args) == expected
+    assert calls == [("GET", api.base + path, "Bearer fixture-token")] * 2
+    assert waits == [1]
+    assert downloads == ([location] if redirected else [])
+
+
+def test_persistent_bad_gateway_reports_the_failed_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = correlation.GitHubActionsAPI(
+        "https://api.github.com", "oxfa/niamodretlif", "fixture-token"
+    )
+    requests: list[str] = []
+    waits: list[float] = []
+
+    def unavailable(request: Request, **_kwargs: object) -> None:
+        requests.append(request.full_url)
+        raise urllib.error.HTTPError(
+            request.full_url, 502, "Bad Gateway", Message(), None
+        )
+
+    monkeypatch.setattr(api, "_opener", SimpleNamespace(open=unavailable))
+    monkeypatch.setattr(time, "sleep", waits.append)
+
+    with pytest.raises(
+        correlation.CorrelationError, match=r"HTTP 502 for /artifacts/456/zip"
+    ):
+        api.artifact_zip(456)
+    assert requests == [api.base + "/artifacts/456/zip"] * 2
+    assert waits == [1]
 
 
 class TruncatedResponse:
