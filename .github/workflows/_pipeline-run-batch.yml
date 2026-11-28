@@ -302,7 +302,7 @@ jobs:
           if [ -s init.json ] && jq -e 'type == "object" and (.conclusion == "success" or .conclusion == "failure")' init.json >/dev/null 2>> init.stderr; then
             init_result_valid=true
             conclusion="$(jq -r '.conclusion' init.json)"
-            error_reason="$(jq -r 'if (.failure_reason | type) == \"string\" then .failure_reason else \"\" end' init.json | tr '\r\n' '  ')"
+            error_reason="$(jq -j 'if (.failure_reason | type) == "string" then .failure_reason else "" end' init.json | tr '\r\n' '  ')"
           else
             conclusion="failure"
             error_reason="worker status initialization failed before returning a valid result (exit status ${init_status})"
@@ -311,7 +311,7 @@ jobs:
           fi
           status_recording_error=""
           if [ "${init_result_valid}" = true ]; then
-            status_recording_error="$(jq -r '.status_recording_error // empty' init.json | tr '\r\n' '  ')"
+            status_recording_error="$(jq -j '.status_recording_error // empty' init.json | tr '\r\n' '  ')"
           fi
           if [ -n "${status_recording_error}" ]; then
             error_reason="${error_reason}; additionally, failure status could not be recorded: ${status_recording_error}"
@@ -366,7 +366,7 @@ jobs:
           cat worker.stderr >&2
           if [ -s worker.json ] && jq -e 'type == "object" and (.overall_conclusion == "success" or .overall_conclusion == "failure")' worker.json >/dev/null; then
             echo "overall_conclusion=$(jq -r '.overall_conclusion' worker.json)" >> "$GITHUB_OUTPUT"
-            error_reason="$(jq -r '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == \"string\" and length > 0)) | join(\"; \" )' worker.json | tr '\r\n' '  ')"
+            error_reason="$(jq -j '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == "string" and length > 0)) | join("; " )' worker.json | tr '\r\n' '  ')"
             if [ "${worker_status}" -ne 0 ] && [ -z "${error_reason}" ]; then
               worker_detail="$(tail -n 10 worker.stderr | tr '\r\n' '  ')"
               error_reason="worker command failed (exit status ${worker_status})${worker_detail:+: ${worker_detail}}"
@@ -415,7 +415,7 @@ jobs:
           cat worker-handoff.stderr >&2
           if [ -s worker-handoff.json ] && jq -e 'type == "object" and (.handoff_finalized == true or .handoff_finalized == false)' worker-handoff.json >/dev/null; then
             echo "handoff_finalized=$(jq -r '.handoff_finalized' worker-handoff.json)" >> "$GITHUB_OUTPUT"
-            error_reason="$(jq -r '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == "string" and length > 0)) | join("; ")' worker-handoff.json | tr '\r\n' '  ')"
+            error_reason="$(jq -j '[.error_reason, (if (.status_recording_error | type) == "string" and .status_recording_error != "" then "failure status could not be recorded: " + .status_recording_error else empty end)] | map(select(type == "string" and length > 0)) | join("; ")' worker-handoff.json | tr '\r\n' '  ')"
             if [ "${handoff_status}" -ne 0 ] && [ -z "${error_reason}" ]; then
               handoff_detail="$(tail -n 10 worker-handoff.stderr | tr '\r\n' '  ')"
               error_reason="worker handoff finalization failed (exit status ${handoff_status})${handoff_detail:+: ${handoff_detail}}"
